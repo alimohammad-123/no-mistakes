@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -183,6 +184,66 @@ func TestIntentStep_ExtractErrorReturnsSkippedNotError(t *testing.T) {
 	}
 	if sctx.Run.Intent != nil {
 		t.Errorf("run.Intent should remain nil on error, got %q", *sctx.Run.Intent)
+	}
+}
+
+func TestIntentStep_UsesNinetySecondExtractionTimeout(t *testing.T) {
+	sctx := newIntentStepContext(t)
+	var remaining time.Duration
+	var hasDeadline bool
+	step := &IntentStep{
+		runIntent: func(ctx context.Context, _ *pipeline.StepContext) (*intent.Result, error) {
+			deadline, ok := ctx.Deadline()
+			hasDeadline = ok
+			remaining = time.Until(deadline)
+			return nil, intent.ErrNoMatch
+		},
+	}
+
+	_, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !hasDeadline {
+		t.Fatalf("intent extraction context had no deadline")
+	}
+	if remaining < 85*time.Second || remaining > 95*time.Second {
+		t.Fatalf("intent extraction timeout = %s, want about 90s", remaining)
+	}
+}
+
+func TestIntentStep_SlowExtractionPastOldTimeoutStillAttachesIntent(t *testing.T) {
+	sctx := newIntentStepContext(t)
+	step := &IntentStep{
+		runIntent: func(ctx context.Context, _ *pipeline.StepContext) (*intent.Result, error) {
+			select {
+			case <-time.After(31 * time.Second):
+				return &intent.Result{
+					Summary:   "user wanted slow transcript summarization to finish",
+					AgentName: "claude",
+					SessionID: "slow-session",
+					Score:     0.92,
+				}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+	}
+
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if outcome == nil || outcome.Skipped {
+		t.Fatalf("expected slow extraction to attach intent, got %+v", outcome)
+	}
+
+	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if persisted.Intent == nil || *persisted.Intent != "user wanted slow transcript summarization to finish" {
+		t.Fatalf("persisted intent = %v, want slow summarization intent", persisted.Intent)
 	}
 }
 
