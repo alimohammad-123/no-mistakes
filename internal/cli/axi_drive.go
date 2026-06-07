@@ -4,14 +4,18 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	toon "github.com/toon-format/toon-go"
 
+	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 )
@@ -58,9 +62,9 @@ func newAxiRunCmd() *cobra.Command {
 		Use:   "run",
 		Short: "Validate your code changes, blocking until a decision point or the outcome",
 		Long: "Triggers a pipeline run for the current branch and drives it. Without\n" +
-			"--yes it blocks until the first approval gate (or the final outcome) and\n" +
+			"--yes it blocks until the first approval gate, CI-ready point, or final outcome and\n" +
 			"prints it. With --yes it auto-resolves every gate (fixing actionable\n" +
-			"findings, then accepting the result) and runs to completion.\n\n" +
+			"findings, then accepting the result) until a decision point or outcome.\n\n" +
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.",
@@ -78,7 +82,7 @@ func newAxiRunCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) and run to completion")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	return cmd
@@ -130,11 +134,11 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 		}
 	}
 
-	run, err := driveRun(ctx, cmd.ErrOrStderr(), env.client, runID, autoYes)
+	run, ciReady, err := driveRun(ctx, cmd.ErrOrStderr(), env.client, runID, autoYes, ciLogReader(env.p))
 	if err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
 	}
-	return renderDriveResult(cmd, run)
+	return renderDriveResult(cmd, run, ciReady)
 }
 
 // activeRunID returns the ID of a non-terminal run for branch and head, or "" if none.
@@ -257,55 +261,94 @@ func rerunParams(repoID, branch string, skipSteps []types.StepName, intent strin
 	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: skipSteps, Intent: intent}
 }
 
-// driveRun polls a run until it reaches an approval gate or a terminal state,
-// streaming step transitions to progress (stderr). When autoApprove is set it
-// resolves each gate and continues; otherwise it returns at the first gate so
-// the caller can surface it for a human/agent decision.
+// driveRun polls a run until it reaches an approval gate, a terminal state, or
+// CI checks pass, streaming step transitions to progress (stderr). When
+// autoApprove is set it resolves each gate and continues; otherwise it returns
+// at the first gate so the caller can surface it for a human/agent decision.
 //
 // Auto-resolution means "agree to fix every finding": a gate with actionable
 // findings is fixed (every finding selected), and the resulting fix_review is
 // accepted; gates with only non-actionable findings are approved. Each step is
 // fixed at most once so a finding the fix cannot clear converges to an approval
 // instead of looping forever.
-func driveRun(ctx context.Context, progress io.Writer, client *ipc.Client, runID string, autoApprove bool) (*ipc.RunInfo, error) {
+//
+// The CI step monitors an open PR until a human merges or closes it (a live
+// status the TUI shows), so it never reaches a terminal state on its own. An
+// agent driving the run must not block on that human action, so once CI checks
+// pass driveRun returns with ciReady=true: the change is validated and the PR is
+// ready for a human to merge. The daemon keeps monitoring in the background.
+// readCILog reads the CI step's log lines for runID; it may be nil (no early
+// stop) and returns nil when no log exists yet.
+func driveRun(ctx context.Context, progress io.Writer, client *ipc.Client, runID string, autoApprove bool, readCILog func(string) []string) (run *ipc.RunInfo, ciReady bool, err error) {
 	pp := &progressPrinter{w: progress, seen: map[string]string{}}
 	fixedSteps := map[string]bool{}
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		run, err := getRunInfo(client, runID)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if run == nil {
-			return nil, fmt.Errorf("run %s not found", runID)
+			return nil, false, fmt.Errorf("run %s not found", runID)
 		}
 		pp.update(run)
 
 		rv := runViewFromIPC(run)
 		if terminalStatus(rv.Status) {
-			return run, nil
+			return run, false, nil
 		}
 		if gate, ok := rv.awaitingStep(); ok {
 			if !autoApprove {
-				return run, nil
+				return run, false, nil
 			}
 			action, findingIDs := gateResolution(gate, fixedSteps[gate.Name])
 			if action == types.ActionFix {
 				fixedSteps[gate.Name] = true
 			}
 			if err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil); err != nil {
-				return nil, fmt.Errorf("auto-resolve %s: %w", gate.Name, err)
+				return nil, false, fmt.Errorf("auto-resolve %s: %w", gate.Name, err)
 			}
 			if err := waitStepLeavesGate(ctx, client, runID, gate.Name, gate.Status); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			continue
 		}
-		if err := sleepCtx(ctx, drivePollInterval); err != nil {
-			return nil, err
+		// CI is green but the PR is unmerged: hand control back rather than
+		// waiting on a human merge. This holds even under autoApprove, since
+		// the agent cannot approve away a human's merge.
+		if readCILog != nil && ciReadyToMerge(rv, readCILog(runID)) {
+			return run, true, nil
 		}
+		if err := sleepCtx(ctx, drivePollInterval); err != nil {
+			return nil, false, err
+		}
+	}
+}
+
+// ciReadyToMerge reports whether the CI step is actively monitoring and its logs
+// show all checks have passed, meaning the PR is ready for a human to merge. It
+// reads CI state through the same parser the TUI uses (see cimonitor) so the two
+// surfaces never disagree about when a run is "done" from the agent's view.
+func ciReadyToMerge(rv runView, ciLogs []string) bool {
+	for _, s := range rv.Steps {
+		if s.Name == string(types.StepCI) {
+			return s.Status == string(types.StepStatusRunning) && cimonitor.ChecksPassed(ciLogs)
+		}
+	}
+	return false
+}
+
+// ciLogReader returns a reader of the CI step's log lines for a run, sourced
+// from the same on-disk log the daemon writes and `axi logs` reads.
+func ciLogReader(p *paths.Paths) func(string) []string {
+	return func(runID string) []string {
+		data, err := os.ReadFile(filepath.Join(p.RunLogDir(runID), string(types.StepCI)+".log"))
+		if err != nil {
+			return nil
+		}
+		return splitLogLines(string(data))
 	}
 }
 
@@ -405,12 +448,27 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// renderDriveResult prints the run snapshot plus either the active gate (exit
-// 0, a normal decision point) or the terminal outcome (exit 0 when passed,
-// exit 1 when blocked, failed, or cancelled).
-func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo) error {
+// renderDriveResult prints the run snapshot plus one of: the active gate (exit
+// 0, a normal decision point), a checks-passed outcome (exit 0, CI is green and
+// the PR is ready for a human to merge), or the terminal outcome (exit 0 when
+// passed, exit 1 when blocked, failed, or cancelled).
+func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool) error {
 	rv := runViewFromIPC(run)
 	fields := []toon.Field{runObjectField(rv)}
+
+	// CI passed but the run is intentionally still monitoring for a human
+	// merge. Report it as a distinct, successful outcome so the agent stops
+	// and asks the user to review and merge instead of waiting.
+	if ciReady {
+		fields = append(fields, toon.Field{Key: "outcome", Value: "checks-passed"})
+		merge := "CI checks passed - the PR is ready. Ask the user to review and merge it."
+		if rv.PRURL != "" {
+			merge = fmt.Sprintf("CI checks passed - the PR is ready. Ask the user to review and merge it: %s", rv.PRURL)
+		}
+		fields = append(fields, toon.Field{Key: "help", Value: []string{merge}})
+		emitDoc(cmd, fields...)
+		return nil
+	}
 
 	if gate, ok := rv.awaitingStep(); ok {
 		fields = append(fields, gateFields(gate)...)
@@ -441,7 +499,7 @@ func newAxiRespondCmd() *cobra.Command {
 		Use:   "respond",
 		Short: "Answer the current approval gate and continue the run",
 		Long: "Sends approve/fix/skip for the step currently awaiting approval, then\n" +
-			"blocks until the next gate or the final outcome.",
+			"blocks until the next gate, CI-ready decision point, or final outcome.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -463,7 +521,7 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated finding IDs to fix (with --action fix)")
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix (with --action fix)")
-	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every subsequent gate to completion")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every subsequent gate until a decision point or outcome")
 	return cmd
 }
 
@@ -561,11 +619,11 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		return emitError(cmd, 1, fmt.Sprintf("wait for %s: %v", stepName, err))
 	}
 
-	final, err := driveRun(ctx, cmd.ErrOrStderr(), env.client, runID, ra.autoYes)
+	final, ciReady, err := driveRun(ctx, cmd.ErrOrStderr(), env.client, runID, ra.autoYes, ciLogReader(env.p))
 	if err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
 	}
-	return renderDriveResult(cmd, final)
+	return renderDriveResult(cmd, final, ciReady)
 }
 
 // gateStatusFor returns the current status of step in rv, defaulting to the
