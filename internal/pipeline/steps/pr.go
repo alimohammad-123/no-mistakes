@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/conventional"
@@ -31,6 +32,21 @@ var prContentSchema = json.RawMessage(`{
 	},
 	"required": ["title", "body"]
 }`)
+
+const (
+	githubPullRequestBodyHardLimitChars = 65536
+	// Count bytes, not runes, so multi-byte markdown still stays under
+	// GitHub's character limit with room for provider-side formatting drift.
+	pullRequestBodySafetyBufferBytes = 2048
+	maxPullRequestBodyBytes          = githubPullRequestBodyHardLimitChars - pullRequestBodySafetyBufferBytes
+	minLatestPipelineUpdateBytes     = 256
+)
+
+type pipelineUpdateGroup struct {
+	header string
+	units  []string
+	footer string
+}
 
 func (s *PRStep) Name() types.StepName { return types.StepPR }
 
@@ -175,8 +191,7 @@ Diff stat:
 				if content.Title != originalTitle {
 					slog.Warn("tightened agent PR title type", "from", originalTitle, "to", content.Title)
 				}
-				content.Body = appendGeneratedSections(content.Body, riskLine, testingMD, pipelineMD)
-				content.Body = prependIntentSection(content.Body, sctx)
+				content.Body = buildPRBody(content.Body, riskLine, testingMD, pipelineMD, sctx)
 				return content, nil
 			}
 		}
@@ -226,19 +241,602 @@ func unwrapNestedPRBody(body string) string {
 	return body
 }
 
-// appendGeneratedSections appends deterministic sections after the agent's body.
+// appendGeneratedSections appends deterministic sections after the agent's body
+// and applies the PR body length guard.
 func appendGeneratedSections(body, riskLine, testingMD, pipelineMD string) string {
 	body = stripGeneratedSections(body)
+	return appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD)
+}
+
+func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext) string {
+	body = stripGeneratedSections(body)
+	body = prependIntentSection(body, sctx)
+	return appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD)
+}
+
+func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD string) string {
+	generatedSections := generatedEssentialSections(riskLine, testingMD)
+	prefix := body + generatedSections
+	if pipelineMD == "" {
+		return essentialPRBodyWithinLimit(body, generatedSections)
+	}
+
+	separator := ""
+	if prefix != "" {
+		separator = "\n\n"
+	}
+	if len(prefix+separator+pipelineMD) <= maxPullRequestBodyBytes {
+		return prefix + separator + pipelineMD
+	}
+
+	prefix = essentialPRBodyWithinPipelineBudget(body, generatedSections, pipelineMD)
+	return appendPipelineSectionWithinLimit(prefix, pipelineMD)
+}
+
+func generatedEssentialSections(riskLine, testingMD string) string {
+	var b strings.Builder
 	if riskLine != "" {
-		body += "\n\n## Risk Assessment\n\n" + riskLine
+		b.WriteString("\n\n## Risk Assessment\n\n")
+		b.WriteString(riskLine)
 	}
 	if testingMD != "" {
-		body += "\n\n" + testingMD
+		b.WriteString("\n\n")
+		b.WriteString(testingMD)
 	}
-	if pipelineMD != "" {
-		body += "\n\n" + pipelineMD
+	return b.String()
+}
+
+func essentialPRBodyWithinLimit(body, generatedSections string) string {
+	return essentialPRBodyWithinBudget(body, generatedSections, maxPullRequestBodyBytes)
+}
+
+func essentialPRBodyWithinPipelineBudget(body, generatedSections, pipelineMD string) string {
+	minPipeline := minimumPipelineRetainingLatestUpdate(pipelineMD)
+	if minPipeline == "" {
+		minPipeline = minimumPipelineOmissionSection(pipelineMD)
+		if minPipeline == "" {
+			return essentialPRBodyWithinLimit(body, generatedSections)
+		}
 	}
-	return body
+
+	prefixBudget := maxPullRequestBodyBytes - len(minPipeline)
+	if body != "" || generatedSections != "" {
+		prefixBudget -= len("\n\n")
+	}
+	if prefixBudget <= 0 || len(generatedSections) > prefixBudget {
+		return essentialPRBodyWithinLimit(body, generatedSections)
+	}
+	return essentialPRBodyWithinBudget(body, generatedSections, prefixBudget)
+}
+
+func essentialPRBodyWithinBudget(body, generatedSections string, maxBytes int) string {
+	full := body + generatedSections
+	if len(full) <= maxBytes {
+		return full
+	}
+	if generatedSections == "" {
+		return truncateTextAtLineBoundary(body, maxBytes, essentialPRBodyTruncationMarker())
+	}
+
+	bodyBudget := maxBytes - len(generatedSections)
+	if bodyBudget <= 0 {
+		return truncateTextAtLineBoundary(generatedSections, maxBytes, essentialPRBodyTruncationMarker())
+	}
+	return truncatePRBodySections(body, bodyBudget, essentialPRBodyTruncationMarker()) + generatedSections
+}
+
+func appendPipelineSectionWithinLimit(prefix, pipelineMD string) string {
+	separator := ""
+	if prefix != "" {
+		separator = "\n\n"
+	}
+	full := prefix + separator + pipelineMD
+	if len(full) <= maxPullRequestBodyBytes {
+		return full
+	}
+
+	pipelineBudget := maxPullRequestBodyBytes - len(prefix) - len(separator)
+	if pipelineBudget <= 0 {
+		return truncateEssentialPRBodyIfNeeded(prefix)
+	}
+
+	truncatedPipeline := truncatePipelineSection(pipelineMD, pipelineBudget)
+	if truncatedPipeline == "" {
+		return prefix
+	}
+	candidate := prefix + separator + truncatedPipeline
+	if len(candidate) <= maxPullRequestBodyBytes {
+		return candidate
+	}
+	if len(prefix) <= maxPullRequestBodyBytes {
+		return prefix
+	}
+	return truncateEssentialPRBodyIfNeeded(prefix)
+}
+
+func truncatePipelineSection(pipelineMD string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(pipelineMD) <= maxBytes {
+		return pipelineMD
+	}
+
+	header, updates := splitPipelineSectionHeader(pipelineMD)
+	groups := parsePipelineUpdateGroups(updates)
+	totalUnits := countPipelineUpdateUnits(groups)
+	if totalUnits == 0 {
+		return pipelineOmissionSectionWithinLimit(header, 0, maxBytes)
+	}
+
+	for omitted := 1; omitted < totalUnits; omitted++ {
+		candidate := renderPipelineWithOmittedUpdates(header, groups, omitted)
+		if len(candidate) <= maxBytes {
+			return candidate
+		}
+	}
+
+	if candidate := renderPipelineWithTruncatedLatestUpdate(header, groups, maxBytes); candidate != "" {
+		return candidate
+	}
+
+	return pipelineOmissionSectionWithinLimit(header, totalUnits, maxBytes)
+}
+
+func minimumPipelineOmissionSection(pipelineMD string) string {
+	header, updates := splitPipelineSectionHeader(pipelineMD)
+	totalUnits := countPipelineUpdateUnits(parsePipelineUpdateGroups(updates))
+	return header + pipelineUpdatesOmissionMarker(totalUnits) + "\n"
+}
+
+func minimumPipelineRetainingLatestUpdate(pipelineMD string) string {
+	header, updates := splitPipelineSectionHeader(pipelineMD)
+	groups := parsePipelineUpdateGroups(updates)
+	totalUnits := countPipelineUpdateUnits(groups)
+	if totalUnits == 0 {
+		return ""
+	}
+
+	group, unit, ok := latestPipelineUpdateUnit(groups)
+	if !ok {
+		return ""
+	}
+
+	omitted := totalUnits - 1
+	var b strings.Builder
+	b.WriteString(header)
+	if omitted > 0 {
+		b.WriteString(pipelineUpdatesOmissionMarker(omitted))
+		b.WriteString("\n\n")
+	}
+	b.WriteString(group.header)
+
+	unitBudget := len(unit)
+	if unitBudget > minLatestPipelineUpdateBytes {
+		unitBudget = minLatestPipelineUpdateBytes + len("\n\n") + len(pipelineLatestUpdateTruncationMarker())
+	}
+	if group.footer != "" {
+		unitBudget += len("\n\n") + len(group.footer)
+	}
+
+	return renderPipelineWithTruncatedLatestUpdate(header, groups, b.Len()+unitBudget)
+}
+
+func pipelineOmissionSectionWithinLimit(header string, omitted, maxBytes int) string {
+	markerOnly := header + pipelineUpdatesOmissionMarker(omitted) + "\n"
+	if len(markerOnly) <= maxBytes {
+		return markerOnly
+	}
+	return ""
+}
+
+func splitPipelineSectionHeader(pipelineMD string) (string, string) {
+	const heading = "## Pipeline\n\n"
+	if !strings.HasPrefix(pipelineMD, heading) {
+		return "", pipelineMD
+	}
+
+	rest := pipelineMD[len(heading):]
+	introEnd := strings.Index(rest, "\n\n")
+	if introEnd < 0 {
+		return heading, rest
+	}
+
+	headerEnd := len(heading) + introEnd + len("\n\n")
+	return pipelineMD[:headerEnd], pipelineMD[headerEnd:]
+}
+
+func parsePipelineUpdateGroups(updates string) []pipelineUpdateGroup {
+	var groups []pipelineUpdateGroup
+	rest := updates
+	for strings.TrimSpace(rest) != "" {
+		rest = strings.TrimLeft(rest, "\n")
+		if strings.HasPrefix(rest, "<details>") {
+			end := strings.Index(rest, "</details>")
+			if end >= 0 {
+				end += len("</details>")
+				if end < len(rest) && rest[end] == '\n' {
+					end++
+				}
+				groups = append(groups, parsePipelineDetailsGroup(rest[:end]))
+				rest = rest[end:]
+				continue
+			}
+		}
+
+		nextDetails := strings.Index(rest, "\n<details>")
+		raw := rest
+		if nextDetails >= 0 {
+			raw = rest[:nextDetails]
+			rest = rest[nextDetails+1:]
+		} else {
+			rest = ""
+		}
+		units := splitPipelineUpdateUnits(raw)
+		if len(units) > 0 {
+			groups = append(groups, pipelineUpdateGroup{units: units})
+		}
+	}
+	return groups
+}
+
+func parsePipelineDetailsGroup(raw string) pipelineUpdateGroup {
+	footerStart := strings.LastIndex(raw, "</details>")
+	summaryEnd := strings.Index(raw, "</summary>")
+	if footerStart < 0 || summaryEnd < 0 || summaryEnd > footerStart {
+		return pipelineUpdateGroup{units: splitPipelineUpdateUnits(raw)}
+	}
+
+	contentStart := summaryEnd + len("</summary>")
+	if strings.HasPrefix(raw[contentStart:], "\n\n") {
+		contentStart += len("\n\n")
+	} else if strings.HasPrefix(raw[contentStart:], "\n") {
+		contentStart++
+	}
+
+	footerEnd := footerStart + len("</details>")
+	if footerEnd < len(raw) && raw[footerEnd] == '\n' {
+		footerEnd++
+	}
+
+	return pipelineUpdateGroup{
+		header: raw[:contentStart],
+		units:  splitPipelineUpdateUnits(raw[contentStart:footerStart]),
+		footer: raw[footerStart:footerEnd],
+	}
+}
+
+func splitPipelineUpdateUnits(content string) []string {
+	var units []string
+	var b strings.Builder
+	for _, line := range strings.SplitAfter(content, "\n") {
+		b.WriteString(line)
+		if strings.TrimSpace(line) != "" {
+			continue
+		}
+		if strings.TrimSpace(b.String()) == "" {
+			b.Reset()
+			continue
+		}
+		units = append(units, b.String())
+		b.Reset()
+	}
+	if strings.TrimSpace(b.String()) != "" {
+		units = append(units, b.String())
+	}
+	return units
+}
+
+func countPipelineUpdateUnits(groups []pipelineUpdateGroup) int {
+	total := 0
+	for _, group := range groups {
+		total += len(group.units)
+	}
+	return total
+}
+
+func renderPipelineWithOmittedUpdates(header string, groups []pipelineUpdateGroup, omitted int) string {
+	var b strings.Builder
+	b.WriteString(header)
+	if omitted > 0 {
+		b.WriteString(pipelineUpdatesOmissionMarker(omitted))
+		b.WriteString("\n\n")
+	}
+
+	remainingOmitted := omitted
+	wroteGroup := false
+	for _, group := range groups {
+		if remainingOmitted >= len(group.units) {
+			remainingOmitted -= len(group.units)
+			continue
+		}
+
+		start := remainingOmitted
+		remainingOmitted = 0
+		units := group.units[start:]
+		if len(units) == 0 {
+			continue
+		}
+		if wroteGroup {
+			b.WriteString("\n")
+		}
+		b.WriteString(group.header)
+		for _, unit := range units {
+			b.WriteString(unit)
+		}
+		if group.footer != "" {
+			last := units[len(units)-1]
+			if !strings.HasSuffix(last, "\n\n") {
+				if !strings.HasSuffix(last, "\n") {
+					b.WriteString("\n")
+				}
+				b.WriteString("\n")
+			}
+		}
+		b.WriteString(group.footer)
+		wroteGroup = true
+	}
+
+	return b.String()
+}
+
+func renderPipelineWithTruncatedLatestUpdate(header string, groups []pipelineUpdateGroup, maxBytes int) string {
+	group, unit, ok := latestPipelineUpdateUnit(groups)
+	if !ok {
+		return ""
+	}
+
+	totalUnits := countPipelineUpdateUnits(groups)
+	omitted := totalUnits - 1
+	var b strings.Builder
+	b.WriteString(header)
+	if omitted > 0 {
+		b.WriteString(pipelineUpdatesOmissionMarker(omitted))
+		b.WriteString("\n\n")
+	}
+	b.WriteString(group.header)
+	prefix := b.String()
+
+	footerSeparatorBytes := 0
+	if group.footer != "" {
+		footerSeparatorBytes = len("\n\n")
+	}
+	unitBudget := maxBytes - len(prefix) - len(group.footer) - footerSeparatorBytes
+	if unitBudget <= 0 {
+		return ""
+	}
+
+	marker := pipelineLatestUpdateTruncationMarker()
+	truncatedUnit := truncatePipelineUpdateAtLineBoundary(unit, unitBudget, marker)
+	if truncatedUnit == "" {
+		return ""
+	}
+
+	candidate := prefix + truncatedUnit
+	if group.footer != "" {
+		if !strings.HasSuffix(truncatedUnit, "\n\n") {
+			if !strings.HasSuffix(truncatedUnit, "\n") {
+				candidate += "\n"
+			}
+			candidate += "\n"
+		}
+		candidate += group.footer
+	}
+	if len(candidate) <= maxBytes {
+		return candidate
+	}
+	return ""
+}
+
+func latestPipelineUpdateUnit(groups []pipelineUpdateGroup) (pipelineUpdateGroup, string, bool) {
+	for i := len(groups) - 1; i >= 0; i-- {
+		group := groups[i]
+		for j := len(group.units) - 1; j >= 0; j-- {
+			if strings.TrimSpace(group.units[j]) == "" {
+				continue
+			}
+			return group, group.units[j], true
+		}
+	}
+	return pipelineUpdateGroup{}, "", false
+}
+
+func pipelineUpdatesOmissionMarker(omitted int) string {
+	rounds := "rounds"
+	if omitted == 1 {
+		rounds = "round"
+	}
+	return fmt.Sprintf("_... (%d earlier update %s omitted to keep the PR body within GitHub's %d-char limit; full history is in the run log.)_", omitted, rounds, githubPullRequestBodyHardLimitChars)
+}
+
+func pipelineLatestUpdateTruncationMarker() string {
+	return fmt.Sprintf("_... (latest pipeline update truncated to keep the PR body within GitHub's %d-char limit; full history is in the run log.)_", githubPullRequestBodyHardLimitChars)
+}
+
+func truncateEssentialPRBodyIfNeeded(body string) string {
+	if len(body) <= maxPullRequestBodyBytes {
+		return body
+	}
+	return truncateTextAtLineBoundary(body, maxPullRequestBodyBytes, essentialPRBodyTruncationMarker())
+}
+
+func essentialPRBodyTruncationMarker() string {
+	return fmt.Sprintf("_... (body truncated to keep the PR body within GitHub's %d-char limit.)_", githubPullRequestBodyHardLimitChars)
+}
+
+func truncatePRBodySections(body string, maxBytes int, marker string) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(body) <= maxBytes {
+		return body
+	}
+
+	sections := splitPRBodySections(body)
+	if len(sections) <= 1 {
+		return truncateTextAtLineBoundary(body, maxBytes, marker)
+	}
+
+	for {
+		joined := joinPRBodySections(sections)
+		if len(joined) <= maxBytes {
+			return joined
+		}
+
+		i := largestPRBodySectionIndex(sections)
+		if i < 0 {
+			return truncateTextAtLineBoundary(joined, maxBytes, marker)
+		}
+		sectionBudget := len(sections[i]) - (len(joined) - maxBytes)
+		truncated := truncateTextAtLineBoundary(sections[i], sectionBudget, marker)
+		if len(truncated) >= len(sections[i]) {
+			return truncateTextAtLineBoundary(joined, maxBytes, marker)
+		}
+		sections[i] = truncated
+	}
+}
+
+func largestPRBodySectionIndex(sections []string) int {
+	index := -1
+	length := 0
+	for i, section := range sections {
+		if len(section) <= length {
+			continue
+		}
+		index = i
+		length = len(section)
+	}
+	return index
+}
+
+func splitPRBodySections(body string) []string {
+	if body == "" {
+		return nil
+	}
+
+	var starts []int
+	for start := 0; start < len(body); {
+		end := strings.IndexByte(body[start:], '\n')
+		lineEnd := len(body)
+		next := len(body)
+		if end >= 0 {
+			lineEnd = start + end
+			next = lineEnd + 1
+		}
+		if isPRBodySectionHeading(body[start:lineEnd]) {
+			starts = append(starts, start)
+		}
+		start = next
+	}
+	if len(starts) == 0 || starts[0] != 0 {
+		starts = append([]int{0}, starts...)
+	}
+
+	sections := make([]string, 0, len(starts))
+	for i, start := range starts {
+		end := len(body)
+		if i+1 < len(starts) {
+			end = starts[i+1]
+		}
+		sections = append(sections, body[start:end])
+	}
+	return sections
+}
+
+func isPRBodySectionHeading(line string) bool {
+	line = strings.TrimSpace(line)
+	return strings.HasPrefix(line, "## ") && !strings.HasPrefix(line, "### ")
+}
+
+func joinPRBodySections(sections []string) string {
+	var b strings.Builder
+	for _, section := range sections {
+		if section == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			current := b.String()
+			if !strings.HasSuffix(current, "\n") {
+				b.WriteString("\n")
+			}
+			current = b.String()
+			if !strings.HasSuffix(current, "\n\n") {
+				b.WriteString("\n")
+			}
+			section = strings.TrimLeft(section, "\n")
+		}
+		b.WriteString(section)
+	}
+	return b.String()
+}
+
+func truncateTextAtLineBoundary(text string, maxBytes int, marker string) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(text) <= maxBytes {
+		return text
+	}
+	if marker != "" {
+		marker = "\n\n" + marker
+	}
+	available := maxBytes - len(marker)
+	if available <= 0 {
+		if len(marker) <= maxBytes {
+			return strings.TrimLeft(marker, "\n")
+		}
+		return ""
+	}
+
+	available = utf8BoundaryBefore(text, available)
+	cut := strings.LastIndex(text[:available], "\n")
+	if cut <= 0 {
+		cut = available
+	}
+	return strings.TrimRight(text[:cut], "\n") + marker
+}
+
+func truncatePipelineUpdateAtLineBoundary(text string, maxBytes int, marker string) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(text) <= maxBytes {
+		return text
+	}
+	if marker != "" {
+		marker = "\n\n" + marker
+	}
+	available := maxBytes - len(marker)
+	if available <= 0 {
+		if len(marker) <= maxBytes {
+			return strings.TrimLeft(marker, "\n")
+		}
+		return ""
+	}
+
+	available = utf8BoundaryBefore(text, available)
+	searchEnd := available
+	if searchEnd < len(text) && text[searchEnd] == '\n' {
+		searchEnd++
+	}
+	cut := strings.LastIndex(text[:searchEnd], "\n")
+	if cut <= 0 {
+		return strings.TrimRight(text[:available], "\n") + marker
+	}
+	return strings.TrimRight(text[:cut], "\n") + marker
+}
+
+func utf8BoundaryBefore(text string, n int) int {
+	if n >= len(text) {
+		return len(text)
+	}
+	if n <= 0 {
+		return 0
+	}
+	for n > 0 && !utf8.RuneStart(text[n]) {
+		n--
+	}
+	return n
 }
 
 func stripGeneratedSections(body string) string {
@@ -333,8 +931,7 @@ func fallbackPRContent(sctx *pipeline.StepContext, branch, commitLog, riskLine, 
 	if body == "## What Changed\n\n" {
 		body = fmt.Sprintf("## What Changed\n\n- %s", title)
 	}
-	body = appendGeneratedSections(body, riskLine, testingMD, pipelineMD)
-	body = prependIntentSection(body, sctx)
+	body = buildPRBody(body, riskLine, testingMD, pipelineMD, sctx)
 	return prContent{
 		Title: title,
 		Body:  body,
