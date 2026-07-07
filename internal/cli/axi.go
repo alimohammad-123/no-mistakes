@@ -8,6 +8,7 @@ import (
 
 	toon "github.com/toon-format/toon-go"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -52,10 +53,17 @@ func newAxiCmd() *cobra.Command {
 // axiEnv bundles the resources an axi subcommand needs. Most are DB-backed and
 // do not require the daemon; commands that mutate run state ensure it.
 type axiEnv struct {
-	p      *paths.Paths
-	d      *db.DB
-	repo   *db.Repo
-	client *ipc.Client
+	p               *paths.Paths
+	d               *db.DB
+	repo            *db.Repo
+	cfg             *config.GlobalConfig
+	globalConfigErr error
+	client          *ipc.Client
+}
+
+type axiEnvOptions struct {
+	ensureDaemonConn                       bool
+	deferGlobalConfigErrorForRunningDaemon bool
 }
 
 func (e *axiEnv) close() {
@@ -72,18 +80,44 @@ func (e *axiEnv) close() {
 // the daemon, populating client. Errors are returned for the caller to render
 // as structured TOON.
 func openAxiEnv(ensureDaemonConn bool) (*axiEnv, error) {
+	return openAxiEnvWithOptions(axiEnvOptions{ensureDaemonConn: ensureDaemonConn})
+}
+
+func openAxiDaemonEnv() (*axiEnv, error) {
+	return openAxiEnvWithOptions(axiEnvOptions{ensureDaemonConn: true, deferGlobalConfigErrorForRunningDaemon: true})
+}
+
+func openAxiRunEnv() (*axiEnv, error) {
+	return openAxiDaemonEnv()
+}
+
+func openAxiEnvWithOptions(opts axiEnvOptions) (*axiEnv, error) {
 	p, d, err := openResources()
 	if err != nil {
 		return nil, err
 	}
-	env := &axiEnv{p: p, d: d}
+	globalCfg, err := config.LoadGlobal(p.ConfigFile())
+	if err != nil {
+		if opts.deferGlobalConfigErrorForRunningDaemon {
+			alive, _ := daemon.IsRunning(p)
+			if !alive {
+				d.Close()
+				return nil, err
+			}
+		} else if opts.ensureDaemonConn {
+			d.Close()
+			return nil, err
+		}
+		globalCfg = config.DefaultGlobalConfig()
+	}
+	env := &axiEnv{p: p, d: d, cfg: globalCfg, globalConfigErr: err}
 	repo, err := findRepo(d)
 	if err != nil {
 		d.Close()
 		return nil, err
 	}
 	env.repo = repo
-	if ensureDaemonConn {
+	if opts.ensureDaemonConn {
 		if err := daemon.EnsureDaemon(p); err != nil {
 			env.close()
 			return nil, fmt.Errorf("start daemon: %w", err)
@@ -149,6 +183,7 @@ func runAxiHome(cmd *cobra.Command) error {
 	if currentActive != nil {
 		steps, _ := env.d.GetStepsByRun(currentActive.ID)
 		rv := runViewFromDB(currentActive, steps)
+		annotateRunView(env, &rv)
 		fields = append(fields, runObjectFieldWithKey("active_run", rv))
 		if gate, ok := rv.awaitingStep(); ok {
 			gated = true
@@ -157,6 +192,7 @@ func runAxiHome(cmd *cobra.Command) error {
 	} else if otherActive != nil {
 		steps, _ := env.d.GetStepsByRun(otherActive.ID)
 		rv := runViewFromDB(otherActive, steps)
+		annotateRunView(env, &rv)
 		fields = append(fields, runObjectFieldWithKey("other_branch_active_run", rv))
 	}
 
