@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -35,13 +37,15 @@ type commitSummary struct {
 	Summary string `json:"summary"`
 }
 
-var commitSummarySchema = json.RawMessage(`{
+var errRejectedCommitSummary = errors.New("rejected commit summary")
+
+var commitSummarySchema = json.RawMessage(fmt.Sprintf(`{
 	"type": "object",
 	"properties": {
-		"summary": {"type": "string"}
+		"summary": {"type": "string", "maxLength": %d}
 	},
 	"required": ["summary"]
-}`)
+}`, config.MaxFixMessageSummaryBytes))
 
 // hasBlockingFindings returns true if any finding has error or warning severity.
 func hasBlockingFindings(items []Finding) bool {
@@ -119,13 +123,19 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 		sctx.Log("no agent changes to commit")
 		return nil
 	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
-		return fmt.Errorf("stage %s changes: %w", stepName, err)
-	}
 	if summary == "" {
 		summary = fallbackSummary
 	}
-	commitMessage := deterministicFixCommitMessage(stepName, summary)
+	if summary == "" {
+		summary = "apply fixes"
+	}
+	commitMessage, err := sctx.Config.Commit.RenderFixMessage(stepName, summary)
+	if err != nil {
+		return fmt.Errorf("render %s fix commit message: %w", stepName, err)
+	}
+	if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
+		return fmt.Errorf("stage %s changes: %w", stepName, err)
+	}
 	if _, err := git.Run(ctx, sctx.WorkDir, "commit", "-m", commitMessage); err != nil {
 		return fmt.Errorf("commit %s changes: %w", stepName, err)
 	}
@@ -153,19 +163,18 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 	if result.Output == nil {
 		return "", fmt.Errorf("agent returned no structured summary")
 	}
+	if !utf8.Valid(result.Output) {
+		return "", fmt.Errorf("%w: agent output must contain valid UTF-8", errRejectedCommitSummary)
+	}
 	if err := json.Unmarshal(result.Output, &summary); err != nil {
 		return "", fmt.Errorf("parse commit summary: %w", err)
+	}
+	if len(summary.Summary) > config.MaxFixMessageSummaryBytes {
+		return "", fmt.Errorf("%w: commit summary must not exceed %d bytes", errRejectedCommitSummary, config.MaxFixMessageSummaryBytes)
 	}
 	cleaned := strings.Join(strings.Fields(summary.Summary), " ")
 	cleaned = strings.Trim(cleaned, " \t\r\n\"'.;:,-")
 	return cleaned, nil
-}
-
-func deterministicFixCommitMessage(stepName types.StepName, summary string) string {
-	if summary == "" {
-		summary = "apply fixes"
-	}
-	return fmt.Sprintf("no-mistakes(%s): %s", stepName, summary)
 }
 
 // executeFixMode runs the fix agent and commits any resulting changes. It
@@ -211,6 +220,9 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	}
 	summary, err := extractCommitSummary(result)
 	if err != nil {
+		if errors.Is(err, errRejectedCommitSummary) {
+			return "", fmt.Errorf("validate %s fix summary: %w", stepName, err)
+		}
 		sctx.Log(fmt.Sprintf("warning: could not parse fix summary: %v", err))
 	}
 	if err := commitAgentFixes(sctx, stepName, summary, opts.FallbackSummary); err != nil {
