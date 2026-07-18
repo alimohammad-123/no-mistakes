@@ -71,17 +71,19 @@ test:
 
 Default agent for all repos and setup-wizard suggestions. Can be overridden per-repo.
 
-|         |                                                                                   |
-| ------- | --------------------------------------------------------------------------------- |
-| Type    | `string` or `string[]`                                                            |
-| Values  | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `acp:<target>` |
-| Default | `auto`                                                                            |
+|         |                                                                                             |
+| ------- | ------------------------------------------------------------------------------------------- |
+| Type    | `string` or `string[]`                                                                      |
+| Values  | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `cursor`, `acp:<target>` |
+| Default | `auto`                                                                                      |
 
-`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, then `copilot`.
-`acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`.
-ACP agents are opt-in and are not considered by `agent: auto`.
+`auto` resolves to the first supported native agent or ACP alias in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `cursor`.
+`cursor` is an ACP alias for the `cursor` target with default command `cursor-agent acp`.
+With default paths, `auto` only selects it when both `cursor-agent` and `acpx` resolve; `acp_registry_overrides.cursor` and `acpx_path` replace those respective defaults during availability checks.
+`acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`; `acp:cursor` uses the same default command as `cursor`.
+Arbitrary `acp:<target>` agents are opt-in and are not considered by `agent: auto`.
 The effective agent configuration must resolve to a runnable runner before a new validation gate starts.
-If an explicit agent is unavailable, `auto` finds no native agent, or no fallback-list entry is available, the gate fails before its first pipeline step rather than reporting a partial command-only validation as passed.
+If an explicit agent is unavailable, `auto` finds no native agent or ACP alias, or no fallback-list entry is available, the gate fails before its first pipeline step rather than reporting a partial command-only validation as passed.
 `no-mistakes doctor` checks the global configuration, while every run repeats resolution after applying any trusted repository-level `agent` override.
 
 You can also set an ordered fallback list:
@@ -91,13 +93,14 @@ agent: [codex, claude]
 ```
 
 The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
+After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` provide one fallback and preserve whichever spelling appears first.
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Structured findings and schema/output validation problems do not trigger fallback.
 
 ### acpx_path
 
-Path to the user-installed `acpx` binary used for `agent: acp:<target>`.
+Path to the user-installed `acpx` binary used for `agent: acp:<target>` and ACP aliases such as `agent: cursor`.
 
 |         |          |
 | ------- | -------- |
@@ -108,6 +111,9 @@ Path to the user-installed `acpx` binary used for `agent: acp:<target>`.
 
 Map an ACP target name to a raw ACP agent command.
 When `agent: acp:<target>` matches an override key, no-mistakes runs `acpx --agent <command>` instead of `acpx <target>`.
+ACP aliases use the same target keys. For example, `agent: cursor` and `agent: acp:cursor` resolve to the `cursor` target, so set `cursor` to override the default `cursor-agent acp` command.
+Values are trimmed; a blank or whitespace-only value behaves as no override, so an alias keeps its default command.
+Availability checks always resolve `acpx_path`. They also probe the executable named first in the effective non-blank raw command when it is a bare command name or clean absolute path. Relative, quoted, or escaped raw commands are not pre-probed; `acpx` executes them from the worktree. These checks do not invoke the ACP target or test its credentials.
 
 |         |                     |
 | ------- | ------------------- |
@@ -126,7 +132,7 @@ acp_registry_overrides:
 
 Custom binary paths for native agents.
 When set, `no-mistakes` uses this path instead of looking up the binary on `PATH`.
-ACP agents use `acpx_path` instead.
+ACP agents and aliases use `acpx_path` for the bridge; use `acp_registry_overrides` to replace a raw target command such as `cursor-agent acp`.
 
 |         |                                   |
 | ------- | --------------------------------- |

@@ -6,7 +6,7 @@ description: All fields for .no-mistakes.yaml.
 Per-repo configuration lives in `.no-mistakes.yaml` at the root of your repository.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists and `acp:` targets) with the maintainer's credentials.
+`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
 The daemon also reads `document.instructions` and `disable_project_settings` only from that trusted copy.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
@@ -72,12 +72,14 @@ Override the default agent for this repo and its setup-wizard suggestions.
 | | |
 |---|---|
 | Type | `string` or `string[]` |
-| Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `acp:<target>` |
+| Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `cursor`, `acp:<target>` |
 | Default | Inherits from global config |
 
-`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, then `copilot`.
-`acp:<target>` uses the user-installed `acpx` binary configured in global config.
-ACP agents are opt-in and are not considered by `agent: auto`.
+`auto` resolves to the first supported native agent or ACP alias in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `cursor`.
+`cursor` is an ACP alias for the `cursor` target with default command `cursor-agent acp`.
+Its availability uses the global `acpx_path` and `acp_registry_overrides.cursor` settings when present.
+`acp:<target>` uses the user-installed `acpx` binary configured in global config; `acp:cursor` uses the same default command as `cursor`.
+Arbitrary `acp:<target>` agents are opt-in and are not considered by `agent: auto`.
 The effective agent configuration must resolve to a runnable runner before a new validation gate starts.
 If the selected explicit agent or `auto` is unavailable, the gate fails before its first pipeline step rather than reporting partial validation as passed.
 
@@ -88,6 +90,7 @@ agent: [codex, claude]
 ```
 
 The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
+After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` provide one fallback and preserve whichever spelling appears first.
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Structured findings and schema/output validation problems do not trigger fallback.

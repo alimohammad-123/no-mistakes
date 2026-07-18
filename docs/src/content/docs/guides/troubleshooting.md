@@ -117,10 +117,13 @@ agent_path_override:
   claude: /Users/you/.local/bin/claude
 ```
 
-For `agent: acp:<target>`, set `acpx_path` instead:
+For `agent: acp:<target>` and ACP aliases such as `agent: cursor`, set `acpx_path` for the bridge.
+If the raw target command is also outside `PATH`, set its target key in `acp_registry_overrides`; `agent_path_override` applies only to native agents:
 
 ```yaml
 acpx_path: /Users/you/.local/bin/acpx
+acp_registry_overrides:
+  cursor: /Users/you/.local/bin/cursor-agent acp
 ```
 
 For Antigravity or Gemini-based driving agents, install a supported native agent CLI separately or configure a working ACP target such as `agent: acp:gemini` with `acpx` installed.

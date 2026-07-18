@@ -44,6 +44,8 @@ var canonicalBranchSyncPhrases = []string{
 	"preserved in the local gate",
 }
 
+const canonicalPipelineAgentPrerequisite = "a supported native agent binary, the `agent: cursor` ACP alias, or an explicit `acp:<target>` through `acpx`"
+
 // TestStaleMonitorGuidance_SyncedAcrossSurfaces guards the repo invariant that
 // agent-driving guidance stays in sync across its three surfaces: the skill
 // body, the published agents guide, and the live axi help string. The earlier
@@ -129,6 +131,20 @@ func TestBranchSyncGuidance_SyncedAcrossStaticAndLiveSurfaces(t *testing.T) {
 			if !strings.Contains(content, phrase) {
 				t.Errorf("%s is missing branch-sync guidance phrase %q", name, phrase)
 			}
+		}
+	}
+}
+
+func TestPipelineAgentPrerequisiteGuidance_SyncedAcrossSurfaces(t *testing.T) {
+	surfaces := map[string]string{
+		"skill body":   skill.Markdown(),
+		"agents guide": readAgentsGuide(t),
+		"axi run help": newAxiRunCmd().Long,
+	}
+	for name, content := range surfaces {
+		normalized := strings.Join(strings.Fields(content), " ")
+		if !strings.Contains(normalized, canonicalPipelineAgentPrerequisite) {
+			t.Errorf("%s is missing the canonical pipeline-agent prerequisite %q", name, canonicalPipelineAgentPrerequisite)
 		}
 	}
 }

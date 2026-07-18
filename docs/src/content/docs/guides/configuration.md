@@ -4,7 +4,7 @@ description: Global and per-repo configuration options.
 ---
 
 Configuration is optional. Without any config files, `no-mistakes` defaults to
-`agent: auto`, which picks the first supported native agent available on your system,
+`agent: auto`, which picks the first supported native agent or ACP alias available on your system,
 with sensible defaults for everything else.
 
 The goal is not to make you configure a mini CI system. The default path should
@@ -65,5 +65,5 @@ An empty `commands.format` runs no separate formatter, so configure it explicitl
 Either way, available user intent can trigger an evidence-oriented agent follow-up after a successful test baseline, and evidence stays in a temporary local directory unless the repo opts into `test.evidence.store_in_repo`.
 The [Repo Config Reference](/no-mistakes/reference/repo-config/) owns the exact per-command semantics, including command process lifetime and the `ignore_patterns` match rules.
 
-Before a new validation gate starts, its effective agent configuration must resolve to a runnable native agent or ACP bridge; otherwise the gate fails before its first pipeline step, even when explicit commands are configured.
+Before a new validation gate starts, its effective agent configuration must resolve to a runnable native agent or ACP runner; otherwise the gate fails before its first pipeline step, even when explicit commands are configured.
 Run `no-mistakes doctor` to check the global runner, and see [Choosing an Agent](/no-mistakes/guides/agents/) for how agent selection and fallback lists behave.
