@@ -1,0 +1,30 @@
+internal/pipeline/steps/intent.go
+  s_5e998d91a21c5f::t_a7fbcf5734d5b0 191-192
+internal/git/hook.go
+  s_5e998d91a21c5f::t_975aee60982ece 112-113
+  s_5e998d91a21c5f::t_41786fd04c4065 110-111
+internal/pipeline/steps/intent_integration_test.go
+  s_5e998d91a21c5f::t_a7fbcf5734d5b0 8,89-108,319-383
+  s_5e998d91a21c5f::t_4d353fad3578b3 384
+internal/cli/wizard.go
+  s_5e998d91a21c5f::t_a7fbcf5734d5b0 173
+internal/cli/axi_test.go
+  s_5e998d91a21c5f::t_a7fbcf5734d5b0 521,527,530-532
+  s_5e998d91a21c5f::t_67b2fa9746c6b2 533
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "7b4c231aace228e3e4a77a4a2187d915d3e31e53",
+  "prompts": {},
+  "sessions": {
+    "s_5e998d91a21c5f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f852a-2fab-7d93-80d7-9523f2ee4c08",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+docs/src/content/docs/concepts/gate-model.md
+  s_ca45a0ab7a41fe::t_1e86197d6d82d6 150-151
+internal/wizard/wizard.go
+  s_ca45a0ab7a41fe::t_1e86197d6d82d6 27-28,36-37,142-144
+internal/cli/attach.go
+  s_ca45a0ab7a41fe::t_1e86197d6d82d6 79-80
+docs/src/content/docs/reference/repo-config.md
+  s_ca45a0ab7a41fe::t_1e86197d6d82d6 11
+docs/src/content/docs/start-here/quick-start.md
+  s_ca45a0ab7a41fe::t_1e86197d6d82d6 68-69,94-98
+  s_ca45a0ab7a41fe::t_dc99845c041935 99
+internal/pipeline/steps/document_test.go
+  s_ca45a0ab7a41fe::t_907f40b6c00f7d 210
+internal/pipeline/steps/intent_integration_test.go
+  s_ca45a0ab7a41fe::t_48edde4e798996 489
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f8e4e558d59c1645178a1ac4a30bf9b79b48b762",
+  "prompts": {},
+  "sessions": {
+    "s_ca45a0ab7a41fe": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f860b-b51e-7992-a7a8-51d38fe0583b",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}

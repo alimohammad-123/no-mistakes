@@ -1,0 +1,46 @@
+internal/branchsync/sync_test.go
+  s_20872e1aac2500::t_c31ed43c0a2414 32,679,731,757,776
+internal/branchsync/recover_test.go
+  s_20872e1aac2500::t_c31ed43c0a2414 40,405,504
+internal/branchsync/main_test.go
+  s_20872e1aac2500::t_f979e6c1c89bfc 10-20
+  s_20872e1aac2500::t_91a1f62a44805e 7-9
+  s_20872e1aac2500::t_167c76888bb5e9 21
+  s_20872e1aac2500::t_7399e2b43e465f 1-6
+internal/daemon/helpers_test.go
+  s_20872e1aac2500::t_f979e6c1c89bfc 42-48,53-55
+internal/pipeline/steps/helpers_test.go
+  s_cf7661bb467bc3::t_2dd1fce0790dba 130
+internal/pipeline/steps/ci_commit_test.go
+  s_20872e1aac2500::t_89ebdc41767565 344
+internal/pipeline/steps/ci_merge_test.go
+  s_20872e1aac2500::t_842d9110cc1f24 225,228
+internal/pipeline/steps/intent_integration_test.go
+  s_20872e1aac2500::t_ee13772af95ec6 430,458
+internal/pipeline/steps/steps_test.go
+  s_20872e1aac2500::t_b980a7b22d2edb 22-28,33-35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "576b4dbb25ca97461bbedeab7bc5becb714b3458",
+  "prompts": {},
+  "sessions": {
+    "s_20872e1aac2500": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f85c0-ee4f-7121-b084-8a7a4d325dc0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    },
+    "s_cf7661bb467bc3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f82fd-784e-7041-92d1-8d25f1d1bd08",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
