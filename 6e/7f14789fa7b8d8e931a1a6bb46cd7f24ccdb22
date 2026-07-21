@@ -1,0 +1,201 @@
+internal/pipeline/base_branch_test.go
+  s_01efe1df13d4cd::t_852a1f11261680 1-17
+internal/db/run.go
+  s_01efe1df13d4cd::t_1fe27fb212c865 13-17
+  s_01efe1df13d4cd::t_2d996e7b3e489a 18-20,60,66,76-92,94-107,115,122-123
+internal/db/schema.go
+  s_01efe1df13d4cd::t_dc7d571b135dd6 10,20,141-145
+internal/daemon/base_branch_test.go
+  s_01efe1df13d4cd::t_b96cfeb73c61c0 1-145
+internal/pipeline/steps/review.go
+  s_01efe1df13d4cd::t_f47f1bf9a35115 21,69,91,187,226
+internal/cli/axi_drive.go
+  s_3815659c0f9c80::t_2102fc58536abc 210-216,218-219
+  s_3815659c0f9c80::t_14fd4d48f0a819 217
+  s_3815659c0f9c80::t_44594250f6d3c5 220
+  s_01efe1df13d4cd::t_c2af7fd23470c4 204-206
+internal/daemon/manager.go
+  s_3815659c0f9c80::t_a01bc5c3892474 192,194,197-200,207,335,438-448,450,452,456,462,465,470,474,485-494,497,500,504,511,514,597,611-619,633,668,670,674-676,678-682,712,719,727,736,741,921
+  s_cf7661bb467bc3::t_c7d3a8dc10972c 914,922-923
+internal/pipeline/steps/document.go
+  s_01efe1df13d4cd::t_3a5aa67c6d21c4 90,217,251,270,281
+internal/pipeline/steps/pr.go
+  s_01efe1df13d4cd::t_3366fd5647e367 60-62,77,84,105,154,169
+internal/pipeline/steps/pr_test.go
+  s_01efe1df13d4cd::t_fef9df06855f98 318-319,332,338
+internal/gate/gate.go
+  s_01efe1df13d4cd::t_1fe27fb212c865 51-52
+  s_01efe1df13d4cd::t_2b77a74bee99f6 12,44-50,53,60-70,119-126,149,151,161
+  s_01efe1df13d4cd::t_97c785ef50de6a 173-287,294,296
+  s_cf7661bb467bc3::t_57443035bd502e 288-293,295,297
+internal/gate/base_branch_test.go
+  s_01efe1df13d4cd::t_4adcdec49115e3 1-239
+internal/config/config.go
+  s_01efe1df13d4cd::t_1fe27fb212c865 92-93,97-100
+  s_01efe1df13d4cd::t_b89e551c07345d 94-96,142,159-162,232,1037,1059,1072,1089-1090,1093,1099-1100
+  s_01efe1df13d4cd::t_63e168e5001a64 103-104,114,123
+internal/pipeline/steps/rebase_test.go
+  s_01efe1df13d4cd::t_7f671948811ba7 213-222,247-248,264-268
+internal/pipeline/steps/intent.go
+  s_01efe1df13d4cd::t_c7162bf81730f2 181
+  s_01efe1df13d4cd::t_668624d777e4c7 256,260,264
+internal/db/base_branch_test.go
+  s_01efe1df13d4cd::t_7fad262655fcb5 1-65
+internal/daemon/manager_trust_test.go
+  s_01efe1df13d4cd::t_310ee0cfd879b9 24,26-27,55,59-60,65-66
+  s_3815659c0f9c80::t_9cc8bf6b190bcd 67
+internal/pipeline/pipeline.go
+  s_01efe1df13d4cd::t_e7e87a7b5b19c0 50-59
+internal/pipeline/steps/test.go
+  s_01efe1df13d4cd::t_b797c52f347350 33
+internal/db/repo.go
+  s_01efe1df13d4cd::t_adb217fbf98bdd 16-31,52-57,64,68-69,93,106-107,121-122,133,146,158-182
+  s_3815659c0f9c80::t_3806eef3bc5f75 183
+internal/config/base_branch_test.go
+  s_01efe1df13d4cd::t_97427b388c9267 1-28
+internal/cli/axi_test.go
+  s_01efe1df13d4cd::t_2b9ed507459407 508-525
+internal/pipeline/steps/rebase.go
+  s_01efe1df13d4cd::t_3a2cb155af9aec 30-32,51-52,64,75-76,79,82,87,89,97,100,146-147,150,152,155-156,164-165,168,171-174,176,182,184-185,192,200,231,244,258,262,499,513,515-517
+  s_cf7661bb467bc3::t_a0aa145a528d79 20,519
+internal/db/stats.go
+  s_01efe1df13d4cd::t_1f5e2b45329bd5 249,258
+AGENTS.md
+  s_cf7661bb467bc3::t_7dfa5e0c2600b2 25-30,108,110,115,170,173
+docs/src/content/docs/concepts/daemon.md
+  s_fb954c0160e8d0::t_cde7c090d6e0de 106
+docs/src/content/docs/concepts/gate-model.md
+  s_fb954c0160e8d0::t_165e9806814d6f 37-40,46,181-183
+docs/src/content/docs/concepts/pipeline.md
+  s_fb954c0160e8d0::t_4bcc8a1e409b1a 51-52,84
+docs/src/content/docs/guides/agents.md
+  s_fb954c0160e8d0::t_ec3f4d4240d88e 152,158
+docs/src/content/docs/guides/configuration.md
+  s_fb954c0160e8d0::t_8479f105a63c88 58-59
+docs/src/content/docs/guides/provider-integration.md
+  s_cf7661bb467bc3::t_c7b16879af1449 84-85,90
+docs/src/content/docs/guides/setup-wizard.md
+  s_fb954c0160e8d0::t_fe5c777f0423c3 55,57
+docs/src/content/docs/guides/troubleshooting.md
+  s_aab1488122f89d::t_10ab15e26534fb 172,174,177-184,238,244,247
+docs/src/content/docs/reference/cli.md
+  s_fb954c0160e8d0::t_7bce388ed47876 30-32,35-39,41-47,61,111,127,339
+docs/src/content/docs/reference/global-config.md
+  s_fb954c0160e8d0::t_12f7c7e4fe5a2c 226
+docs/src/content/docs/reference/pipeline-steps.md
+  s_cf7661bb467bc3::t_7ae19d63b5dbd6 43,46,48-50,53,113,169,210,215
+docs/src/content/docs/reference/repo-config.md
+  s_aab1488122f89d::t_fd45a6372ee2e8 8,10-15,18,24-26,38,44,72-90,120,124,131,151,205
+docs/src/content/docs/start-here/quick-start.md
+  s_cf7661bb467bc3::t_974bb3afd4cdb2 53-60,78
+internal/branchsync/recover_test.go
+  s_01efe1df13d4cd::t_603dfe5838fd8d 40,405,504
+internal/branchsync/sync_test.go
+  s_01efe1df13d4cd::t_63971f9618d07d 9,33,680,732,758,777,793-798,806-831
+internal/cli/axi_guidance.go
+  s_cf7661bb467bc3::t_839ba8bbe87d80 5,15
+internal/cli/init.go
+  s_cf7661bb467bc3::t_b989da14af94e7 20-21,32-42,49-51,53-57,96-98,115-116
+internal/cli/init_base_test.go
+  s_cf7661bb467bc3::t_be4b12c8e5ea46 1-25
+internal/cli/status.go
+  s_cf7661bb467bc3::t_88c0e02460eb24 45-46,78
+internal/cli/wizard_test.go
+  s_fb954c0160e8d0::t_d98e66b1e40c85 77-80,91-101
+internal/daemon/helpers_test.go
+  s_fb954c0160e8d0::t_8318babb1acb8a 242
+internal/daemon/manager_gate_optout_test.go
+  s_fb954c0160e8d0::t_4936b6da2c4e42 95-96
+internal/daemon/manager_test.go
+  s_fb954c0160e8d0::t_c6affb39c78c35 42,65-73,110,335,347,402,467,527
+internal/daemon/subscribe_recover_test.go
+  s_01efe1df13d4cd::t_20b3a999de3ad8 41,134,163,207
+internal/db/db_test.go
+  s_4f9800718cd43f::t_54a9614eeb76d4 41-44,46,95-104,220-222
+internal/e2e/fork_routing_test.go
+  s_cf7661bb467bc3::t_b693a8c541ab84 24-51,70-84,86,90-92,94-97,105-111,113-123,147
+internal/e2e/harness.go
+  s_01efe1df13d4cd::t_5df25025a4440a 128-131
+internal/gate/gate_test.go
+  s_01efe1df13d4cd::t_db00a5a61f02f8 12,65-89,95,101
+internal/pipeline/steps/ci.go
+  s_01efe1df13d4cd::t_91bcd651282221 45,185
+internal/pipeline/steps/ci_fix.go
+  s_01efe1df13d4cd::t_1cadb08a7f956f 25-27,30-32
+internal/pipeline/steps/ci_merge_test.go
+  s_01efe1df13d4cd::t_6641f6ad6dc7c2 225,228,242-243,261-269,294-295,312-316
+internal/pipeline/steps/common_git.go
+  s_01efe1df13d4cd::t_8795da6fa633ee 26-27,31,41-42,45,48-49,53-54,56-57,59,66,69,73,97-98,101
+internal/pipeline/steps/common_test.go
+  s_01efe1df13d4cd::t_9d4eaa41952bb8 139,142,144,147,149,151,199,202,204,243,245,248,250,252,255,297,302,304,307,309,311,314
+internal/pipeline/steps/helpers_test.go
+  s_01efe1df13d4cd::t_3b86bad0116ed5 130,138-163,177
+internal/pipeline/steps/lint.go
+  s_cf7661bb467bc3::t_440c26a044a279 20
+internal/pipeline/steps/rebase_force_test.go
+  s_01efe1df13d4cd::t_800952011636c3 91,149,206
+internal/skill/skill.go
+  s_fb954c0160e8d0::t_e25a11bfc29bb1 73-77,91,237
+skills/no-mistakes/SKILL.md
+  s_01efe1df13d4cd::t_ba1a7ba1fe354a 34-38,52,198
+internal/cli/wizard.go
+  s_01efe1df13d4cd::t_09eb323730b2e0 137,143,145-155,192-195,200,245,252-262,292,391,398-400
+internal/pipeline/steps/rebase_local_base_test.go
+  s_01efe1df13d4cd::t_06ac25be8e4851 13,15,19,21,26,38-40,42,47,49,55-56,66,69,77,80,84,98,113-114,116,118-119,132-133,143,146,153,156,158-159
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "6e7f14789fa7b8d8e931a1a6bb46cd7f24ccdb22",
+  "prompts": {},
+  "sessions": {
+    "s_01efe1df13d4cd": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019f8399-4144-7a47-9a4b-9fa675a07efc",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    },
+    "s_3815659c0f9c80": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019f837f-d9a7-7749-b8cb-ed1a0790a345",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    },
+    "s_4f9800718cd43f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f828a-987d-79e0-a35c-c8ae8a7ab55b",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    },
+    "s_aab1488122f89d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8463-17ad-7f21-a483-7021f2ec3f23",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    },
+    "s_cf7661bb467bc3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f82fd-784e-7041-92d1-8d25f1d1bd08",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    },
+    "s_fb954c0160e8d0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8332-d9b6-7012-a940-77bffc6673d8",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
