@@ -1,0 +1,23 @@
+docs/src/content/docs/start-here/quick-start.md
+  s_b6738bcf4f0580::t_6673dfd74cd6e3 80
+docs/src/content/docs/guides/setup-wizard.md
+  s_b6738bcf4f0580::t_6673dfd74cd6e3 57
+docs/src/content/docs/guides/provider-integration.md
+  s_b6738bcf4f0580::t_6673dfd74cd6e3 90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "6b5cd62eb01a294e800245d5a46de830994d4a8b",
+  "prompts": {},
+  "sessions": {
+    "s_b6738bcf4f0580": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8690-2294-7bc1-a8ec-d02f7d44ff34",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
