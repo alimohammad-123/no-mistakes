@@ -1,0 +1,23 @@
+internal/pipeline/steps/review.go
+  s_01efe1df13d4cd::t_f47f1bf9a35115 21,69,91,187,226
+internal/pipeline/steps/document.go
+  s_01efe1df13d4cd::t_3a5aa67c6d21c4 90,217,251,270,281
+internal/pipeline/steps/test.go
+  s_01efe1df13d4cd::t_b797c52f347350 33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "43849e6c08c1952c2dacfbc6346727974ff11668",
+  "prompts": {},
+  "sessions": {
+    "s_01efe1df13d4cd": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019f8399-4144-7a47-9a4b-9fa675a07efc",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
