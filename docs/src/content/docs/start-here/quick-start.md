@@ -77,7 +77,7 @@ $ no-mistakes init
 Without fork routing, you can bypass the gate for a specific push with `git push origin <branch>`.
 With `--fork-url`, bypassing the gate means pushing to your fork URL yourself.
 
-You can safely re-run `no-mistakes init` later to refresh gate wiring or update the installed agent skill after an upgrade. A stored base override survives a plain refresh; use `--clear-base-branch` to return future runs to the detected default.
+You can safely re-run `no-mistakes init` later to refresh gate wiring or update the installed agent skill after an upgrade. A stored base override survives a plain refresh when the trusted config omits `base_branch`; use `--clear-base-branch` to return future runs to the detected default.
 If you rename or move the repo directory, re-run `no-mistakes init` from the new path to reattach the existing gate and keep its run history.
 Copied repos get their own fresh gate while the original path still exists.
 
