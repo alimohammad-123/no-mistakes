@@ -1,0 +1,19 @@
+internal/pipeline/steps/intent_integration_test.go
+  s_cf7661bb467bc3::t_9efd413a9a1ff7 46,48,236,238,294,495-496
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "6bc5fb0d80df2a8dfa3884923c9a78d7ed76291b",
+  "prompts": {},
+  "sessions": {
+    "s_cf7661bb467bc3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f82fd-784e-7041-92d1-8d25f1d1bd08",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
