@@ -178,7 +178,7 @@ func defaultRunIntent(ctx context.Context, sctx *pipeline.StepContext) (*intent.
 		gitWorkDir = repo.WorkingPath
 	}
 
-	resolvedBaseSHA := resolveIntentBaseSHA(ctx, gitWorkDir, run.BaseSHA, sctx.BaseBranch())
+	resolvedBaseSHA := resolveIntentBaseSHA(ctx, gitWorkDir, sctx.BaseBranch())
 	diffFiles, err := diffFilesForIntentMatching(ctx, gitWorkDir, resolvedBaseSHA, run.HeadSHA)
 	if err != nil {
 		return nil, err
@@ -251,26 +251,11 @@ func splitDiffNameOnly(out string) []string {
 	return files
 }
 
-// resolveIntentBaseSHA returns a usable base SHA for diff'ing against head.
-// Prefers an explicit run.BaseSHA when reachable in the worktree, but falls
-// back to merge-base against the pipeline base when the SHA is the zero ref
-// (new branch push) or has been orphaned by a force push that rewrote the
-// prior remote tip away. Final fallback is git's empty-tree SHA so the diff
-// always succeeds.
-func resolveIntentBaseSHA(ctx context.Context, workDir, baseSHA, baseBranch string) string {
-	if !git.IsZeroSHA(baseSHA) && commitReachable(ctx, workDir, baseSHA) {
-		return baseSHA
-	}
+// resolveIntentBaseSHA returns the full branch base for intent matching.
+// Final fallback is git's empty-tree SHA so the diff always succeeds.
+func resolveIntentBaseSHA(ctx context.Context, workDir, baseBranch string) string {
 	if mb := mergeBaseWithPipelineBase(ctx, workDir, baseBranch); mb != "" {
 		return mb
 	}
 	return git.EmptyTreeSHA
-}
-
-func commitReachable(ctx context.Context, workDir, sha string) bool {
-	if strings.TrimSpace(sha) == "" {
-		return false
-	}
-	_, err := git.Run(ctx, workDir, "cat-file", "-e", sha+"^{commit}")
-	return err == nil
 }

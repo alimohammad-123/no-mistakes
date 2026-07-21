@@ -295,6 +295,45 @@ func TestIntentStep_Integration_ZeroBaseSHA_NewBranchPush(t *testing.T) {
 	}
 }
 
+func TestResolveIntentBaseSHAUsesPipelineBaseAfterSubsequentPush(t *testing.T) {
+	repoDir := t.TempDir()
+	gitCmd(t, repoDir, "init")
+	gitCmd(t, repoDir, "config", "user.email", "test@example.com")
+	gitCmd(t, repoDir, "config", "user.name", "Tester")
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repoDir, "add", ".")
+	gitCmd(t, repoDir, "commit", "-m", "base")
+	gitCmd(t, repoDir, "checkout", "-b", "staging")
+	if err := os.WriteFile(filepath.Join(repoDir, "staging.txt"), []byte("staging\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repoDir, "add", ".")
+	gitCmd(t, repoDir, "commit", "-m", "staging")
+	pipelineBase := gitCmd(t, repoDir, "rev-parse", "HEAD")
+	gitCmd(t, repoDir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repoDir, "first.txt"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repoDir, "add", ".")
+	gitCmd(t, repoDir, "commit", "-m", "first push")
+	previousFeatureTip := gitCmd(t, repoDir, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(repoDir, "second.txt"), []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repoDir, "add", ".")
+	gitCmd(t, repoDir, "commit", "-m", "second push")
+
+	got := resolveIntentBaseSHA(context.Background(), repoDir, "staging")
+	if got != pipelineBase {
+		t.Fatalf("resolveIntentBaseSHA = %q, want pipeline base %q", got, pipelineBase)
+	}
+	if got == previousFeatureTip {
+		t.Fatalf("resolveIntentBaseSHA reused previous feature tip %q", got)
+	}
+}
+
 func TestIntentStep_Integration_UsesPipelineWorkDirForGitState(t *testing.T) {
 	originRepo := t.TempDir()
 	gitCmd(t, originRepo, "init")

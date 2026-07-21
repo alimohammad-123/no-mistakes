@@ -139,20 +139,40 @@ type repoState struct {
 	dirty         bool
 }
 
-// needsBranch reports whether the user has no feature branch to work on —
+// needsBranch reports whether the user has no feature branch to work on:
 // either they're on a protected policy branch, or HEAD is detached.
 func (s *repoState) needsBranch() bool {
 	return s.detached || s.currentBranch == s.defaultBranch || s.currentBranch == s.baseBranch
 }
 
-// featureBranchStartPoint returns an explicit freshly fetched base only when
-// the worktree is on a distinct repository default. Starting from current HEAD
-// in that state would bundle default-only production history into the base PR.
+// featureBranchStartPoint returns an explicit base whenever pipeline policy
+// differs from the provider default.
 func (s *repoState) featureBranchStartPoint() string {
-	if s == nil || s.detached || s.currentBranch != s.defaultBranch || s.baseBranch == "" || s.baseBranch == s.defaultBranch {
+	if s == nil || s.baseBranch == "" || s.baseBranch == s.defaultBranch {
 		return ""
 	}
 	return "origin/" + s.baseBranch
+}
+
+func (s *repoState) createFeatureBranch(ctx context.Context, name string) error {
+	startPoint := s.featureBranchStartPoint()
+	if startPoint == "" {
+		return git.CreateBranch(ctx, s.workDir, name)
+	}
+	if err := git.FetchRemoteBranch(ctx, s.workDir, "origin", s.baseBranch); err != nil {
+		return fmt.Errorf("fetch pipeline base %s: %w", s.baseBranch, err)
+	}
+	if _, err := git.Run(ctx, s.workDir, "checkout", "-b", name, startPoint); err != nil {
+		return fmt.Errorf("create branch %s from pipeline base %s: %w", name, s.baseBranch, err)
+	}
+	return nil
+}
+
+func featureBranchStartCommand(defaultBranch, baseBranch string) string {
+	if baseBranch != "" && baseBranch != defaultBranch {
+		return fmt.Sprintf("git fetch origin %s && git switch -c <branch> origin/%s", baseBranch, baseBranch)
+	}
+	return "git switch -c <branch>"
 }
 
 // shouldRouteToWizard reports whether the active-run check should be
@@ -249,17 +269,7 @@ func runWizardWithMode(ctx context.Context, p *paths.Paths, state *repoState, sk
 		GateRemote:    gate.RemoteName,
 
 		CreateBranch: func(ctx context.Context, name string) error {
-			startPoint := state.featureBranchStartPoint()
-			if startPoint == "" {
-				return git.CreateBranch(ctx, workDir, name)
-			}
-			if err := git.FetchRemoteBranch(ctx, workDir, "origin", state.baseBranch); err != nil {
-				return fmt.Errorf("fetch pipeline base %s: %w", state.baseBranch, err)
-			}
-			if _, err := git.Run(ctx, workDir, "checkout", "-b", name, startPoint); err != nil {
-				return fmt.Errorf("create branch %s from pipeline base %s: %w", name, state.baseBranch, err)
-			}
-			return nil
+			return state.createFeatureBranch(ctx, name)
 		},
 		CommitAll: func(ctx context.Context, msg string) error {
 			return git.CommitAll(ctx, workDir, msg)

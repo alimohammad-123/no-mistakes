@@ -518,8 +518,17 @@ func TestPreflightGuardRejectsConfiguredPipelineBase(t *testing.T) {
 	if err := guard(cmd); err == nil {
 		t.Fatal("expected refusal error")
 	}
-	if !strings.Contains(out.String(), "pipeline base") {
-		t.Fatalf("output = %q, want pipeline base guidance", out.String())
+	if !strings.Contains(out.String(), "git fetch origin staging && git switch -c <branch> origin/staging") {
+		t.Fatalf("output = %q, want fetched pipeline base guidance", out.String())
+	}
+}
+
+func TestFeatureBranchStartCommandUsesConfiguredPipelineBase(t *testing.T) {
+	if got := featureBranchStartCommand("main", "staging"); got != "git fetch origin staging && git switch -c <branch> origin/staging" {
+		t.Fatalf("featureBranchStartCommand = %q", got)
+	}
+	if got := featureBranchStartCommand("main", "main"); got != "git switch -c <branch>" {
+		t.Fatalf("default featureBranchStartCommand = %q", got)
 	}
 }
 
