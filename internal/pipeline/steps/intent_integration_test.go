@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -83,6 +84,26 @@ func withFakeHome(t *testing.T, fakeHome string) {
 	t.Helper()
 	t.Setenv("HOME", fakeHome)
 	t.Setenv("USERPROFILE", fakeHome)
+}
+
+func gitCmdAt(t *testing.T, dir string, when time.Time, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	date := when.UTC().Format(time.RFC3339)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test",
+		"GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test",
+		"GIT_COMMITTER_EMAIL=test@test.com",
+		"GIT_AUTHOR_DATE="+date,
+		"GIT_COMMITTER_DATE="+date,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func openIntentTestDB(t *testing.T) *db.DB {
@@ -292,6 +313,72 @@ func TestIntentStep_Integration_ZeroBaseSHA_NewBranchPush(t *testing.T) {
 	}
 	if !strings.Contains(*got.Intent, "Bar()") {
 		t.Errorf("Intent = %q", *got.Intent)
+	}
+}
+
+func TestIntentStep_Integration_ZeroBaseUsesOldFeatureSessionNotRecentUnrelated(t *testing.T) {
+	repoDir := t.TempDir()
+	gitCmd(t, repoDir, "init")
+	gitCmd(t, repoDir, "config", "user.email", "test@example.com")
+	gitCmd(t, repoDir, "config", "user.name", "Tester")
+	headTime := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	baseTime := headTime.Add(-60 * 24 * time.Hour)
+	oldSessionTime := baseTime.Add(24 * time.Hour)
+	recentSessionTime := headTime.Add(-30 * time.Minute)
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repoDir, "add", ".")
+	gitCmdAt(t, repoDir, baseTime, "commit", "-m", "base")
+	gitCmd(t, repoDir, "branch", "-M", "main")
+	gitCmd(t, repoDir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repoDir, "feature.go"), []byte("package feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repoDir, "add", ".")
+	gitCmdAt(t, repoDir, headTime, "commit", "-m", "feature")
+	head := gitCmd(t, repoDir, "rev-parse", "HEAD")
+
+	fakeHome := t.TempDir()
+	claudeDir := filepath.Join(fakeHome, ".claude", "projects", testClaudeProjectDirName(repoDir))
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTranscript := func(name, request, file string, when time.Time) {
+		t.Helper()
+		transcript := `{"type":"user","cwd":` + testJSONString(t, repoDir) + `,"timestamp":` + testJSONString(t, when.Format(time.RFC3339Nano)) + `,"uuid":"u1","sessionId":` + testJSONString(t, name) + `,"message":{"role":"user","content":` + testJSONString(t, request) + `}}
+{"type":"assistant","cwd":` + testJSONString(t, repoDir) + `,"timestamp":` + testJSONString(t, when.Add(time.Minute).Format(time.RFC3339Nano)) + `,"uuid":"u2","sessionId":` + testJSONString(t, name) + `,"message":{"role":"assistant","content":[{"type":"tool_use","name":"Edit","input":{"file_path":` + testJSONString(t, filepath.Join(repoDir, file)) + `}}]}}
+`
+		path := filepath.Join(claudeDir, name+".jsonl")
+		if err := os.WriteFile(path, []byte(transcript), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTranscript("old-feature", "add the feature package", "feature.go", oldSessionTime)
+	writeTranscript("recent-unrelated", "change unrelated code", "unrelated.go", recentSessionTime)
+	withFakeHome(t, fakeHome)
+
+	const zeroSHA = "0000000000000000000000000000000000000000"
+	disabledReaders := map[string]bool{"codex": true, "opencode": true, "rovodev": true, "pi": true, "copilot": true}
+	cfg := &config.Config{Intent: config.Intent{Enabled: true, Threshold: 0.1, DisabledReaders: disabledReaders}}
+	sctx := newIntentIntegrationContext(t, repoDir, zeroSHA, head, cfg)
+
+	outcome, err := (&IntentStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if outcome == nil || outcome.Skipped {
+		t.Fatalf("expected old feature session to match, got %+v", outcome)
+	}
+	got, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IntentSessionID == nil || *got.IntentSessionID != "old-feature" {
+		t.Fatalf("intent session = %v, want old-feature", got.IntentSessionID)
 	}
 }
 

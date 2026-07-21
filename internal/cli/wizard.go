@@ -170,7 +170,7 @@ func (s *repoState) createFeatureBranch(ctx context.Context, name string) error 
 
 func featureBranchStartCommand(defaultBranch, baseBranch string) string {
 	if baseBranch != "" && baseBranch != defaultBranch {
-		return fmt.Sprintf("git fetch origin %s && git switch -c <branch> origin/%s", baseBranch, baseBranch)
+		return fmt.Sprintf("git fetch origin %s && git switch -c <branch> %s", git.ShellSingleQuote(baseBranch), git.ShellSingleQuote("origin/"+baseBranch))
 	}
 	return "git switch -c <branch>"
 }

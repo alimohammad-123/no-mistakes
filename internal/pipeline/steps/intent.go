@@ -188,8 +188,8 @@ func defaultRunIntent(ctx context.Context, sctx *pipeline.StepContext) (*intent.
 	}
 
 	baseTime, err := git.CommitTime(ctx, gitWorkDir, resolvedBaseSHA)
-	if err != nil || git.IsZeroSHA(run.BaseSHA) {
-		baseTime = time.Now().Add(-7 * 24 * time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("resolve intent base time: %w", err)
 	}
 	headTime, err := git.CommitTime(ctx, gitWorkDir, run.HeadSHA)
 	if err != nil {
