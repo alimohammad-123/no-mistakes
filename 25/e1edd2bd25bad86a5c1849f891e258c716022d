@@ -1,0 +1,19 @@
+docs/src/content/docs/concepts/daemon.md
+  s_13d543b55d8cd5::t_2dcca6390d1e04 130-134
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "25e1edd2bd25bad86a5c1849f891e258c716022d",
+  "prompts": {},
+  "sessions": {
+    "s_13d543b55d8cd5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8c0b-bdd1-7fd3-a33e-3d49f731f2f3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
