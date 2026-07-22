@@ -92,7 +92,7 @@ Update checks run on every CLI invocation except `update` itself and version que
 
 ## `NO_MISTAKES_SOURCE_REF`
 
-Canonical full source branch ref supplied by the runtime to pipeline-owned commands and agent processes.
+Canonical full source branch ref supplied by the runtime when a pipeline process operates on a stable candidate.
 
 |         |                                                   |
 | ------- | ------------------------------------------------- |
@@ -101,7 +101,11 @@ Canonical full source branch ref supplied by the runtime to pipeline-owned comma
 
 The runtime derives this value only from the branch identity accepted at run intake, freezes it in the run record, and reuses the same value across approval gates and daemon recovery. For an active run created by an older binary, recovery may fill the missing value once from that run's already-frozen valid branch record. Missing, detached, malformed, tag, remote-tracking, notes, and other non-branch identities are rejected instead of guessed.
 
-Before a configured Test command runs, the isolated pipeline repository binds this local ref to the exact recorded candidate commit, including pipeline fix commits. This does not move the developer's worktree branch or contact a remote; the normal Push step remains the first remote update. The runtime removes any inherited `NO_MISTAKES_SOURCE_REF` and appends its frozen value last at child-process launch. Manually exporting this variable for a direct local invocation is not delivery provenance and cannot override the pipeline-owned value.
+Before a configured command or stable-candidate agent runs, the isolated pipeline repository binds this local ref to the exact recorded candidate commit, including pipeline fix commits. This does not move the developer's worktree branch or contact a remote; the normal Push step remains the first remote update. The runtime removes any inherited `NO_MISTAKES_SOURCE_REF` and appends its frozen value last at child-process launch. Manually exporting this variable for a direct local invocation is not delivery provenance and cannot override the pipeline-owned value.
+
+The only exception is the narrowly scoped agent process that resolves conflicts while Git proves an agent-assisted rebase is in progress. That process receives `NO_MISTAKES_SOURCE_REF` unset, cannot run or satisfy configured delivery evidence, and operates while `HEAD` may be a partial candidate. During this interval, the frozen ref remains bound to the last recorded pre-rebase candidate. After the rebase completes, no-mistakes persists the final candidate SHA, atomically rebinds and verifies the canonical ref, and only then restores the variable for Review, Test, configured commands, and later stable-candidate agents.
+
+Consumers that require delivery provenance must refuse an absent `NO_MISTAKES_SOURCE_REF`. Presence is meaningful only because no-mistakes validates the stable candidate and owns the binding and child environment; an inherited or user-supplied value is outside this trust boundary.
 
 ## `XDG_DATA_HOME`
 
