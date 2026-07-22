@@ -1,0 +1,44 @@
+docs/src/content/docs/reference/global-config.md
+  s_45993f0aa3de52::t_1483cd173a9dec 238,246
+docs/src/content/docs/reference/pipeline-steps.md
+  s_45993f0aa3de52::t_1483cd173a9dec 92
+internal/daemon/manager.go
+  s_45993f0aa3de52::t_1483cd173a9dec 708-711
+docs/src/content/docs/guides/configuration.md
+  s_45993f0aa3de52::t_1483cd173a9dec 57
+internal/e2e/bootstrap_test.go
+  s_82fe0165ba8f41::t_decd6ff34ccd57 77,80
+  s_82fe0165ba8f41::t_fd26197a205597 164-165
+  s_82fe0165ba8f41::t_5ceacd61a94f30 1-8,10,12-18,20-25,68-76,81-84,86-112,114-144,146-163,169-193
+  s_82fe0165ba8f41::t_9db7029225e602 51-62
+  s_82fe0165ba8f41::t_da5b451289f289 26-32
+  s_82fe0165ba8f41::t_bd6d94f6c97d1d 19,64-67,78-79,85,113,145,166-168
+  s_82fe0165ba8f41::t_3e1d86b9c1a925 9,11,33-42,44,46,63
+  s_82fe0165ba8f41::t_ce5ae0b6aa67da 43,45,47-50
+docs/src/content/docs/reference/repo-config.md
+  s_45993f0aa3de52::t_1483cd173a9dec 13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "01a00ffa942a4f8497f3e92b6b531d5d88e76a10",
+  "prompts": {},
+  "sessions": {
+    "s_45993f0aa3de52": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f877b-31b2-7b53-941a-dc9c8b319d52",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    },
+    "s_82fe0165ba8f41": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8771-e9d6-7d90-bc37-5345ac543b3b",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
