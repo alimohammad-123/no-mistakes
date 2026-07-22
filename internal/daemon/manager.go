@@ -705,11 +705,10 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// before any read. Reading the trusted config at this pinned SHA (rather
 	// than the origin/<baseBranch> remote-tracking ref) is what makes a
 	// fetch failure fail closed: if the fetch errors or the ref does not
-	// resolve, trustedSHA stays empty, loadTrustedRepoConfig returns nil, and
-	// EffectiveRepoConfig drops the pushed branch's commands/agent. Without
-	// the resolve, a stale origin/<baseBranch> left in the shared bare
-	// repo by a previous run could serve a trusted copy that the live pipeline
-	// base has already removed - silently running stale shell.
+	// resolve, trustedSHA stays empty and the authoritative policy read below
+	// aborts the run. Without the resolve, a stale origin/<baseBranch> left in
+	// the shared bare repo by a previous run could serve a trusted copy that the
+	// live pipeline base has already removed - silently running stale shell.
 	var trustedSHA string
 	if baseBranch != "" {
 		if err := fetchInitialTrustedRemoteBranch(ctx, wtDir, fetchSource, baseBranch); err != nil {

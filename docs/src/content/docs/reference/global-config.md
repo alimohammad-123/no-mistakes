@@ -235,7 +235,7 @@ Each entry requires all four fields:
 
 The daemon considers this path only after a fresh fetch and pinned-tree read prove that the pipeline base has no `.no-mistakes.yaml`. It then requires exactly one matching repository and base entry, requires the submitted policy's `commands.test` to equal `command`, and checks the digest over the committed file's complete bytes. Missing fields, malformed values, duplicate repository/base entries, mismatches, a missing submitted policy, and unreadable trust state fail closed. The feature branch supplies only digest and command-match evidence; no feature value supplies executable input or changes repository identity, base, or authorization.
 
-On success, the complete binding and command are frozen in the run record before execution. Recovery does not use later valid edits to `bootstrap.test` to change that snapshot. The global file must still remain well formed; malformed or partial bindings are rejected like any other invalid global configuration. If the pipeline base acquires policy before an authorized parked run recovers, recovery refuses that stale bootstrap run rather than switching its command. New runs always use the base-owned policy once it exists.
+On success, the complete binding and command are frozen in the run record before execution. Recovery does not use later valid edits to `bootstrap.test` to change that snapshot. The global file must still remain well formed; malformed or partial bindings are rejected like any other invalid global configuration. If the pipeline base acquires policy before an authorized parked run recovers, recovery refuses that stale bootstrap run rather than switching its command. New runs use the base-owned policy whenever it is present.
 
 First adoption procedure:
 
@@ -243,7 +243,7 @@ First adoption procedure:
 2. Add and commit the complete `.no-mistakes.yaml` on the policy feature branch, including the intended `commands.test`.
 3. Compute the committed bytes with `git show HEAD:.no-mistakes.yaml | shasum -a 256` and add one complete binding to the user-owned global config. Use the credential-free parent remote identity with a lowercase host and no scheme or `.git` suffix.
 4. Start the policy branch's validation normally. Do not change the policy file or binding during that run.
-5. Remove the global binding as soon as the policy reaches the pipeline base. Its removal condition is the presence of `.no-mistakes.yaml` on that trusted base; normal base-owned policy is then permanently authoritative.
+5. Remove the global binding as soon as the policy reaches the pipeline base. Its removal condition is the presence of `.no-mistakes.yaml` on that trusted base; removing it closes the temporary bootstrap path.
 
 This is not a global `commands.test` default and does not authorize Lint, Format, agent selection, or any other repo command. Do not put credentials or secrets in the command.
 
