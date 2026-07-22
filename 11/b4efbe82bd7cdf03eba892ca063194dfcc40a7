@@ -1,0 +1,39 @@
+docs/src/content/docs/reference/global-config.md
+  s_6619c45bd42ce5::t_269821912bf042 248
+  s_6619c45bd42ce5::t_23541d3b0476a1 227-228
+  s_6619c45bd42ce5::t_866c40583c0c18 38,233
+internal/daemon/bootstrap_test.go
+  s_6619c45bd42ce5::t_8ccc04dce44782 74,82,139,206,238,277,359,408,488
+  s_6619c45bd42ce5::t_232d49ba338d98 445-459
+  s_6619c45bd42ce5::t_f8c215bc0e18c2 489-492,646,880
+internal/repoidentity/identity.go
+  s_6619c45bd42ce5::t_d22ffa3ec25282 15-18,24-25,28-86,89-114,117-122,124-125,128-130,140-143,146-155,158,180,190
+internal/repoidentity/identity_test.go
+  s_6619c45bd42ce5::t_d8a991334de143 6,11-12,16,38-51,77-78,85,87-88,91,99-113
+internal/config/bootstrap_test.go
+  s_6619c45bd42ce5::t_23541d3b0476a1 62
+  s_6619c45bd42ce5::t_d3f4d0695e0748 14,31,38,58-60,63-66
+internal/db/db_test.go
+  s_6619c45bd42ce5::t_b4088df53ba769 85,88,91
+internal/config/config.go
+  s_6619c45bd42ce5::t_d3f4d0695e0748 421,1035
+internal/db/bootstrap_test.go
+  s_6619c45bd42ce5::t_23541d3b0476a1 122,125,144-148
+  s_6619c45bd42ce5::t_b4088df53ba769 24,64,77,80,88-90,106,121,128,132-133,137-138,142-143,172,188,210,213
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "11b4efbe82bd7cdf03eba892ca063194dfcc40a7",
+  "prompts": {},
+  "sessions": {
+    "s_6619c45bd42ce5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f87b6-7731-79e3-97b7-8699e32b7580",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
