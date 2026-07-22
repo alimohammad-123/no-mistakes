@@ -194,6 +194,7 @@ func TestAxiRunRecoversLegacyGracefulShutdownGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recover interrupted Test gate: %v\n%s", err, reattachOut)
 	}
+	t.Logf("recovered Test gate through ordinary axi run:\n%s", reattachOut)
 	for _, want := range []string{original.ID, "step: test", "status: awaiting_approval", "test-1", "source-ref Test command summary"} {
 		if !strings.Contains(reattachOut, want) {
 			t.Errorf("recovered output missing %q:\n%s", want, reattachOut)
