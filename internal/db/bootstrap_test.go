@@ -2,6 +2,7 @@ package db
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -109,36 +110,61 @@ func TestBootstrapTestRetirementPersistsAcrossReopenAndUsesExactKey(t *testing.T
 
 func TestBootstrapTestRetirementUsesCanonicalRepositoryIdentity(t *testing.T) {
 	d := openTestDB(t)
-	canonical, err := repoidentity.Canonical("https://github.com/owner/repo.git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := d.RetireBootstrapTest(canonical, "main"); err != nil {
-		t.Fatal(err)
-	}
-	for _, remote := range []string{
-		"github.com/owner/repo",
-		"https://github.com:443/owner/repo.git",
-		"https://github.com./owner/repo.git",
-		"git@github.com:owner/repo.git",
-		"ssh://git@github.com:22/owner/repo.git",
+	for i, tc := range []struct {
+		name    string
+		remotes []string
+		want    string
+	}{
+		{
+			name: "URL canonical SCP and defaults",
+			remotes: []string{
+				"github.com/owner/repo",
+				"https://github.com:443/owner/repo.git",
+				"https://github.com./owner/repo.git",
+				"git@github.com:owner/repo.git",
+				"ssh://git@github.com:22/owner/repo.git",
+			},
+			want: "github.com/owner/repo",
+		},
+		{
+			name:    "non-default scheme port",
+			remotes: []string{"https://github.com:22/owner/repo.git", "github.com:22/owner/repo"},
+			want:    "github.com:22/owner/repo",
+		},
+		{
+			name:    "IPv4",
+			remotes: []string{"https://192.0.2.1:8443/owner/repo.git", "192.0.2.1:8443/owner/repo"},
+			want:    "192.0.2.1:8443/owner/repo",
+		},
+		{
+			name:    "bracketed IPv6",
+			remotes: []string{"https://[2001:0db8::1]:8443/owner/repo.git", "[2001:db8::1]:8443/owner/repo"},
+			want:    "[2001:db8::1]:8443/owner/repo",
+		},
 	} {
-		identity, err := repoidentity.Canonical(remote)
-		if err != nil {
-			t.Fatalf("Canonical(%q): %v", remote, err)
-		}
-		retired, err := d.IsBootstrapTestRetired(identity, "main")
-		if err != nil || !retired {
-			t.Fatalf("retirement via %q = %v, err=%v", remote, retired, err)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			base := fmt.Sprintf("base-%d", i)
+			if err := d.RetireBootstrapTest(tc.want, base); err != nil {
+				t.Fatal(err)
+			}
+			for _, remote := range tc.remotes {
+				identity, err := repoidentity.Canonical(remote)
+				if err != nil {
+					t.Fatalf("Canonical(%q): %v", remote, err)
+				}
+				if identity != tc.want {
+					t.Fatalf("Canonical(%q) = %q, want %q", remote, identity, tc.want)
+				}
+				retired, err := d.IsBootstrapTestRetired(identity, base)
+				if err != nil || !retired {
+					t.Fatalf("retirement via %q = %v, err=%v", remote, retired, err)
+				}
+			}
+		})
 	}
 
-	distinct, err := repoidentity.Canonical("https://github.com:8443/owner/repo.git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if retired, err := d.IsBootstrapTestRetired(distinct, "main"); err != nil || retired {
-		t.Fatalf("non-default-port retirement = %v, err=%v", retired, err)
+	if retired, err := d.IsBootstrapTestRetired("github.com:8443/owner/repo", "base-0"); err != nil || retired {
+		t.Fatalf("distinct non-default-port retirement = %v, err=%v", retired, err)
 	}
 }
 

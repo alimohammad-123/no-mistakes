@@ -65,11 +65,22 @@ func Canonical(raw string) (string, error) {
 			return "", err
 		}
 		repoPath = strings.TrimPrefix(u.Path, "/")
+	} else if strings.HasPrefix(value, "[") {
+		slash := strings.IndexByte(value, '/')
+		if slash <= 0 {
+			return "", fmt.Errorf("repository identity must be host/path")
+		}
+		var err error
+		host, err = canonicalAuthority(value[:slash], "")
+		if err != nil {
+			return "", err
+		}
+		repoPath = value[slash+1:]
 	} else if scpHost, scpPath, ok, err := splitSCP(value); err != nil {
 		return "", err
 	} else if ok {
 		var authorityErr error
-		host, authorityErr = canonicalAuthority(scpHost, "22")
+		host, authorityErr = canonicalAuthority(scpHost, "")
 		if authorityErr != nil {
 			return "", authorityErr
 		}
@@ -145,6 +156,9 @@ func canonicalAuthority(authority, defaultPort string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		if ip := net.ParseIP(hostname); ip == nil || !strings.Contains(hostname, ":") {
+			return "", fmt.Errorf("repository bracketed host must be IPv6")
+		}
 	} else if strings.Contains(authority, ":") {
 		var err error
 		hostname, port, err = net.SplitHostPort(authority)
@@ -168,7 +182,7 @@ func canonicalAuthority(authority, defaultPort string) (string, error) {
 		if err != nil || n < 1 || n > 65535 {
 			return "", fmt.Errorf("repository port is invalid")
 		}
-		if port == defaultPort || defaultPort == "" && (port == "80" || port == "443" || port == "22") {
+		if defaultPort != "" && port == defaultPort {
 			port = ""
 		}
 	}
@@ -207,6 +221,9 @@ func canonicalHostname(host string) (string, error) {
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		return strings.ToLower(ip.String()), nil
+	}
+	if strings.IndexFunc(host, func(r rune) bool { return r != '.' && (r < '0' || r > '9') }) < 0 {
+		return "", fmt.Errorf("repository host is not canonical")
 	}
 	if strings.HasSuffix(host, "..") {
 		return "", fmt.Errorf("repository host is not canonical")
