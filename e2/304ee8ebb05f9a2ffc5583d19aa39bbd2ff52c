@@ -1,0 +1,19 @@
+docs/src/content/docs/reference/environment.md
+  s_036d412ae853f3::t_0b090d06b1bb3f 95,104-108
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "e2304ee8ebb05f9a2ffc5583d19aa39bbd2ff52c",
+  "prompts": {},
+  "sessions": {
+    "s_036d412ae853f3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8989-26b1-7a80-96dd-421464da50a7",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
