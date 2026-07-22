@@ -205,7 +205,13 @@ func canonicalSSHUser(info *url.Userinfo) (string, error) {
 }
 
 func validateSSHUsername(user string) error {
-	if user == "" || strings.ContainsAny(user, `:/\@%?#`) || strings.IndexFunc(user, unicode.IsSpace) >= 0 {
+	if user == "" {
+		return fmt.Errorf("repository SSH URL has invalid user information")
+	}
+	for _, char := range user {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '.' || char == '_' || char == '-' {
+			continue
+		}
 		return fmt.Errorf("repository SSH URL has invalid user information")
 	}
 	return nil

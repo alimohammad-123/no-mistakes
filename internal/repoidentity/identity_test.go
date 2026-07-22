@@ -51,6 +51,7 @@ func TestCanonicalIsIdempotent(t *testing.T) {
 		{name: "IPv6", raw: "https://[2001:0db8::1]/Group/Repo.git", want: "repoid://[2001:db8::1]/Group/Repo"},
 		{name: "IPv6 default port", raw: "ssh://git@[2001:0db8::1]:22/Group/Repo.git", want: "repoid+ssh-abs://git@[2001:db8::1]/Group/Repo"},
 		{name: "generic SSH user case", raw: "ssh://Alice@Git.Example.test/Group/Repo.git", want: "repoid+ssh-abs://Alice@git.example.test/Group/Repo"},
+		{name: "generic SSH literal user alphabet", raw: "Build.Bot_1-Prod@Git.Example.test:Group/Repo.git", want: "repoid+ssh-rel://Build.Bot_1-Prod@git.example.test/Group/Repo"},
 		{name: "IPv6 non-default port", raw: "https://[2001:0db8::1]:22/Group/Repo.git", want: "repoid://[2001:db8::1]:22/Group/Repo"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -86,6 +87,10 @@ func TestCanonicalRejectsAmbiguousCredentialBearingOrNoncanonicalIdentities(t *t
 		"ssh://git:secret@github.com/owner/repo.git",
 		"ssh://git.example.test/owner/repo.git",
 		"ssh://ali%63e@git.example.test/owner/repo.git",
+		"ssh://Alïce@git.example.test/owner/repo.git",
+		"ssh://Ali+ce@git.example.test/owner/repo.git",
+		"Alïce@git.example.test:owner/repo.git",
+		"Ali[ce@git.example.test:owner/repo.git",
 		"git@@github.com:owner/repo.git",
 		"github.com:owner/repo.git",
 		"github.com@evil.test/owner/repo",
@@ -108,6 +113,7 @@ func TestCanonicalRejectsAmbiguousCredentialBearingOrNoncanonicalIdentities(t *t
 		"repoid://user@github.com/owner/repo",
 		"repoid+ssh-abs://alice:secret@git.example/owner/repo",
 		"repoid+ssh-rel://ali%63e@git.example/owner/repo",
+		"repoid+ssh-rel://Ali+ce@git.example/owner/repo",
 		"repoid+ssh-abs://git@github.com/owner/repo",
 		"repoid://github.com/owner/repo?ref=other",
 		"repoid://github.com/owner/%72epo",

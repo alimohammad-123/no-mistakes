@@ -230,7 +230,7 @@ Each entry requires all four fields:
 
 | Field | Type | Description |
 |---|---|---|
-| `repository` | `string` | Canonical parent identity in `repoid://authority/namespace/repository` form |
+| `repository` | `string` | Canonical parent identity using `repoid://authority/path`, `repoid+ssh-abs://user@authority/path`, or `repoid+ssh-rel://user@authority/path` |
 | `base_branch` | `string` | Exact registered pipeline base |
 | `command` | `string` | Exact Test command that the submitted policy installs |
 | `policy_sha256` | `string` | 64 lowercase hex characters for SHA-256 of the complete submitted policy bytes |
@@ -245,7 +245,7 @@ First adoption procedure:
 
 1. Register the intended base, for example with `no-mistakes init --base-branch staging`.
 2. Add and commit the complete `.no-mistakes.yaml` on the policy feature branch, including the intended `commands.test`.
-3. Compute the committed bytes with `git show HEAD:.no-mistakes.yaml | shasum -a 256` and add one complete binding to the user-owned global config. Express the credential-free parent remote as `repoid://authority/path`; for example, `https://github.com/owner/repo.git` becomes `repoid://github.com/owner/repo`.
+3. Compute the committed bytes with `git show HEAD:.no-mistakes.yaml | shasum -a 256` and add one complete binding to the user-owned global config. Derive the identity from the credential-free parent remote: HTTPS `https://host/group/repo.git` becomes `repoid://host/group/repo`, generic SSH URL `ssh://Alice@host/group/repo.git` becomes `repoid+ssh-abs://Alice@host/group/repo`, and generic SCP `Alice@host:group/repo.git` becomes `repoid+ssh-rel://Alice@host/group/repo`. GitHub HTTPS, SSH URL, and SCP aliases all use the transport-neutral `repoid://github.com/owner/repo` form.
 4. Start the policy branch's validation normally. Do not change the policy file or binding during that run.
 5. Remove the global binding as soon as the policy reaches the pipeline base. The daemon has already retired bootstrap permanently for that repository/base; removing the now-inert binding keeps the global config clear.
 
