@@ -128,9 +128,6 @@ func splitSCP(value string) (host, repoPath string, ok bool, err error) {
 		return "", "", false, fmt.Errorf("repository host is ambiguous")
 	}
 	left, right := value[:colon], value[colon+1:]
-	if slash > colon && isDecimal(right[:slash-colon-1]) {
-		return "", "", false, nil
-	}
 	if strings.Count(left, "@") > 1 {
 		return "", "", false, fmt.Errorf("repository SSH authority is ambiguous")
 	}
@@ -139,6 +136,10 @@ func splitSCP(value string) (host, repoPath string, ok bool, err error) {
 			return "", "", false, fmt.Errorf("repository SSH user is empty")
 		}
 		left = left[at+1:]
+		return left, right, true, nil
+	}
+	if slash > colon && isDecimal(right[:slash-colon-1]) {
+		return "", "", false, nil
 	}
 	return left, right, true, nil
 }
