@@ -38,6 +38,9 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if err := d.sql.QueryRow("SELECT count(*) FROM step_results").Scan(&count); err != nil {
 		t.Fatalf("step_results table missing: %v", err)
 	}
+	if err := d.sql.QueryRow("SELECT count(*) FROM bootstrap_test_retirements").Scan(&count); err != nil {
+		t.Fatalf("bootstrap_test_retirements table missing: %v", err)
+	}
 	for _, column := range []string{"fork_url", "base_branch"} {
 		if !hasColumn(t, d, "repos", column) {
 			t.Fatalf("repos.%s column missing from fresh schema", column)
@@ -79,6 +82,15 @@ func TestOpenMigratesRunSyncProvenanceWithoutBackfillingMutableHead(t *testing.T
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Close() })
+	if retired, err := d.IsBootstrapTestRetired("github.com/owner/repo", "main"); err != nil || retired {
+		t.Fatalf("legacy migration inferred retirement: retired=%v err=%v", retired, err)
+	}
+	if err := d.RetireBootstrapTest("github.com/owner/repo", "main"); err != nil {
+		t.Fatalf("legacy migration did not create retirement storage: %v", err)
+	}
+	if retired, err := d.IsBootstrapTestRetired("github.com/owner/repo", "main"); err != nil || !retired {
+		t.Fatalf("legacy retirement round trip = %v, err=%v", retired, err)
+	}
 	run, err := d.GetRun("run-1")
 	if err != nil {
 		t.Fatal(err)

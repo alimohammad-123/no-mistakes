@@ -191,21 +191,28 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	if err != nil {
 		return nil, fmt.Errorf("load global config: %w", err)
 	}
-	repoCfg, err := config.LoadRepo(workDir)
-	if err != nil {
-		return nil, fmt.Errorf("load repo config: %w", err)
-	}
 	baseBranch := run.EffectiveBaseBranch(repo)
-	fetchSource := "origin"
-	bootstrapIdentity := ""
 	frozenBootstrap, err := run.FrozenBootstrapTestAuthorization()
 	if err != nil {
 		return nil, err
 	}
-	if frozenBootstrap != nil {
+	bootstrapBinding, err := matchingBootstrapTestBinding(globalCfg, repo, baseBranch)
+	if err != nil {
+		return nil, err
+	}
+	retirementRepository, retirementBase, bootstrapRelevant, err := bootstrapTestRetirementKey(bootstrapBinding, frozenBootstrap)
+	if err != nil {
+		return nil, err
+	}
+	fetchSource := "origin"
+	bootstrapIdentity := ""
+	if bootstrapRelevant {
 		fetchSource, bootstrapIdentity, err = bootstrapFetchSource(ctx, repo, workDir)
 		if err != nil {
 			return nil, err
+		}
+		if bootstrapIdentity != retirementRepository || baseBranch != retirementBase {
+			return nil, fmt.Errorf("bootstrap Test retirement key no longer matches the repository and pipeline base")
 		}
 	}
 	var trustedSHA string
@@ -213,9 +220,9 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 		fetchCtx, cancel := context.WithTimeout(ctx, recoveredConfigFetchTimeout)
 		defer cancel()
 		if err := fetchRecoveredRemoteBranch(fetchCtx, workDir, fetchSource, baseBranch); err != nil {
-			slog.Warn("failed to fetch pipeline base while recovering run; trusted config disabled", "run_id", run.ID, "branch", baseBranch, "error", err)
+			slog.Warn("failed to fetch pipeline base while recovering run; authoritative trusted-policy retrieval will fail and recovery will stop without executing submitted commands", "run_id", run.ID, "branch", baseBranch, "error", err)
 		} else if sha, err := git.ResolveRef(ctx, workDir, "refs/remotes/origin/"+baseBranch); err != nil {
-			slog.Warn("failed to resolve pipeline base while recovering run; trusted config disabled", "run_id", run.ID, "branch", baseBranch, "error", err)
+			slog.Warn("failed to resolve pipeline base while recovering run; authoritative trusted-policy retrieval will fail and recovery will stop without executing submitted commands", "run_id", run.ID, "branch", baseBranch, "error", err)
 		} else {
 			trustedSHA = sha
 		}
@@ -227,6 +234,26 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 		return nil, err
 	}
 	trustedPolicy.RepositoryIdentity = bootstrapIdentity
+	if bootstrapRelevant && trustedPolicy.Present {
+		if err := m.db.RetireBootstrapTest(retirementRepository, retirementBase); err != nil {
+			return nil, fmt.Errorf("persist bootstrap Test retirement: %w", err)
+		}
+	}
+	if frozenBootstrap != nil && !trustedPolicy.Present {
+		retired, err := m.db.IsBootstrapTestRetired(frozenBootstrap.Repository, frozenBootstrap.BaseBranch)
+		if err != nil {
+			return nil, err
+		}
+		if retired {
+			return nil, fmt.Errorf("%w for repository %q and pipeline base %q", db.ErrBootstrapTestRetired, frozenBootstrap.Repository, frozenBootstrap.BaseBranch)
+		}
+	}
+	// Retirement is persisted immediately after the authoritative observation,
+	// before mutable submitted policy is parsed or any agent can be created.
+	repoCfg, err := config.LoadRepo(workDir)
+	if err != nil {
+		return nil, fmt.Errorf("load repo config: %w", err)
+	}
 	trustedRepoCfg := trustedPolicy.Config
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	cfg := config.Merge(globalCfg, config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands))
@@ -712,9 +739,9 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	var trustedSHA string
 	if baseBranch != "" {
 		if err := fetchInitialTrustedRemoteBranch(ctx, wtDir, fetchSource, baseBranch); err != nil {
-			slog.Warn("failed to fetch pipeline base into worktree; trusted config disabled (commands/agent from pushed branch will be dropped)", "run_id", run.ID, "branch", baseBranch, "error", err)
+			slog.Warn("failed to fetch pipeline base into worktree; authoritative trusted-policy retrieval will fail and the run will stop without executing submitted commands", "run_id", run.ID, "branch", baseBranch, "error", err)
 		} else if sha, err := git.ResolveRef(ctx, wtDir, "refs/remotes/origin/"+baseBranch); err != nil {
-			slog.Warn("failed to resolve fetched pipeline-base ref; trusted config disabled", "run_id", run.ID, "branch", baseBranch, "error", err)
+			slog.Warn("failed to resolve fetched pipeline-base ref; authoritative trusted-policy retrieval will fail and the run will stop without executing submitted commands", "run_id", run.ID, "branch", baseBranch, "error", err)
 		} else {
 			trustedSHA = sha
 		}
@@ -731,17 +758,11 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		}
 	}()
 
-	repoCfg, err := config.LoadRepo(wtDir)
-	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
-		trackStartFailure("load_repo_config")
-		return "", fmt.Errorf("load repo config: %w", err)
-	}
 	// SECURITY: load the code-executing selection fields (commands.* and
 	// agent) from the trusted pipeline-base copy of .no-mistakes.yaml rather
 	// than the pushed SHA. The worktree is checked out at headSHA (the
-	// contributor's branch), so reading repoCfg above would honor a
-	// contributor's commands/agent and let any pushed SHA run arbitrary shell
+	// contributor's branch), so treating its repo config as authoritative would
+	// let any pushed SHA run arbitrary shell
 	// (sh -c) or pick the launched agent (incl. acp: targets) on the daemon
 	// host with the maintainer's env (GH_TOKEN, SSH agent, ...).
 	// EffectiveRepoConfig replaces commands + agent with the trusted
@@ -761,6 +782,25 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		return "", err
 	}
 	trustedPolicy.RepositoryIdentity = bootstrapIdentity
+	if bootstrapBinding != nil && trustedPolicy.Present {
+		if bootstrapIdentity != bootstrapBinding.Repository {
+			err := fmt.Errorf("bootstrap Test retirement identity no longer matches the binding repository")
+			m.db.UpdateRunError(run.ID, err.Error())
+			return "", err
+		}
+		if err := m.db.RetireBootstrapTest(bootstrapBinding.Repository, bootstrapBinding.BaseBranch); err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			return "", fmt.Errorf("persist bootstrap Test retirement: %w", err)
+		}
+	}
+	// Retirement is persisted immediately after the authoritative observation,
+	// before mutable submitted policy is parsed or any agent can be created.
+	repoCfg, err := config.LoadRepo(wtDir)
+	if err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
+		trackStartFailure("load_repo_config")
+		return "", fmt.Errorf("load repo config: %w", err)
+	}
 	trustedRepoCfg := trustedPolicy.Config
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)

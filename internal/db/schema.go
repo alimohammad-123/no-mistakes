@@ -11,6 +11,13 @@ CREATE TABLE IF NOT EXISTS repos (
     created_at     INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS bootstrap_test_retirements (
+    repository  TEXT NOT NULL,
+    base_branch TEXT NOT NULL,
+    retired_at  INTEGER NOT NULL,
+    PRIMARY KEY (repository, base_branch)
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id                   TEXT PRIMARY KEY,
     repo_id              TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,

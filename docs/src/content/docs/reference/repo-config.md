@@ -10,7 +10,7 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated feature branch, the daemon reads **`commands` and `agent` from the run's pipeline base**, never from the pushed SHA, at the exact commit resolved by a fresh fetch.
 No-mistakes also reads `base_branch`, `allow_repo_commands`, `document.instructions`, and `disable_project_settings` only from the currently trusted copy. `base_branch` is resolved during init; the other fields are loaded for each run.
 If the pipeline base cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
-A readable pipeline-base tree with no `.no-mistakes.yaml` is valid and uses defaults. The sole exception is the temporary, exact [`bootstrap.test`](/no-mistakes/reference/global-config/#bootstraptest) authorization for a first policy change. That path supplies only its user-owned Test command after matching the parent repository, registered base, submitted policy command, and complete-file digest. Feature-branch values never authorize it, and it steps aside whenever base-owned policy is present.
+A readable pipeline-base tree with no `.no-mistakes.yaml` is valid and uses defaults. The sole exception is the temporary, exact [`bootstrap.test`](/no-mistakes/reference/global-config/#bootstraptest) authorization for a first policy change. That path supplies only its user-owned Test command after matching the parent repository, registered base, submitted policy command, and complete-file digest. Feature-branch values never authorize it, and observing base-owned policy permanently retires it for that repository/base.
 
 By default the pipeline base is the parent repository's detected default branch. Setting [`base_branch`](#base_branch) delegates executable-config trust to that branch as well as making it the integration and PR target. Protect it accordingly.
 Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`) are still read from the pushed branch.
@@ -162,7 +162,7 @@ Explicit test command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /
 | Default | Empty (agent auto-detects tests and evidence checks) |
 
 When set on the trusted pipeline base, the test step runs this exact command first as the baseline and checks the exit code.
-For the first policy change only, a complete global [`bootstrap.test`](/no-mistakes/reference/global-config/#bootstraptest) binding may supply the same exact command while the freshly pinned base proves this file absent. The submitted `commands.test` is match evidence, never executable input; the frozen global command runs. Remove the binding when the policy reaches the base.
+For the first policy change only, a complete global [`bootstrap.test`](/no-mistakes/reference/global-config/#bootstraptest) binding may supply the same exact command while the freshly pinned base proves this file absent. The submitted `commands.test` is match evidence, never executable input; the frozen global command runs. Once policy is observed on the base, bootstrap is permanently retired for that repository/base and the binding should be removed.
 When empty, the agent detects and runs relevant tests itself.
 When user intent is available, the agent may still run after a successful baseline command to gather evidence-oriented validation.
 

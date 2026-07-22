@@ -294,8 +294,9 @@ func (d *DB) GetActiveRuns() ([]*Run, error) {
 }
 
 // SetRunBootstrapTestAuthorization atomically freezes a complete bootstrap
-// authorization. The all-null guard makes the snapshot write-once, and the
-// base comparison prevents a binding from being stamped onto another run.
+// authorization. The all-null guard makes the snapshot write-once, the base
+// comparison prevents cross-run stamping, and the retirement predicate
+// linearizes admission against permanent repository/base retirement.
 func (d *DB) SetRunBootstrapTestAuthorization(id string, auth BootstrapTestAuthorization) error {
 	repository, baseBranch, command, digest := auth.Repository, auth.BaseBranch, auth.Command, auth.PolicySHA256
 	candidate := &Run{
@@ -310,8 +311,9 @@ func (d *DB) SetRunBootstrapTestAuthorization(id string, auth BootstrapTestAutho
 	}
 	result, err := d.sql.Exec(
 		`UPDATE runs SET bootstrap_test_repository = ?, bootstrap_test_base_branch = ?, bootstrap_test_command = ?, bootstrap_test_policy_sha256 = ?, updated_at = ?
-		 WHERE id = ? AND base_branch = ? AND bootstrap_test_repository IS NULL AND bootstrap_test_base_branch IS NULL AND bootstrap_test_command IS NULL AND bootstrap_test_policy_sha256 IS NULL`,
-		auth.Repository, auth.BaseBranch, auth.Command, auth.PolicySHA256, now(), id, auth.BaseBranch,
+		 WHERE id = ? AND base_branch = ? AND bootstrap_test_repository IS NULL AND bootstrap_test_base_branch IS NULL AND bootstrap_test_command IS NULL AND bootstrap_test_policy_sha256 IS NULL
+		 AND NOT EXISTS (SELECT 1 FROM bootstrap_test_retirements WHERE repository = ? AND base_branch = ?)`,
+		auth.Repository, auth.BaseBranch, auth.Command, auth.PolicySHA256, now(), id, auth.BaseBranch, auth.Repository, auth.BaseBranch,
 	)
 	if err != nil {
 		return fmt.Errorf("set run bootstrap Test authorization: %w", err)
@@ -321,6 +323,13 @@ func (d *DB) SetRunBootstrapTestAuthorization(id string, auth BootstrapTestAutho
 		return fmt.Errorf("set run bootstrap Test authorization: %w", err)
 	}
 	if count != 1 {
+		retired, retiredErr := d.IsBootstrapTestRetired(auth.Repository, auth.BaseBranch)
+		if retiredErr != nil {
+			return fmt.Errorf("set run bootstrap Test authorization: %w", retiredErr)
+		}
+		if retired {
+			return fmt.Errorf("set run bootstrap Test authorization: %w for repository %q and pipeline base %q", ErrBootstrapTestRetired, auth.Repository, auth.BaseBranch)
+		}
 		return fmt.Errorf("set run bootstrap Test authorization: run is missing, mismatched, or already frozen")
 	}
 	return nil

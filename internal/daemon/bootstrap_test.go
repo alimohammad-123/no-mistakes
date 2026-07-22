@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -232,6 +234,164 @@ func TestPushReceivedTrustedPolicyIgnoresUnrelatedBootstrapBinding(t *testing.T)
 	}
 	if auth, err := run.FrozenBootstrapTestAuthorization(); err != nil || auth != nil {
 		t.Fatalf("trusted-policy run gained bootstrap authorization: auth=%+v err=%v", auth, err)
+	}
+	for _, key := range [][2]string{{"github.com/other/repo", "main"}, {"github.com/test/repo", "main"}} {
+		if retired, err := database.IsBootstrapTestRetired(key[0], key[1]); err != nil || retired {
+			t.Fatalf("unrelated binding retired %s/%s: retired=%v err=%v", key[0], key[1], retired, err)
+		}
+	}
+}
+
+func TestPushReceivedRetiresBootstrapAfterTrustedPolicyObservation(t *testing.T) {
+	step := &bootstrapCaptureStep{seen: make(chan *config.Config, 2)}
+	p, database := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{step} })
+	repo, _ := setupTestGitRepo(t, p, database, "bootstrap-retirement")
+	oldGetOriginURL := getBootstrapOriginURL
+	getBootstrapOriginURL = func(context.Context, string, string) (string, error) { return repo.UpstreamURL, nil }
+	t.Cleanup(func() { getBootstrapOriginURL = oldGetOriginURL })
+	oldFetch := fetchInitialTrustedRemoteBranch
+	fetchInitialTrustedRemoteBranch = func(ctx context.Context, workDir, remote, branch string) error {
+		return gitpkg.FetchRemoteBranchToRef(ctx, workDir, p.RepoDir(repo.ID), branch, "refs/remotes/origin/"+branch)
+	}
+	t.Cleanup(func() { fetchInitialTrustedRemoteBranch = oldFetch })
+
+	gitCmd(t, repo.WorkingPath, "checkout", "-B", "main")
+	trustedPolicy := []byte("commands:\n  test: trusted-base-test\n")
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, repoPolicyPath), trustedPolicy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", repoPolicyPath)
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "install trusted policy")
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main", "--force")
+	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature/observe-policy")
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "test.txt"), []byte("observe\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", "test.txt")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "observe policy")
+	observedHead := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/feature/observe-policy")
+
+	candidatePolicy := []byte("commands:\n  test: go test ./...\n")
+	binding := bootstrapBindingFor(candidatePolicy)
+	binding.Repository = "github.com/test/repo"
+	binding.BaseBranch = "main"
+	configData, err := os.ReadFile(p.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	configData = append(configData, []byte(fmt.Sprintf("bootstrap:\n  test:\n    - repository: %s\n      base_branch: main\n      command: %s\n      policy_sha256: %s\n", binding.Repository, binding.Command, binding.PolicySHA256))...)
+	if err := os.WriteFile(p.ConfigFile(), configData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var first ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/feature/observe-policy", New: observedHead}, &first); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, database, first.RunID)
+	select {
+	case cfg := <-step.seen:
+		if cfg.Commands.Test != "trusted-base-test" {
+			t.Fatalf("trusted Test command = %q", cfg.Commands.Test)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("trusted policy run did not execute")
+	}
+	if retired, err := database.IsBootstrapTestRetired(binding.Repository, "main"); err != nil || !retired {
+		t.Fatalf("retirement after policy observation = %v, err=%v", retired, err)
+	}
+
+	gitCmd(t, repo.WorkingPath, "checkout", "main")
+	gitCmd(t, repo.WorkingPath, "rm", repoPolicyPath)
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "delete trusted policy")
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main", "--force")
+	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature/rebootstrap")
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, repoPolicyPath), candidatePolicy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", repoPolicyPath)
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "attempt bootstrap again")
+	candidateHead := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/feature/rebootstrap")
+	var second ipc.PushReceivedResult
+	err = client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/feature/rebootstrap", New: candidateHead}, &second)
+	if !errors.Is(err, db.ErrBootstrapTestRetired) && (err == nil || !strings.Contains(err.Error(), db.ErrBootstrapTestRetired.Error())) {
+		t.Fatalf("rebootstrap error = %v, want permanent retirement", err)
+	}
+	select {
+	case <-step.seen:
+		t.Fatal("retired bootstrap executed a pipeline step")
+	case <-time.After(100 * time.Millisecond):
+	}
+	runs, err := database.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) == 0 {
+		t.Fatal("retired bootstrap did not record a failed setup run")
+	}
+	if frozen, err := runs[0].FrozenBootstrapTestAuthorization(); err != nil || frozen != nil {
+		t.Fatalf("retired run authorization = %+v, err=%v", frozen, err)
+	}
+}
+
+func TestPushReceivedStopsWhenBootstrapRetirementCannotPersist(t *testing.T) {
+	step := &bootstrapCaptureStep{seen: make(chan *config.Config, 1)}
+	p, database := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{step} })
+	repo, headSHA := setupTestGitRepo(t, p, database, "bootstrap-retirement-failure")
+	oldGetOriginURL := getBootstrapOriginURL
+	getBootstrapOriginURL = func(context.Context, string, string) (string, error) { return repo.UpstreamURL, nil }
+	t.Cleanup(func() { getBootstrapOriginURL = oldGetOriginURL })
+	oldFetch := fetchInitialTrustedRemoteBranch
+	fetchInitialTrustedRemoteBranch = func(ctx context.Context, workDir, remote, branch string) error {
+		return gitpkg.FetchRemoteBranchToRef(ctx, workDir, p.RepoDir(repo.ID), branch, "refs/remotes/origin/"+branch)
+	}
+	t.Cleanup(func() { fetchInitialTrustedRemoteBranch = oldFetch })
+
+	policy := []byte("commands:\n  test: go test ./...\n")
+	binding := bootstrapBindingFor(policy)
+	binding.Repository = "github.com/test/repo"
+	binding.BaseBranch = "main"
+	configData, err := os.ReadFile(p.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	configData = append(configData, []byte(fmt.Sprintf("bootstrap:\n  test:\n    - repository: %s\n      base_branch: main\n      command: %s\n      policy_sha256: %s\n", binding.Repository, binding.Command, binding.PolicySHA256))...)
+	if err := os.WriteFile(p.ConfigFile(), configData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.Exec(`DROP TABLE bootstrap_test_retirements`); err != nil {
+		storage.Close()
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var result ipc.PushReceivedResult
+	err = client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/feature/test", New: headSHA}, &result)
+	if err == nil || !strings.Contains(err.Error(), "persist bootstrap Test retirement") {
+		t.Fatalf("push error = %v, want retirement persistence failure", err)
+	}
+	select {
+	case <-step.seen:
+		t.Fatal("pipeline step executed after retirement persistence failure")
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
@@ -547,6 +707,127 @@ func TestRecoverOnStartupRunsTestFromFrozenBootstrapAfterBindingRemoval(t *testi
 	completed := waitForRunTerminalState(t, database, run.ID)
 	if completed.Status != types.RunCompleted {
 		t.Fatalf("recovered run status = %s, want completed", completed.Status)
+	}
+}
+
+func TestLoadRecoveredConfigRejectsRetiredBootstrapAfterPolicyDeletionAndReopen(t *testing.T) {
+	policy := []byte("commands:\n  test: go test ./...\n")
+	fixture := newBootstrapFixture(t, policy)
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	binding := bootstrapBindingFor(policy)
+	globalYAML := fmt.Sprintf("agent: auto\nbootstrap:\n  test:\n    - repository: %s\n      base_branch: %s\n      command: %s\n      policy_sha256: %s\n", binding.Repository, binding.BaseBranch, binding.Command, binding.PolicySHA256)
+	if err := os.WriteFile(p.ConfigFile(), []byte(globalYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := database.InsertRepoWithIDAndForkAndBase("repo", fixture.workDir, fixture.repo.UpstreamURL, "", "main", "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRunWithBaseBranch(repo.ID, "feature/policy", fixture.featureSHA, fixture.run.BaseSHA, "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunBootstrapTestAuthorization(run.ID, db.BootstrapTestAuthorization(binding)); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.RetireBootstrapTest(binding.Repository, binding.BaseBranch); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldFetch := fetchRecoveredRemoteBranch
+	fetchRecoveredRemoteBranch = func(ctx context.Context, workDir, remote, branch string) error {
+		return gitpkg.FetchRemoteBranchToRef(ctx, workDir, fixture.bareDir, branch, "refs/remotes/origin/"+branch)
+	}
+	t.Cleanup(func() { fetchRecoveredRemoteBranch = oldFetch })
+
+	mgr := NewRunManager(database, p, nil)
+	_, err = mgr.loadRecoveredConfig(context.Background(), run, repo, fixture.workDir)
+	if !errors.Is(err, db.ErrBootstrapTestRetired) {
+		t.Fatalf("recovery with retained binding error = %v, want ErrBootstrapTestRetired", err)
+	}
+	if err := os.WriteFile(p.ConfigFile(), []byte("agent: auto\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = mgr.loadRecoveredConfig(context.Background(), run, repo, fixture.workDir)
+	if !errors.Is(err, db.ErrBootstrapTestRetired) {
+		t.Fatalf("recovery after binding removal error = %v, want ErrBootstrapTestRetired", err)
+	}
+}
+
+func TestLoadRecoveredConfigPersistsRetirementWhenBasePolicyAppears(t *testing.T) {
+	policy := []byte("commands:\n  test: go test ./...\n")
+	fixture := newBootstrapFixture(t, policy)
+	gitCmd(t, fixture.workDir, "remote", "set-url", "origin", fixture.bareDir)
+	gitCmd(t, fixture.workDir, "checkout", "staging")
+	if err := os.WriteFile(filepath.Join(fixture.workDir, repoPolicyPath), []byte("commands:\n  test: trusted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, fixture.workDir, "add", repoPolicyPath)
+	gitCmd(t, fixture.workDir, "commit", "-m", "install trusted policy")
+	gitCmd(t, fixture.workDir, "push", "origin", "staging")
+	gitCmd(t, fixture.workDir, "checkout", "feature/policy")
+	gitCmd(t, fixture.workDir, "remote", "set-url", "origin", fixture.repo.UpstreamURL)
+
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	binding := bootstrapBindingFor(policy)
+	globalYAML := fmt.Sprintf("agent: auto\nbootstrap:\n  test:\n    - repository: %s\n      base_branch: %s\n      command: %s\n      policy_sha256: %s\n", binding.Repository, binding.BaseBranch, binding.Command, binding.PolicySHA256)
+	if err := os.WriteFile(p.ConfigFile(), []byte(globalYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepoWithIDAndForkAndBase("repo", fixture.workDir, fixture.repo.UpstreamURL, "", "main", "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRunWithBaseBranch(repo.ID, "feature/policy", fixture.featureSHA, fixture.run.BaseSHA, "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunBootstrapTestAuthorization(run.ID, db.BootstrapTestAuthorization(binding)); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldFetch := fetchRecoveredRemoteBranch
+	fetchRecoveredRemoteBranch = func(ctx context.Context, workDir, remote, branch string) error {
+		return gitpkg.FetchRemoteBranchToRef(ctx, workDir, fixture.bareDir, branch, "refs/remotes/origin/"+branch)
+	}
+	t.Cleanup(func() { fetchRecoveredRemoteBranch = oldFetch })
+
+	mgr := NewRunManager(database, p, nil)
+	if _, err := mgr.loadRecoveredConfig(context.Background(), run, repo, fixture.workDir); err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("recovery error = %v, want stale bootstrap refusal", err)
+	}
+	if retired, err := database.IsBootstrapTestRetired(binding.Repository, binding.BaseBranch); err != nil || !retired {
+		t.Fatalf("recovery retirement = %v, err=%v", retired, err)
 	}
 }
 

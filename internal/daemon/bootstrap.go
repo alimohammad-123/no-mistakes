@@ -78,6 +78,19 @@ func resolveBootstrapTestAuthorization(
 	}, nil
 }
 
+func bootstrapTestRetirementKey(binding *config.BootstrapTestBinding, frozen *db.BootstrapTestAuthorization) (repository, baseBranch string, ok bool, err error) {
+	if binding != nil {
+		repository, baseBranch, ok = binding.Repository, binding.BaseBranch, true
+	}
+	if frozen == nil {
+		return repository, baseBranch, ok, nil
+	}
+	if ok && (repository != frozen.Repository || baseBranch != frozen.BaseBranch) {
+		return "", "", false, fmt.Errorf("current and frozen bootstrap Test bindings identify different trust roots")
+	}
+	return frozen.Repository, frozen.BaseBranch, true, nil
+}
+
 func matchingBootstrapTestBinding(global *config.GlobalConfig, repo *db.Repo, baseBranch string) (*config.BootstrapTestBinding, error) {
 	if global == nil || len(global.Bootstrap.Test) == 0 {
 		return nil, nil

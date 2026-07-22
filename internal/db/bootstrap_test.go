@@ -1,6 +1,8 @@
 package db
 
 import (
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -60,5 +62,86 @@ func TestRunBootstrapTestAuthorizationRejectsPartialSnapshot(t *testing.T) {
 	run.BootstrapTestRepository = &value
 	if _, err := run.FrozenBootstrapTestAuthorization(); err == nil {
 		t.Fatal("partial bootstrap snapshot was accepted")
+	}
+}
+
+func TestBootstrapTestRetirementPersistsAcrossReopenAndUsesExactKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "retirement.sqlite")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := d.IsBootstrapTestRetired("github.com/owner/repo", "staging"); err != nil || retired {
+		t.Fatalf("initial retirement = %v, err=%v", retired, err)
+	}
+	if err := d.RetireBootstrapTest("github.com/owner/repo", "staging"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		repository string
+		base       string
+		want       bool
+	}{
+		{repository: "github.com/owner/repo", base: "staging", want: true},
+		{repository: "github.com/owner/repo", base: "main", want: false},
+		{repository: "github.com/other/repo", base: "staging", want: false},
+	} {
+		retired, err := d.IsBootstrapTestRetired(tc.repository, tc.base)
+		if err != nil || retired != tc.want {
+			t.Fatalf("retirement %s/%s = %v, err=%v, want %v", tc.repository, tc.base, retired, err, tc.want)
+		}
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if retired, err := d.IsBootstrapTestRetired("github.com/owner/repo", "staging"); err != nil || !retired {
+		t.Fatalf("reopened retirement = %v, err=%v", retired, err)
+	}
+}
+
+func TestSetRunBootstrapTestAuthorizationRefusesRetiredKey(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepoWithIDAndForkAndBase("bootstrap-retired", "/tmp/bootstrap-retired", "https://github.com/owner/repo.git", "", "main", "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRunWithBaseBranch(repo.ID, "feature/policy", "head", "base", "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := BootstrapTestAuthorization{
+		Repository: "github.com/owner/repo", BaseBranch: "staging", Command: "go test ./...", PolicySHA256: strings.Repeat("a", 64),
+	}
+	if err := d.RetireBootstrapTest(auth.Repository, auth.BaseBranch); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunBootstrapTestAuthorization(run.ID, auth); !errors.Is(err, ErrBootstrapTestRetired) {
+		t.Fatalf("authorization error = %v, want ErrBootstrapTestRetired", err)
+	}
+	persisted, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frozen, err := persisted.FrozenBootstrapTestAuthorization(); err != nil || frozen != nil {
+		t.Fatalf("retired run authorization = %+v, err=%v", frozen, err)
+	}
+}
+
+func TestBootstrapTestRetirementStorageErrorsFailClosed(t *testing.T) {
+	d := openTestDB(t)
+	if _, err := d.sql.Exec(`DROP TABLE bootstrap_test_retirements`); err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := d.IsBootstrapTestRetired("github.com/owner/repo", "staging"); err == nil || retired {
+		t.Fatalf("retirement lookup did not fail closed: retired=%v err=%v", retired, err)
+	}
+	if err := d.RetireBootstrapTest("github.com/owner/repo", "staging"); err == nil {
+		t.Fatal("retirement persistence error was ignored")
 	}
 }

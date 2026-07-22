@@ -104,7 +104,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 
 - Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
 - Reloads trusted repository policy from the run's frozen pipeline base, not the repo's current registration, so re-init cannot switch trust roots or integration targets underneath a parked run or its reused reviewer/fixer sessions
-- Restores an authorized first-policy Test command only from the complete run snapshot, never from later global bootstrap edits; recovery refuses the bootstrap run if trusted base policy has appeared
+- Restores an authorized first-policy Test command only from the complete run snapshot, never from later global bootstrap edits; durable repository/base retirement makes recovery refuse after trusted base policy has ever been observed
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
