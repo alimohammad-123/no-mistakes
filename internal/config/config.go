@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/repoidentity"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"gopkg.in/yaml.v3"
@@ -66,6 +69,24 @@ type GlobalConfig struct {
 	Commit       CommitRaw
 	Intent       IntentRaw
 	Test         TestRaw
+	// Bootstrap is a user-owned, narrowly bound authorization used only by the
+	// daemon while adopting a repository's first trusted policy. It never enters
+	// ordinary global/repository merge precedence.
+	Bootstrap BootstrapRaw
+}
+
+// BootstrapRaw holds disabled-by-default first-policy adoption bindings.
+type BootstrapRaw struct {
+	Test []BootstrapTestBinding `yaml:"test"`
+}
+
+// BootstrapTestBinding authorizes one exact Test command only for one
+// repository, pipeline base, and submitted policy-file digest.
+type BootstrapTestBinding struct {
+	Repository   string `yaml:"repository"`
+	BaseBranch   string `yaml:"base_branch"`
+	Command      string `yaml:"command"`
+	PolicySHA256 string `yaml:"policy_sha256"`
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -85,6 +106,7 @@ type globalConfigRaw struct {
 	Commit               CommitRaw           `yaml:"commit"`
 	Intent               IntentRaw           `yaml:"intent"`
 	Test                 TestRaw             `yaml:"test"`
+	Bootstrap            BootstrapRaw        `yaml:"bootstrap"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -389,6 +411,18 @@ log_level: info
 #     - -c
 #     - model_reasoning_effort="low"
 #
+# First-policy Test bootstrap (disabled by default). This user-owned binding is
+# accepted only when the freshly fetched pipeline base has no .no-mistakes.yaml,
+# and only when all four values exactly match the registered repository, frozen
+# base, command installed by the submitted policy, and SHA-256 of that policy's
+# complete bytes. Remove it after the policy reaches the pipeline base.
+# bootstrap:
+#   test:
+#     - repository: github.com/owner/repo
+#       base_branch: staging
+#       command: go test ./...
+#       policy_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
 # Maximum follow-up auto-fix attempts per step (0 = disabled after the initial pass)
 # Document fixes are attempted during the initial document pass.
 auto_fix:
@@ -921,6 +955,9 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	if err := validateCommitRaw(raw.Commit); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if err := ValidateBootstrapTestBindings(raw.Bootstrap.Test); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -981,9 +1018,48 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
+	cfg.Bootstrap = BootstrapRaw{Test: append([]BootstrapTestBinding(nil), raw.Bootstrap.Test...)}
 
 	return cfg, nil
 }
+
+// ValidateBootstrapTestBindings validates complete, canonical bootstrap
+// authorizations. It is exported so the daemon can revalidate programmatically
+// constructed config at the security boundary.
+func ValidateBootstrapTestBindings(bindings []BootstrapTestBinding) error {
+	seen := make(map[string]struct{}, len(bindings))
+	for i, binding := range bindings {
+		prefix := fmt.Sprintf("bootstrap.test[%d]", i)
+		identity, err := repoidentity.Canonical(binding.Repository)
+		if err != nil || identity != binding.Repository {
+			return fmt.Errorf("%s.repository must be a canonical host/path identity", prefix)
+		}
+		if binding.BaseBranch == "" || strings.TrimSpace(binding.BaseBranch) != binding.BaseBranch || strings.HasPrefix(binding.BaseBranch, "refs/") {
+			return fmt.Errorf("%s.base_branch must be a short branch name", prefix)
+		}
+		if err := git.ValidatePortableBranchName(binding.BaseBranch); err != nil {
+			return fmt.Errorf("%s.base_branch: %w", prefix, err)
+		}
+		if binding.Command == "" || strings.TrimSpace(binding.Command) != binding.Command {
+			return fmt.Errorf("%s.command must be non-empty without surrounding whitespace", prefix)
+		}
+		if len(binding.PolicySHA256) != sha256HexLength || strings.ToLower(binding.PolicySHA256) != binding.PolicySHA256 {
+			return fmt.Errorf("%s.policy_sha256 must be 64 lowercase hexadecimal characters", prefix)
+		}
+		decoded, err := hex.DecodeString(binding.PolicySHA256)
+		if err != nil || len(decoded) != 32 {
+			return fmt.Errorf("%s.policy_sha256 must be 64 lowercase hexadecimal characters", prefix)
+		}
+		key := binding.Repository + "\x00" + binding.BaseBranch
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("%s duplicates a repository/base bootstrap binding", prefix)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+const sha256HexLength = 64
 
 // parseCITimeout interprets the ci_timeout config value. The keyword
 // "unlimited" (also "none"/"off"/"never"), or any non-positive duration,

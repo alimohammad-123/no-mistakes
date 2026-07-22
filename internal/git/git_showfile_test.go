@@ -41,6 +41,19 @@ func TestShowFile_AtHEAD(t *testing.T) {
 	}
 }
 
+func TestShowFileBytes_PreservesExactBlobBytes(t *testing.T) {
+	ctx := context.Background()
+	repo := initTestRepo(t)
+
+	content, err := ShowFileBytes(ctx, repo, "HEAD", "README.md")
+	if err != nil {
+		t.Fatalf("ShowFileBytes HEAD:README.md: %v", err)
+	}
+	if string(content) != "# test\n" {
+		t.Fatalf("content = %q, want exact bytes with final newline", content)
+	}
+}
+
 func TestResolveRef(t *testing.T) {
 	ctx := context.Background()
 	repo := initTestRepo(t)

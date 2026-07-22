@@ -202,14 +202,19 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 			trustedSHA = sha
 		}
 	}
-	// SECURITY: a trusted-config fetch failure must abort, not silently disable
-	// the disable_project_settings opt-out (see assertGateTrustedConfigReadable).
-	if err := assertGateTrustedConfigReadable(ctx, workDir, baseBranch, trustedSHA); err != nil {
+	// SECURITY: absence, unreadability, and parse failure must remain distinct.
+	// Bootstrap is eligible only for a successful read that proves absence.
+	trustedPolicy, err := readTrustedRepoPolicy(ctx, workDir, baseBranch, trustedSHA)
+	if err != nil {
 		return nil, err
 	}
-	trustedRepoCfg := loadTrustedRepoConfig(ctx, workDir, trustedSHA, run.ID)
+	trustedRepoCfg := trustedPolicy.Config
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
-	return config.Merge(globalCfg, config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)), nil
+	cfg := config.Merge(globalCfg, config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands))
+	if err := applyFrozenBootstrapTestAuthorization(ctx, cfg, run, repo, workDir, trustedPolicy); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(string) (string, error)) (agent.Agent, error) {
@@ -446,74 +451,63 @@ func protectedSourceBranch(repo *db.Repo, branch string) bool {
 	return branch == strings.TrimSpace(repo.DefaultBranch) || branch == repo.EffectiveBaseBranch()
 }
 
-// loadTrustedRepoConfig reads .no-mistakes.yaml from the trusted
-// pipeline-base commit (trustedSHA - the exact SHA startRun just fetched and
-// resolved) in the worktree and parses it. Reading at a pinned SHA, rather
-// than the origin/<baseBranch> remote-tracking ref, closes the stale-ref
-// hole: the gate worktree shares refs with the bare repo, so without a fresh
-// fetch + resolve the ref could point at a commit a previous run left behind.
-//
-// trustedSHA is empty when the pipeline base is unknown, the fetch failed,
-// or the ref did not resolve. The caller must first reject those cases with
-// assertGateTrustedConfigReadable; returning nil here remains defensive and
-// ensures EffectiveRepoConfig never uses pushed gate-control fields.
-func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string) *config.RepoConfig {
-	if trustedSHA == "" {
-		// No trusted SHA means no freshly fetched pipeline-base commit to
-		// read from. Return nil so EffectiveRepoConfig forces empty
-		// commands/agent - the secure default - instead of falling back to a
-		// potentially stale origin/<baseBranch> ref.
-		return nil
+type trustedRepoPolicy struct {
+	Present bool
+	Config  *config.RepoConfig
+}
+
+// readTrustedRepoPolicy performs one authoritative read of the freshly pinned
+// pipeline-base policy. A successful result explicitly distinguishes absence
+// from a present parsed config, which prevents bootstrap from treating a read
+// or parse failure as an empty trust root.
+func readTrustedRepoPolicy(ctx context.Context, wtDir, baseBranch, trustedSHA string) (*trustedRepoPolicy, error) {
+	if baseBranch == "" {
+		return nil, fmt.Errorf("cannot read trusted repository policy: repository has no known pipeline base; run no-mistakes init")
 	}
-	content, err := git.ShowFile(ctx, wtDir, trustedSHA, ".no-mistakes.yaml")
+	if trustedSHA == "" {
+		return nil, fmt.Errorf("cannot read trusted repository policy: failed to fetch or resolve pipeline base %q (refusing to use another branch or stale config)", baseBranch)
+	}
+	if _, err := git.Run(ctx, wtDir, "rev-parse", "-q", "--verify", trustedSHA+"^{commit}"); err != nil {
+		return nil, fmt.Errorf("cannot read trusted repository policy: pipeline-base commit %s is not readable: %w", trustedSHA, err)
+	}
+	entry, err := git.Run(ctx, wtDir, "ls-tree", trustedSHA, "--", repoPolicyPath)
 	if err != nil {
-		// Path absent on the pipeline base is the common "repo has no
-		// trusted commands" case; log at debug so it isn't noisy. Other
-		// errors are surfaced at warn so a genuinely broken read isn't
-		// silent. Either way trusted is nil → fail closed.
-		slog.Debug("trusted repo config: not present on pipeline base", "run_id", runID, "sha", trustedSHA, "error", err)
-		return nil
+		return nil, fmt.Errorf("cannot read trusted repository policy: pipeline-base tree at %s is not readable: %w", trustedSHA, err)
+	}
+	if entry == "" {
+		return &trustedRepoPolicy{}, nil
+	}
+	content, err := git.ShowFile(ctx, wtDir, trustedSHA, repoPolicyPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read trusted repository policy: %s at %s is present but not readable: %w", repoPolicyPath, trustedSHA, err)
 	}
 	trusted, err := config.LoadRepoFromBytes([]byte(content))
 	if err != nil {
-		slog.Warn("trusted repo config: parse failed; commands/agent from pushed branch will be disabled", "run_id", runID, "sha", trustedSHA, "error", err)
-		return nil
+		return nil, fmt.Errorf("cannot read trusted repository policy: %s at %s is present but unparseable: %w", repoPolicyPath, trustedSHA, err)
 	}
-	return trusted
+	return &trustedRepoPolicy{Present: true, Config: trusted}, nil
 }
 
-// assertGateTrustedConfigReadable fails a run loudly when the pipeline-base
-// copy of .no-mistakes.yaml cannot be read at a freshly fetched pinned commit.
-// A readable tree with no config is valid; an unknown/missing base, unreadable
-// commit or tree, or unreadable/unparseable present config aborts before an
-// agent starts. This protects every trusted-only field, including executable
-// commands, agent selection, base policy, documentation policy, and project
-// settings suppression.
-func assertGateTrustedConfigReadable(ctx context.Context, wtDir, baseBranch, trustedSHA string) error {
-	if baseBranch == "" {
-		return fmt.Errorf("cannot read trusted repository policy: repository has no known pipeline base; run no-mistakes init")
-	}
-	if trustedSHA == "" {
-		return fmt.Errorf("cannot read trusted repository policy: failed to fetch or resolve pipeline base %q (refusing to use another branch or stale config)", baseBranch)
-	}
-	if _, err := git.Run(ctx, wtDir, "rev-parse", "-q", "--verify", trustedSHA+"^{commit}"); err != nil {
-		return fmt.Errorf("cannot read trusted repository policy: pipeline-base commit %s is not readable: %w", trustedSHA, err)
-	}
-	entry, err := git.Run(ctx, wtDir, "ls-tree", trustedSHA, "--", ".no-mistakes.yaml")
+// loadTrustedRepoConfig is retained for focused trust-boundary tests and
+// defensive callers. Production setup uses readTrustedRepoPolicy so only a
+// proven absence can reach bootstrap authorization.
+func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string) *config.RepoConfig {
+	policy, err := readTrustedRepoPolicy(ctx, wtDir, "pipeline-base", trustedSHA)
 	if err != nil {
-		return fmt.Errorf("cannot read trusted repository policy: pipeline-base tree at %s is not readable: %w", trustedSHA, err)
-	}
-	if entry == "" {
+		slog.Warn("trusted repo config unavailable", "run_id", runID, "sha", trustedSHA, "error", err)
 		return nil
 	}
-	content, err := git.ShowFile(ctx, wtDir, trustedSHA, ".no-mistakes.yaml")
-	if err != nil {
-		return fmt.Errorf("cannot read trusted repository policy: .no-mistakes.yaml at %s is present but not readable: %w", trustedSHA, err)
+	if !policy.Present {
+		slog.Debug("trusted repo config: not present on pipeline base", "run_id", runID, "sha", trustedSHA)
 	}
-	if _, err := config.LoadRepoFromBytes([]byte(content)); err != nil {
-		return fmt.Errorf("cannot read trusted repository policy: .no-mistakes.yaml at %s is present but unparseable: %w", trustedSHA, err)
-	}
-	return nil
+	return policy.Config
+}
+
+// assertGateTrustedConfigReadable preserves the validation helper used by
+// trust-boundary regressions while sharing the authoritative reader.
+func assertGateTrustedConfigReadable(ctx context.Context, wtDir, baseBranch, trustedSHA string) error {
+	_, err := readTrustedRepoPolicy(ctx, wtDir, baseBranch, trustedSHA)
+	return err
 }
 
 // HandlePushReceived processes a push notification from the post-receive hook.
@@ -722,14 +716,16 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// contributor cannot self-enable it from the pushed branch. A readable
 	// trusted tree with no config leaves the opt-in false and forces
 	// commands/agent empty. An unreadable trusted tree aborts below.
-	// SECURITY: a trusted-config fetch failure must abort, not silently disable
-	// the disable_project_settings opt-out (see assertGateTrustedConfigReadable).
-	if err := assertGateTrustedConfigReadable(ctx, wtDir, baseBranch, trustedSHA); err != nil {
+	// SECURITY: one authoritative read distinguishes proven absence from every
+	// fetch, tree, blob, and parse failure. Only proven absence can be eligible
+	// for a global bootstrap Test authorization.
+	trustedPolicy, err := readTrustedRepoPolicy(ctx, wtDir, baseBranch, trustedSHA)
+	if err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("trusted_config_unreadable")
 		return "", err
 	}
-	trustedRepoCfg := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
+	trustedRepoCfg := trustedPolicy.Config
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	if allowRepoCommands {
@@ -741,6 +737,23 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		slog.Info("repo commands/agent loaded from pipeline base, not pushed branch", "run_id", run.ID, "branch", branch, "base_branch", baseBranch)
 	}
 	cfg := config.Merge(globalCfg, effectiveRepoCfg)
+	bootstrapAuth, err := resolveBootstrapTestAuthorization(ctx, globalCfg, repo, run, wtDir, trustedPolicy)
+	if err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("bootstrap_test_authorization")
+		return "", err
+	}
+	if bootstrapAuth != nil {
+		if err := m.db.SetRunBootstrapTestAuthorization(run.ID, *bootstrapAuth); err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("persist_bootstrap_test_authorization")
+			return "", err
+		}
+		// Use only the exact user-owned command that was just frozen. The
+		// feature policy is digest and command-match evidence, never the source
+		// of executable input.
+		cfg.Commands.Test = bootstrapAuth.Command
+	}
 
 	// Create agent. In demo mode, skip resolution and use a no-op agent.
 	var ag agent.Agent

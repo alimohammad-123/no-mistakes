@@ -17,9 +17,13 @@ CREATE TABLE IF NOT EXISTS runs (
     branch               TEXT NOT NULL,
     head_sha                TEXT NOT NULL,
     base_sha                TEXT NOT NULL,
-    base_branch             TEXT,
-    submitted_head_sha      TEXT,
-    status                  TEXT NOT NULL DEFAULT 'pending',
+    base_branch                 TEXT,
+    bootstrap_test_repository   TEXT,
+    bootstrap_test_base_branch  TEXT,
+    bootstrap_test_command      TEXT,
+    bootstrap_test_policy_sha256 TEXT,
+    submitted_head_sha          TEXT,
+    status                      TEXT NOT NULL DEFAULT 'pending',
     pr_url                  TEXT,
     pr_state                TEXT,
     pr_state_observed_at    INTEGER,
@@ -143,6 +147,13 @@ var migrationStatements = []string{
 	// pre-feature behavior by falling back only to repos.default_branch.
 	`ALTER TABLE repos ADD COLUMN base_branch TEXT`,
 	`ALTER TABLE runs ADD COLUMN base_branch TEXT`,
+	// A bootstrap Test authorization is all-null for ordinary/historical runs
+	// and all-present for an exact first-policy adoption. Recovery rejects any
+	// partial row rather than inferring missing authorization.
+	`ALTER TABLE runs ADD COLUMN bootstrap_test_repository TEXT`,
+	`ALTER TABLE runs ADD COLUMN bootstrap_test_base_branch TEXT`,
+	`ALTER TABLE runs ADD COLUMN bootstrap_test_command TEXT`,
+	`ALTER TABLE runs ADD COLUMN bootstrap_test_policy_sha256 TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN fix_summary TEXT`,

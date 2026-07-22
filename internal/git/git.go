@@ -576,3 +576,26 @@ func ShowFile(ctx context.Context, dir, ref, path string) (string, error) {
 	}
 	return out, nil
 }
+
+// ShowFileBytes returns a blob's exact bytes without Run's stdout trimming.
+// Callers use it when whitespace and final newlines are security-relevant, such
+// as digest-bound policy authorization.
+func ShowFileBytes(ctx context.Context, dir, ref, path string) ([]byte, error) {
+	args := []string{"show", fmt.Sprintf("%s:%s", ref, path)}
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = NonInteractiveEnv(dir)
+	winproc.Harden(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		return nil, fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
+	}
+	return out, nil
+}
