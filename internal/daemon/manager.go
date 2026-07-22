@@ -671,6 +671,12 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		trackStartFailure("load_global_config")
 		return "", fmt.Errorf("load global config: %w", err)
 	}
+	bootstrapBinding, err := matchingBootstrapTestBinding(globalCfg, repo, baseBranch)
+	if err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("bootstrap_binding")
+		return "", err
+	}
 
 	// Create worktree from the gate bare repo.
 	gateDir := m.paths.RepoDir(repo.ID)
@@ -687,7 +693,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	}
 	fetchSource := "origin"
 	bootstrapIdentity := ""
-	if len(globalCfg.Bootstrap.Test) > 0 {
+	if bootstrapBinding != nil {
 		fetchSource, bootstrapIdentity, err = bootstrapFetchSource(ctx, repo, wtDir)
 		if err != nil {
 			m.db.UpdateRunError(run.ID, err.Error())

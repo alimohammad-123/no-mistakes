@@ -45,27 +45,20 @@ func resolveBootstrapTestAuthorization(
 	if repo == nil || run == nil {
 		return nil, fmt.Errorf("bootstrap Test authorization requires a repository and run")
 	}
-	if err := config.ValidateBootstrapTestBindings(global.Bootstrap.Test); err != nil {
+	binding, err := matchingBootstrapTestBinding(global, repo, run.EffectiveBaseBranch(repo))
+	if err != nil {
 		return nil, err
+	}
+	if binding == nil {
+		return nil, nil
 	}
 	identity := trustedPolicy.RepositoryIdentity
 	if identity == "" {
 		return nil, fmt.Errorf("bootstrap Test authorization requires fetch-bound repository identity")
 	}
-	baseBranch := run.EffectiveBaseBranch(repo)
-	matches := make([]config.BootstrapTestBinding, 0, 1)
-	for _, binding := range global.Bootstrap.Test {
-		if binding.Repository == identity && binding.BaseBranch == baseBranch {
-			matches = append(matches, binding)
-		}
+	if identity != binding.Repository {
+		return nil, fmt.Errorf("bootstrap Test authorization fetch identity %q does not match binding repository %q", identity, binding.Repository)
 	}
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("bootstrap Test authorization does not match repository %q and pipeline base %q", identity, baseBranch)
-	}
-	if len(matches) != 1 {
-		return nil, fmt.Errorf("bootstrap Test authorization is ambiguous for repository %q and pipeline base %q", identity, baseBranch)
-	}
-	binding := matches[0]
 	content, parsed, err := submittedRepoPolicy(ctx, workDir, run)
 	if err != nil {
 		return nil, fmt.Errorf("verify bootstrap Test policy: %w", err)
@@ -83,6 +76,34 @@ func resolveBootstrapTestAuthorization(
 		Command:      binding.Command,
 		PolicySHA256: binding.PolicySHA256,
 	}, nil
+}
+
+func matchingBootstrapTestBinding(global *config.GlobalConfig, repo *db.Repo, baseBranch string) (*config.BootstrapTestBinding, error) {
+	if global == nil || len(global.Bootstrap.Test) == 0 {
+		return nil, nil
+	}
+	if err := config.ValidateBootstrapTestBindings(global.Bootstrap.Test); err != nil {
+		return nil, err
+	}
+	if repo == nil {
+		return nil, fmt.Errorf("bootstrap Test binding selection requires a repository")
+	}
+	identity, err := repoidentity.Canonical(repo.UpstreamURL)
+	if err != nil {
+		return nil, nil
+	}
+	var match *config.BootstrapTestBinding
+	for i := range global.Bootstrap.Test {
+		binding := &global.Bootstrap.Test[i]
+		if binding.Repository != identity || binding.BaseBranch != baseBranch {
+			continue
+		}
+		if match != nil {
+			return nil, fmt.Errorf("bootstrap Test authorization is ambiguous for repository %q and pipeline base %q", identity, baseBranch)
+		}
+		match = binding
+	}
+	return match, nil
 }
 
 // applyFrozenBootstrapTestAuthorization reconstructs a recovered run from its
