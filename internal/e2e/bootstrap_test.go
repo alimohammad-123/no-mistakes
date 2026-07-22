@@ -6,9 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,44 +21,12 @@ import (
 func TestFirstPolicyBootstrapJourney(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t)})
 	ctx := context.Background()
-	httpRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(httpRoot, "test"), 0o755); err != nil {
+	sshCommand := filepath.Join(h.BinDir, "local-git-ssh")
+	if err := os.WriteFile(sshCommand, []byte("#!/bin/sh\nfor arg do command=$arg; done\nexec /bin/sh -c \"$command\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(h.UpstreamDir, filepath.Join(httpRoot, "test", "repo.git")); err != nil {
-		t.Fatal(err)
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	daemonCtx, cancelDaemon := context.WithCancel(context.Background())
-	daemon := exec.CommandContext(daemonCtx, "git", "daemon", "--reuseaddr", "--export-all", "--enable=receive-pack", "--listen=127.0.0.1", fmt.Sprintf("--port=%d", port), "--base-path="+httpRoot, httpRoot)
-	if err := daemon.Start(); err != nil {
-		cancelDaemon()
-		t.Fatalf("start git daemon: %v", err)
-	}
-	t.Cleanup(func() {
-		cancelDaemon()
-		_ = daemon.Wait()
-	})
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		conn, dialErr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 50*time.Millisecond)
-		if dialErr == nil {
-			_ = conn.Close()
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("git daemon did not become ready: %v", dialErr)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	parentURL := fmt.Sprintf("git://127.0.0.1:%d/test/repo.git", port)
+	t.Setenv("GIT_SSH_COMMAND", sshCommand)
+	parentURL := "ssh://git@localhost" + filepath.ToSlash(h.UpstreamDir)
 	parentIdentity, err := repoidentity.Canonical(parentURL)
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +88,18 @@ func TestFirstPolicyBootstrapJourney(t *testing.T) {
 	}
 	marker, err := os.ReadFile(bootstrapMarker)
 	if err != nil {
-		t.Fatalf("bootstrap Test command did not run: %v", err)
+		testLog, _ := os.ReadFile(filepath.Join(h.NMHome, "logs", run.ID, "test.log"))
+		database, dbErr := db.Open(paths.WithRoot(h.NMHome).DB())
+		var frozen any
+		var registered any
+		if dbErr == nil {
+			if persisted, getErr := database.GetRun(run.ID); getErr == nil {
+				frozen, _ = persisted.FrozenBootstrapTestAuthorization()
+				registered, _ = database.GetRepo(persisted.RepoID)
+			}
+			_ = database.Close()
+		}
+		t.Fatalf("bootstrap Test command did not run: %v\nparent URL: %s\nparent identity: %s\nregistered repository: %+v\nfrozen authorization: %+v\ninit output: %s\nTest log:\n%s", err, parentURL, parentIdentity, registered, frozen, initOutput, testLog)
 	}
 	if got := string(marker); got != "bootstrap-authorized" {
 		t.Fatalf("bootstrap marker = %q", got)

@@ -87,7 +87,7 @@ func TestEffectiveRepoConfig_TrustedOverridesPushedCommands(t *testing.T) {
 
 // TestEffectiveRepoConfig_TrustedEmptyAgentInheritsGlobal proves that when the
 // trusted copy does not pin an agent, the effective agent is empty so Merge
-// falls back to the global agent — the pushed-branch agent never wins.
+// falls back to the global agent; the pushed-branch agent never wins.
 func TestEffectiveRepoConfig_TrustedEmptyAgentInheritsGlobal(t *testing.T) {
 	pushed := &RepoConfig{Agent: types.AgentCodex}
 	trusted := &RepoConfig{Commands: Commands{Lint: "golangci-lint run"}}
@@ -176,7 +176,7 @@ func TestEffectiveRepoConfig_NilPushedSafeDefaults(t *testing.T) {
 }
 
 // TestLoadRepo_AllowRepoCommands proves the per-repo opt-in is read from the
-// repo config (the trusted default-branch copy), replacing the former coarse
+// repo config (the trusted pipeline-base copy), replacing the former coarse
 // global flag. It defaults false.
 func TestLoadRepo_AllowRepoCommands(t *testing.T) {
 	dir := t.TempDir()
@@ -212,7 +212,7 @@ func TestLoadRepo_AllowRepoCommandsDefaultsFalse(t *testing.T) {
 }
 
 // TestLoadRepoFromBytes_AllowRepoCommands covers the trusted-bytes entry
-// point (the path loadTrustedRepoConfig uses after reading origin/<default>).
+// point used after reading the pinned pipeline-base policy bytes.
 func TestLoadRepoFromBytes_AllowRepoCommands(t *testing.T) {
 	cfg, err := LoadRepoFromBytes([]byte("allow_repo_commands: true\n"))
 	if err != nil {
@@ -239,7 +239,7 @@ func TestLoadGlobal_RejectsAllowRepoCommands(t *testing.T) {
 
 // TestEffectiveRepoConfig_DocumentPolicyTrustedOnly proves the documentation
 // placement policy (document.instructions) is honored only from the trusted
-// default-branch copy: a contributor's pushed branch cannot weaken the
+// pipeline-base copy: a contributor's pushed branch cannot weaken the
 // documentation rules that gate its own review, and no-policy repositories
 // keep the built-in defaults (empty Instructions).
 func TestEffectiveRepoConfig_DocumentPolicyTrustedOnly(t *testing.T) {
@@ -303,16 +303,16 @@ func TestParseRepoConfig_DisableProjectSettings_Semantics(t *testing.T) {
 }
 
 // TestEffectiveRepoConfig_DisableProjectSettingsTrustedOnly proves the opt-out is
-// a security boundary honored only from the trusted default-branch copy: a
+// a security boundary honored only from the trusted pipeline-base copy: a
 // pushed-branch value is always ignored, so a contributor cannot turn it off (or
 // on) for the gate validating their own branch.
 func TestEffectiveRepoConfig_DisableProjectSettingsTrustedOnly(t *testing.T) {
-	// Contributor pushes false; firstmate's trusted default-branch is true.
+	// Contributor pushes false; firstmate's trusted pipeline base is true.
 	got := EffectiveRepoConfig(&RepoConfig{DisableProjectSettings: false}, &RepoConfig{DisableProjectSettings: true}, false)
 	if !got.DisableProjectSettings {
 		t.Error("pushed=false trusted=true: opt-out must stay ON (pushed cannot re-enable the hazard)")
 	}
-	// Contributor pushes true; ordinary repo's trusted default-branch is false.
+	// Contributor pushes true; ordinary repo's trusted pipeline base is false.
 	got = EffectiveRepoConfig(&RepoConfig{DisableProjectSettings: true}, &RepoConfig{DisableProjectSettings: false}, false)
 	if got.DisableProjectSettings {
 		t.Error("pushed=true trusted=false: opt-out must stay OFF (pushed cannot force it either)")

@@ -71,16 +71,16 @@ func TestLoadRecoveredConfig_BoundsFetchAndFailsClosed(t *testing.T) {
 }
 
 // TestLoadTrustedRepoConfig_FailClosedOnFetchFailure is the regression test for
-// the supply-chain RCE review item #1: when the default-branch fetch fails,
+// the supply-chain RCE review item #1: when the pipeline-base fetch fails,
 // startRun passes an empty trustedSHA, and loadTrustedRepoConfig MUST return
-// nil even though a (potentially stale) origin/<default> ref is still present
+// nil even though a (potentially stale) origin/<base> ref is still present
 // in the worktree's shared refs. Reading that stale ref would run a command
-// the live default branch has already removed. EffectiveRepoConfig then forces
+// the live pipeline base has already removed. EffectiveRepoConfig then forces
 // empty commands, so the stale command does not run.
 func TestLoadTrustedRepoConfig_FailClosedOnFetchFailure(t *testing.T) {
 	ctx := context.Background()
 
-	// Source repo whose default branch carries a "stale" lint command — the
+	// Source repo whose default branch carries a "stale" lint command. The
 	// kind of command a maintainer has since removed but a stale ref would
 	// still serve.
 	src := filepath.Join(t.TempDir(), "src")
@@ -119,7 +119,7 @@ func TestLoadTrustedRepoConfig_FailClosedOnFetchFailure(t *testing.T) {
 	}
 
 	// A previous successful fetch left origin/main present in the shared
-	// refs — this is the stale ref the old code read after a fetch failure.
+	// refs. This is the stale ref the old code read after a fetch failure.
 	if err := git.FetchRemoteBranch(ctx, wt, "origin", "main"); err != nil {
 		t.Fatalf("prime origin/main: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestLoadTrustedRepoConfig_FailClosedOnFetchFailure(t *testing.T) {
 		t.Fatalf("expected nil trusted config on empty SHA (fetch failure); got commands.lint=%q", got.Commands.Lint)
 	}
 
-	// And the effective config drops the pushed-branch command too — the
+	// And the effective config drops the pushed-branch command too. The
 	// secure default, not a fallback to a stale or hostile copy.
 	pushed := &config.RepoConfig{Commands: config.Commands{Lint: "echo pushed-branch-command"}}
 	eff := config.EffectiveRepoConfig(pushed, got, false)
@@ -150,9 +150,9 @@ func TestLoadTrustedRepoConfig_FailClosedOnFetchFailure(t *testing.T) {
 
 // TestLoadTrustedRepoConfig_PinnedSHAReadsFreshDefaultBranch proves the
 // complementary side of review item #1: when the fetch succeeds, the trusted
-// config is read at the exact resolved SHA (not the origin/<default> ref
-// name), so it reflects the freshly fetched default-branch tip rather than a
-// stale ref value. Advancing the default branch and re-fetching must yield the
+// config is read at the exact resolved SHA (not the origin/<base> ref
+// name), so it reflects the freshly fetched pipeline-base tip rather than a
+// stale ref value. Advancing the pipeline base and re-fetching must yield the
 // new command, not the old one.
 func TestLoadTrustedRepoConfig_PinnedSHAReadsFreshDefaultBranch(t *testing.T) {
 	ctx := context.Background()

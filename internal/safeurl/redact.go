@@ -19,6 +19,10 @@ func Redact(raw string) string {
 	if err != nil || parsed.User == nil {
 		return raw
 	}
+	_, hasPassword := parsed.User.Password()
+	if strings.EqualFold(parsed.Scheme, "ssh") && !hasPassword {
+		return raw
+	}
 	parsed.User = url.User("redacted")
 	return parsed.String()
 }

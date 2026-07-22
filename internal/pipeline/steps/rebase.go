@@ -176,8 +176,8 @@ func forcePushRebaseTargets(branch, baseBranch string) []string {
 // the branch is rebased onto the remote base. Returns nil when no such
 // divergence is detected so the run proceeds normally.
 //
-// It only flags commits the branch actually carries: it reads the local default
-// tip from the working repo, confirms that tip is ahead of origin/<default> and
+// It only flags commits the branch actually carries: it reads the local base
+// tip from the working repo, confirms that tip is ahead of origin/<base> and
 // is an ancestor of the branch HEAD, then enumerates the unpushed commits.
 // Detection is best-effort - if the local base tip advanced past the branch
 // point, or the working repo cannot be read, it returns nil rather than guess.
@@ -201,16 +201,16 @@ func detectBundledLocalBaseCommits(ctx context.Context, sctx *pipeline.StepConte
 	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", remoteRef+"^{commit}"); err != nil {
 		return nil
 	}
-	// The local default tip must be present in the gate's object store (it is
+	// The local base tip must be present in the gate's object store (it is
 	// when the branch carries it as an ancestor) for the reachability checks.
 	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", localTip+"^{commit}"); err != nil {
 		return nil
 	}
-	// Already pushed (local default not ahead of remote) -> nothing bundled.
+	// Already pushed (local base not ahead of remote) -> nothing bundled.
 	if isAncestor(ctx, sctx.WorkDir, localTip, remoteRef) {
 		return nil
 	}
-	// The branch must actually carry the local default tip's commits.
+	// The branch must actually carry the local base tip's commits.
 	if !isAncestor(ctx, sctx.WorkDir, localTip, "HEAD") {
 		return nil
 	}
@@ -236,7 +236,7 @@ func detectBundledLocalBaseCommits(ctx context.Context, sctx *pipeline.StepConte
 			File:        firstFile,
 			Description: description,
 			// Bundling another workstream's unpushed commits is a workflow call
-			// the contributor must make (push <default>, rebase, or proceed); the
+			// the contributor must make (push <base>, rebase, or proceed); the
 			// pipeline cannot safely auto-resolve it. Mark it ask-user so the gate
 			// classifies it correctly and the driving agent escalates.
 			Action: types.ActionAskUser,

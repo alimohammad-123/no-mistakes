@@ -57,12 +57,12 @@ type SetupOpts struct {
 	Scenario string
 
 	// AllowRepoCommands controls the per-repo allow_repo_commands opt-in
-	// committed to the trusted default-branch .no-mistakes.yaml (never the
+	// committed to the trusted pipeline-base .no-mistakes.yaml (never the
 	// global config, and never the pushed branch). The harness models a
 	// trusted single-developer environment (the same user owns the working
 	// clone, gate, and daemon), so it defaults to true: feature-branch
 	// commands run as before. Tests that verify the supply-chain hardening
-	// (commands must come from the trusted default branch) pass a pointer
+	// (commands must come from the trusted pipeline base) pass a pointer
 	// to false to exercise the secure default.
 	AllowRepoCommands *bool
 }
@@ -238,7 +238,7 @@ func (h *Harness) initGitRepos() {
 	if err := os.WriteFile(readme, []byte("# e2e\n"), 0o644); err != nil {
 		h.t.Fatalf("write readme: %v", err)
 	}
-	// allow_repo_commands is committed to the trusted default-branch copy of
+	// allow_repo_commands is committed to the trusted pipeline-base copy of
 	// .no-mistakes.yaml (never global, never the pushed branch). The harness
 	// models a trusted single-developer environment where the same user owns
 	// every branch, so it defaults to true: feature-branch commands run as

@@ -39,8 +39,8 @@ type CIStep struct {
 	pollIntervalOverride time.Duration        // if set, overrides computed poll interval (for testing)
 	waitForNextPoll      func(context.Context, time.Duration) error
 	now                  func() time.Time
-	// baseBranchTip resolves the current tip SHA of the upstream default
-	// branch. The bool is false when the SHA is a fallback/unknown value and
+	// baseBranchTip resolves the current tip SHA of the run's pipeline base.
+	// The bool is false when the SHA is a fallback/unknown value and
 	// must not re-arm the timeout. Overridable for testing; defaults to
 	// fetching the upstream pipeline base.
 	baseBranchTip func(context.Context) (string, bool)

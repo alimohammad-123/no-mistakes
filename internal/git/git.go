@@ -332,7 +332,7 @@ func IsDetachedHEAD(ctx context.Context, dir string) (bool, error) {
 	winproc.Harden(cmd)
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
-			// Exit 1 means HEAD is not a symbolic ref — detached.
+			// Exit 1 means HEAD is not a symbolic ref because it is detached.
 			if ee.ExitCode() == 1 {
 				return true, nil
 			}
@@ -536,7 +536,7 @@ func WorktreeRemove(ctx context.Context, repoDir, wtPath string) error {
 
 // ResolveRef returns the commit SHA that ref resolves to via
 // `git rev-parse --verify <ref>^{commit}`. Use it to pin an exact commit
-// (e.g. the default-branch tip just fetched) before reading a file from it,
+// (e.g. the pipeline-base tip just fetched) before reading a file from it,
 // so a shared-ref worktree cannot serve a stale remote-tracking ref. Returns
 // an error if the ref does not resolve to a commit.
 func ResolveRef(ctx context.Context, dir, ref string) (string, error) {
