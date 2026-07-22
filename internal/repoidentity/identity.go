@@ -12,7 +12,11 @@ import (
 	"unicode"
 )
 
-const envelopePrefix = "repoid://"
+const (
+	envelopePrefix    = "repoid://"
+	sshRelativePrefix = "repoid+ssh-rel://"
+	sshAbsolutePrefix = "repoid+ssh-abs://"
+)
 
 // Canonical returns a versioned repository identity for a raw HTTP(S), SSH URL,
 // user-qualified scp-style SSH remote, or an already-canonical identity.
@@ -21,7 +25,7 @@ func Canonical(raw string) (string, error) {
 	if value == "" {
 		return "", fmt.Errorf("repository identity is empty")
 	}
-	if strings.HasPrefix(value, envelopePrefix) {
+	if strings.HasPrefix(value, envelopePrefix) || strings.HasPrefix(value, sshRelativePrefix) || strings.HasPrefix(value, sshAbsolutePrefix) {
 		return canonicalEnvelope(value)
 	}
 	if strings.Contains(value, "://") {
@@ -31,11 +35,14 @@ func Canonical(raw string) (string, error) {
 }
 
 func canonicalEnvelope(value string) (string, error) {
+	if hasEscapedUserinfo(value) {
+		return "", fmt.Errorf("repository identity envelope is invalid")
+	}
 	u, err := url.Parse(value)
 	if err != nil {
 		return "", fmt.Errorf("parse repository identity: %w", err)
 	}
-	if u.Scheme != "repoid" || u.Opaque != "" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+	if u.Opaque != "" || u.Host == "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return "", fmt.Errorf("repository identity envelope is invalid")
 	}
 	if u.RawPath != "" || strings.Contains(u.EscapedPath(), "%") {
@@ -45,11 +52,35 @@ func canonicalEnvelope(value string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	repoPath, err := canonicalPath(strings.TrimPrefix(u.Path, "/"), false, githubAuthority(authority))
+	github := githubAuthority(authority)
+	repoPath, err := canonicalPath(strings.TrimPrefix(u.Path, "/"), false, github)
 	if err != nil {
 		return "", err
 	}
-	identity := envelopePrefix + authority + "/" + repoPath
+	prefix := envelopePrefix
+	user := ""
+	switch u.Scheme {
+	case "repoid":
+		if u.User != nil {
+			return "", fmt.Errorf("repository identity envelope is invalid")
+		}
+	case "repoid+ssh-rel":
+		prefix = sshRelativePrefix
+		user, err = canonicalSSHUser(u.User)
+	case "repoid+ssh-abs":
+		prefix = sshAbsolutePrefix
+		user, err = canonicalSSHUser(u.User)
+	default:
+		return "", fmt.Errorf("repository identity envelope is invalid")
+	}
+	if err != nil || github && prefix != envelopePrefix {
+		return "", fmt.Errorf("repository identity envelope is invalid")
+	}
+	identity := prefix
+	if user != "" {
+		identity += user + "@"
+	}
+	identity += authority + "/" + repoPath
 	if identity != value {
 		return "", fmt.Errorf("repository identity envelope is not canonical")
 	}
@@ -57,6 +88,9 @@ func canonicalEnvelope(value string) (string, error) {
 }
 
 func canonicalURL(value string) (string, error) {
+	if hasEscapedUserinfo(value) {
+		return "", fmt.Errorf("repository URL has invalid user information")
+	}
 	u, err := url.Parse(value)
 	if err != nil {
 		return "", fmt.Errorf("parse repository URL: %w", err)
@@ -68,6 +102,8 @@ func canonicalURL(value string) (string, error) {
 		return "", fmt.Errorf("repository path must not use percent escapes")
 	}
 	defaultPort := ""
+	ssh := false
+	sshUser := ""
 	switch strings.ToLower(u.Scheme) {
 	case "https":
 		defaultPort = "443"
@@ -80,24 +116,33 @@ func canonicalURL(value string) (string, error) {
 			return "", fmt.Errorf("repository URL must not contain credentials")
 		}
 	case "ssh":
+		ssh = true
 		defaultPort = "22"
-		if u.User != nil {
-			if _, hasPassword := u.User.Password(); hasPassword || u.User.Username() == "" {
-				return "", fmt.Errorf("repository SSH URL has invalid user information")
-			}
-		}
 	default:
 		return "", fmt.Errorf("repository URL scheme %q is not supported", u.Scheme)
+	}
+	if ssh && u.User != nil {
+		sshUser, err = canonicalSSHUser(u.User)
+		if err != nil {
+			return "", err
+		}
 	}
 	authority, err := canonicalAuthority(u.Host, defaultPort)
 	if err != nil {
 		return "", err
 	}
-	repoPath, err := canonicalPath(strings.TrimPrefix(u.Path, "/"), true, githubAuthority(authority))
+	github := githubAuthority(authority)
+	repoPath, err := canonicalPath(strings.TrimPrefix(u.Path, "/"), true, github)
 	if err != nil {
 		return "", err
 	}
-	return envelopePrefix + authority + "/" + repoPath, nil
+	if !ssh || github {
+		return envelopePrefix + authority + "/" + repoPath, nil
+	}
+	if sshUser == "" {
+		return "", fmt.Errorf("repository SSH URL requires an explicit user")
+	}
+	return sshAbsolutePrefix + sshUser + "@" + authority + "/" + repoPath, nil
 }
 
 func canonicalSCP(value string) (string, error) {
@@ -125,16 +170,58 @@ func canonicalSCP(value string) (string, error) {
 	if separator < 0 || separator == len(value)-1 {
 		return "", fmt.Errorf("repository SSH authority is invalid")
 	}
+	user := value[:at]
+	if err := validateSSHUsername(user); err != nil {
+		return "", err
+	}
 	authority, err := canonicalAuthority(value[authorityStart:separator], "")
 	if err != nil {
 		return "", err
 	}
 	repoPath := value[separator+1:]
-	repoPath, err = canonicalPath(repoPath, true, githubAuthority(authority))
+	github := githubAuthority(authority)
+	repoPath, err = canonicalPath(repoPath, true, github)
 	if err != nil {
 		return "", err
 	}
-	return envelopePrefix + authority + "/" + repoPath, nil
+	if github {
+		return envelopePrefix + authority + "/" + repoPath, nil
+	}
+	return sshRelativePrefix + user + "@" + authority + "/" + repoPath, nil
+}
+
+func canonicalSSHUser(info *url.Userinfo) (string, error) {
+	if info == nil {
+		return "", fmt.Errorf("repository SSH URL requires an explicit user")
+	}
+	if _, hasPassword := info.Password(); hasPassword || strings.Contains(info.String(), "%") {
+		return "", fmt.Errorf("repository SSH URL has invalid user information")
+	}
+	user := info.Username()
+	if err := validateSSHUsername(user); err != nil {
+		return "", err
+	}
+	return user, nil
+}
+
+func validateSSHUsername(user string) error {
+	if user == "" || strings.ContainsAny(user, `:/\@%?#`) || strings.IndexFunc(user, unicode.IsSpace) >= 0 {
+		return fmt.Errorf("repository SSH URL has invalid user information")
+	}
+	return nil
+}
+
+func hasEscapedUserinfo(value string) bool {
+	scheme := strings.Index(value, "://")
+	if scheme < 0 {
+		return false
+	}
+	authority := value[scheme+3:]
+	if end := strings.IndexAny(authority, "/?#"); end >= 0 {
+		authority = authority[:end]
+	}
+	at := strings.LastIndexByte(authority, '@')
+	return at >= 0 && strings.Contains(authority[:at], "%")
 }
 
 func canonicalPath(repoPath string, stripTransportSuffix, lowercase bool) (string, error) {

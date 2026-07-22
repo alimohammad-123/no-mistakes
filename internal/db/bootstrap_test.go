@@ -145,8 +145,8 @@ func TestBootstrapTestRetirementUsesCanonicalRepositoryIdentity(t *testing.T) {
 		},
 		{
 			name:    "bracketed IPv6 SCP",
-			remotes: []string{"git@[2001:0db8::1]:owner/repo.git", "repoid://[2001:db8::1]/owner/repo"},
-			want:    "repoid://[2001:db8::1]/owner/repo",
+			remotes: []string{"git@[2001:0db8::1]:owner/repo.git", "repoid+ssh-rel://git@[2001:db8::1]/owner/repo"},
+			want:    "repoid+ssh-rel://git@[2001:db8::1]/owner/repo",
 		},
 		{
 			name:    "repository ending git",
@@ -177,6 +177,17 @@ func TestBootstrapTestRetirementUsesCanonicalRepositoryIdentity(t *testing.T) {
 
 	if retired, err := d.IsBootstrapTestRetired("repoid://github.com:8443/owner/repo", "base-0"); err != nil || retired {
 		t.Fatalf("distinct non-default-port retirement = %v, err=%v", retired, err)
+	}
+	if err := d.RetireBootstrapTest("repoid+ssh-rel://alice@git.example/Group/Repo", "ssh"); err != nil {
+		t.Fatal(err)
+	}
+	for _, distinct := range []string{
+		"repoid+ssh-rel://bob@git.example/Group/Repo",
+		"repoid+ssh-abs://alice@git.example/Group/Repo",
+	} {
+		if retired, err := d.IsBootstrapTestRetired(distinct, "ssh"); err != nil || retired {
+			t.Fatalf("distinct SSH identity %q retirement = %v, err=%v", distinct, retired, err)
+		}
 	}
 }
 

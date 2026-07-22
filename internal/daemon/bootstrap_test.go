@@ -457,6 +457,24 @@ func TestBootstrapFetchSourceAcceptsCanonicalAliases(t *testing.T) {
 	}
 }
 
+func TestBootstrapFetchSourceRejectsGenericSSHSwitches(t *testing.T) {
+	for _, origin := range []string{
+		"ssh://bob@git.example/Group/Repo.git",
+		"alice@git.example:Group/Repo.git",
+	} {
+		t.Run(origin, func(t *testing.T) {
+			policy := []byte("commands:\n  test: go test ./...\n")
+			fixture := newBootstrapFixture(t, policy)
+			fixture.repo.UpstreamURL = "ssh://alice@git.example/Group/Repo.git"
+			gitCmd(t, fixture.workDir, "remote", "set-url", "origin", origin)
+
+			if source, identity, err := bootstrapFetchSource(context.Background(), fixture.repo, fixture.workDir); err == nil {
+				t.Fatalf("generic SSH switch accepted: source=%q identity=%q", source, identity)
+			}
+		})
+	}
+}
+
 func TestResolveBootstrapTestAuthorizationRefusals(t *testing.T) {
 	policy := []byte("commands:\n  test: go test ./...\n")
 	fixture := newBootstrapFixture(t, policy)

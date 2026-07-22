@@ -1032,7 +1032,7 @@ func ValidateBootstrapTestBindings(bindings []BootstrapTestBinding) error {
 		prefix := fmt.Sprintf("bootstrap.test[%d]", i)
 		identity, err := repoidentity.Canonical(binding.Repository)
 		if err != nil || identity != binding.Repository {
-			return fmt.Errorf("%s.repository must be a canonical repoid identity", prefix)
+			return fmt.Errorf("%s.repository must be a canonical repository identity envelope", prefix)
 		}
 		if binding.BaseBranch == "" || strings.TrimSpace(binding.BaseBranch) != binding.BaseBranch || strings.HasPrefix(binding.BaseBranch, "refs/") {
 			return fmt.Errorf("%s.base_branch must be a short branch name", prefix)

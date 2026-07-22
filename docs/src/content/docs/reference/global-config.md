@@ -224,7 +224,7 @@ For Codex, `service_tier` and `model_reasoning_effort` tune different things: `s
 
 Temporary, user-owned authorization for the Test command in a repository's first policy change. It is disabled when the list is empty or omitted.
 
-Repository bindings use the versioned `repoid://authority/path` envelope so stored identities cannot be reinterpreted as raw URL or SCP syntax. Hosts and ports are canonicalized, GitHub owner and repository paths are lowercase, and generic provider paths retain their case.
+Repository bindings use versioned identity envelopes so stored identities cannot be reinterpreted as raw URL or SCP syntax. Transport-neutral identities use `repoid://authority/path`. Generic SSH identities use `repoid+ssh-abs://user@authority/path` for SSH URLs and `repoid+ssh-rel://user@authority/path` for SCP remotes, preserving username case and path semantics. Only GitHub aliases collapse to a transport-neutral identity. Hosts and ports are canonicalized, GitHub owner and repository paths are lowercase, and generic provider paths retain their case.
 
 Each entry requires all four fields:
 
