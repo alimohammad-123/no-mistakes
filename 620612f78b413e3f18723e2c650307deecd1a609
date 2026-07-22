@@ -1,0 +1,55 @@
+internal/daemon/manager_trust_test.go
+  s_1762bedcdd6b29::t_c24bd2b9692b65 74,78,154-155
+  s_1762bedcdd6b29::t_4a3410eb9b1ff8 76,153
+  s_1762bedcdd6b29::t_9854c77655f787 83,122,142
+internal/safeurl/redact.go
+  s_fb2f0a35442e7d::t_5bd5b77d057389 22-25
+internal/e2e/bootstrap_test.go
+  s_fb2f0a35442e7d::t_14c35a602ed750 91-93,95-97,99-101
+  s_fb2f0a35442e7d::t_41d2551bb8db60 94,98,102
+  s_fb2f0a35442e7d::t_49bb8173c8d507 24-25,28-29
+internal/e2e/repo_config_security_test.go
+  s_1762bedcdd6b29::t_770d91eebc41d7 17,20,43,80,83,96,115
+  s_1762bedcdd6b29::t_4a3410eb9b1ff8 82
+internal/daemon/helpers_test.go
+  s_1762bedcdd6b29::t_770d91eebc41d7 254
+internal/config/config_repo_trust_test.go
+  s_1762bedcdd6b29::t_770d91eebc41d7 179,215,242,306,310,315
+  s_1762bedcdd6b29::t_4a3410eb9b1ff8 90
+internal/safeurl/redact_test.go
+  s_fb2f0a35442e7d::t_5bd5b77d057389 18,28-31
+  s_fb2f0a35442e7d::t_ce7fa5b88226af 32-34
+internal/e2e/harness.go
+  s_1762bedcdd6b29::t_770d91eebc41d7 60,65,241
+internal/git/git.go
+  s_1762bedcdd6b29::t_c2967d6a846d63 335
+  s_1762bedcdd6b29::t_770d91eebc41d7 539
+internal/pipeline/steps/ci.go
+  s_1762bedcdd6b29::t_550ecaeb65e2fa 42-43
+internal/pipeline/steps/rebase.go
+  s_1762bedcdd6b29::t_696dda820c24f9 179-180,204,209,213,239
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "620612f78b413e3f18723e2c650307deecd1a609",
+  "prompts": {},
+  "sessions": {
+    "s_1762bedcdd6b29": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f87f9-c553-7131-aa7a-d480a7592837",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    },
+    "s_fb2f0a35442e7d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f87f1-d1cb-7a30-bdf9-c5c9ba4139c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
