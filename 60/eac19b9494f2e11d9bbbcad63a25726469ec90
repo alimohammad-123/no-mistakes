@@ -1,0 +1,104 @@
+internal/sourceprovenance/source_ref_test.go
+  s_72f3f8a3de015d::t_48787141b9f841 121-146
+internal/daemon/daemon.go
+  s_72f3f8a3de015d::t_0aa7e4d08b0dc6 21,362-365,368-370
+  s_72f3f8a3de015d::t_e7100674f79d0c 366-367
+  s_72f3f8a3de015d::t_54b89b78c1e0d0 494-505
+  s_72f3f8a3de015d::t_bbd1c343a5bed4 371
+internal/db/interrupted_recovery_test.go
+  s_72f3f8a3de015d::t_2c80b5b086a84d 255-278
+  s_72f3f8a3de015d::t_3ec20e16c4f44c 92,313
+  s_72f3f8a3de015d::t_491ad2ce602f6c 1-3,5-9,17-23,25-27,33-36,38-51,53-66,82,86-91,93-105,107-115,117-139,141-148,184-188,309-312,314-315,318-320,324-327
+  s_72f3f8a3de015d::t_236f191be07a43 10-16,24,28-32
+  s_72f3f8a3de015d::t_81fac1878b1632 4,213-230,233-250,316,321-323
+  s_72f3f8a3de015d::t_67033e40b4fca4 189-212,231-232,251-254,279-308
+  s_72f3f8a3de015d::t_c6eeaed5d60392 37,52,67-81,83-85
+  s_72f3f8a3de015d::t_3f8fc8096fc053 169-174,176-183
+  s_72f3f8a3de015d::t_0f86559f6724f5 106,116,140,152,175,317
+  s_72f3f8a3de015d::t_a604064f503070 149-151,153-168
+internal/daemon/interrupted_recovery.go
+  s_72f3f8a3de015d::t_b2991bc8cdc9b7 48-51
+  s_72f3f8a3de015d::t_1f11e2d137046f 90,130,134,161
+  s_72f3f8a3de015d::t_eba6def26ede3d 1-6,8-9,11-33,36-47,52-63,70-89,91-129,131-133,137-138,141-142,145-146,149-160,164-187,195-218,220,222-223,231,243
+  s_72f3f8a3de015d::t_21ffdf7933b89b 7,10,34-35
+  s_72f3f8a3de015d::t_54aca2d1160fc6 64-69,136,140,144,148
+  s_72f3f8a3de015d::t_339c1b92e18b18 135,139,143,147,219,221,225-230,235-240,242
+  s_72f3f8a3de015d::t_7c7563d302d332 162-163
+  s_72f3f8a3de015d::t_419bcb4deb2f3e 188-194
+  s_72f3f8a3de015d::t_aea760a80f0a6c 224,232-234,241
+internal/pipeline/executor.go
+  s_72f3f8a3de015d::t_691b4b5a15bd8e 260-264,339,854
+  s_72f3f8a3de015d::t_1095edd6165834 5,36-43,340-341,855-856,1182-1184
+internal/daemon/interrupted_recovery_test.go
+  s_72f3f8a3de015d::t_758dcfd6545519 8,274-285,290-291,297-299
+  s_72f3f8a3de015d::t_a8ae5aec6b9265 182-189
+  s_72f3f8a3de015d::t_8afa00e88645e0 347-348,360-375,380-384
+  s_72f3f8a3de015d::t_6f25a83150d6f9 392-406,408-411,413-415,417-420
+  s_72f3f8a3de015d::t_3bba931ed5af45 271-273
+  s_72f3f8a3de015d::t_eab7584ed0f67e 317
+  s_72f3f8a3de015d::t_16e6d3d696f843 101
+  s_72f3f8a3de015d::t_6820dfbe354c79 173-174,176,234-243
+  s_72f3f8a3de015d::t_e02ea387f277fa 20-21,58-61,63-69,72
+  s_72f3f8a3de015d::t_32ce7d46574aad 5,150-158
+  s_72f3f8a3de015d::t_3a65388f063bc6 349-359
+  s_72f3f8a3de015d::t_281efaba7f2c94 376-379
+  s_72f3f8a3de015d::t_e3c98b45cbf7d2 1-4,6-7,9-19,22-57,62,70-71,73-100,102-149,159-172,175,177-181,190-233,244-270,286-289,292-296,300-316,318-346,385-391,407,412,416,421-422
+internal/ipc/protocol_test.go
+  s_72f3f8a3de015d::t_98173592ca1ec8 404,422-423
+docs/src/content/docs/concepts/daemon.md
+  s_72f3f8a3de015d::t_4646dedc165a1c 117-154
+internal/pipeline/executor_approval_test.go
+  s_72f3f8a3de015d::t_b152d7ba6ce270 5,73-111
+  s_72f3f8a3de015d::t_1644913cb4ee7d 112-113
+internal/db/interrupted_recovery.go
+  s_72f3f8a3de015d::t_829a816a55900e 26-27,35,51-52,62,70-71,73-74,118,126,179,185-188
+  s_72f3f8a3de015d::t_9e7e1507e76b3a 1-21,46-50,53-61,63-69,72,75-97,138-139,180-184,189-317
+  s_72f3f8a3de015d::t_38fcb9ece5350a 98-115
+  s_72f3f8a3de015d::t_765cc8b48aae4f 140-178
+  s_72f3f8a3de015d::t_58b26a6927433f 22-25,28-34,36-45,116-117,119-125,127-137
+internal/cli/axi_drive.go
+  s_72f3f8a3de015d::t_ff5b914fce53c5 132-152
+  s_72f3f8a3de015d::t_2ab08d211ac7eb 131
+internal/db/run.go
+  s_72f3f8a3de015d::t_3bd072bb9bcab5 311-327
+internal/daemon/manager.go
+  s_72f3f8a3de015d::t_c3bf3680a7ee22 24
+  s_72f3f8a3de015d::t_b032522f55cec0 5,358,373-376,386-390,936,968-973,984-988,1094
+  s_72f3f8a3de015d::t_206160b1294380 913-914,917-924
+  s_72f3f8a3de015d::t_e9e8fc53051dd3 343-351
+  s_72f3f8a3de015d::t_7b9cc3083ee529 119-120,146-148
+internal/sourceprovenance/source_ref.go
+  s_72f3f8a3de015d::t_3c798d0e821976 88-107
+internal/ipc/protocol.go
+  s_72f3f8a3de015d::t_0202fe4aba3d1b 12-15,19-23
+  s_72f3f8a3de015d::t_0710a042426e86 16-18,103-112,176-181
+  s_72f3f8a3de015d::t_8a14c217457090 182
+internal/e2e/interrupted_recovery_test.go
+  s_72f3f8a3de015d::t_3d28004cc50c47 1-142,166-174,180-203,230-240,245-250,261-262,264-268
+  s_72f3f8a3de015d::t_3cbcab98b7f98a 175-179
+  s_72f3f8a3de015d::t_97dc125d4824be 251-260,263
+  s_72f3f8a3de015d::t_7108ea5dbea384 161-165,241-244
+  s_72f3f8a3de015d::t_dacdd5dc1ebe73 143-160,204-229
+AGENTS.md
+  s_72f3f8a3de015d::t_e9d42e9e9a3af5 124-128
+internal/daemon/subscribe_recover_test.go
+  s_72f3f8a3de015d::t_e76e35be630510 420-422
+  s_72f3f8a3de015d::t_5bd6a088298f37 570-571
+  s_72f3f8a3de015d::t_532fe888179b70 553,569
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "60eac19b9494f2e11d9bbbcad63a25726469ec90",
+  "prompts": {},
+  "sessions": {
+    "s_72f3f8a3de015d": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019f89e7-62c5-7185-acff-b22370cbdd99",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
