@@ -1,0 +1,25 @@
+internal/repoidentity/identity.go
+  s_6619c45bd42ce5::t_5b4800dfb7416d 112-116,153-155
+  s_6619c45bd42ce5::t_a14c172145731c 8,10,16-18,34,37,40-66,68-74,76,82-86,90,106-111,117-152,156-232,235
+internal/repoidentity/identity_test.go
+  s_6619c45bd42ce5::t_a14c172145731c 5-6,11-21,28-29,35-54,60-65,71-76
+internal/db/bootstrap_test.go
+  s_6619c45bd42ce5::t_a14c172145731c 110-144
+  s_6619c45bd42ce5::t_5b4800dfb7416d 8-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "9a44e6568a3c996db4a0ab7ede75b037fb3d0676",
+  "prompts": {},
+  "sessions": {
+    "s_6619c45bd42ce5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f87b6-7731-79e3-97b7-8699e32b7580",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
