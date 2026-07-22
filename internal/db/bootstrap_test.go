@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/repoidentity"
 )
 
 func TestRunBootstrapTestAuthorizationIsFrozenAndRoundTrips(t *testing.T) {
@@ -102,6 +104,41 @@ func TestBootstrapTestRetirementPersistsAcrossReopenAndUsesExactKey(t *testing.T
 	defer d.Close()
 	if retired, err := d.IsBootstrapTestRetired("github.com/owner/repo", "staging"); err != nil || !retired {
 		t.Fatalf("reopened retirement = %v, err=%v", retired, err)
+	}
+}
+
+func TestBootstrapTestRetirementUsesCanonicalRepositoryIdentity(t *testing.T) {
+	d := openTestDB(t)
+	canonical, err := repoidentity.Canonical("https://github.com/owner/repo.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RetireBootstrapTest(canonical, "main"); err != nil {
+		t.Fatal(err)
+	}
+	for _, remote := range []string{
+		"github.com/owner/repo",
+		"https://github.com:443/owner/repo.git",
+		"https://github.com./owner/repo.git",
+		"git@github.com:owner/repo.git",
+		"ssh://git@github.com:22/owner/repo.git",
+	} {
+		identity, err := repoidentity.Canonical(remote)
+		if err != nil {
+			t.Fatalf("Canonical(%q): %v", remote, err)
+		}
+		retired, err := d.IsBootstrapTestRetired(identity, "main")
+		if err != nil || !retired {
+			t.Fatalf("retirement via %q = %v, err=%v", remote, retired, err)
+		}
+	}
+
+	distinct, err := repoidentity.Canonical("https://github.com:8443/owner/repo.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := d.IsBootstrapTestRetired(distinct, "main"); err != nil || retired {
+		t.Fatalf("non-default-port retirement = %v, err=%v", retired, err)
 	}
 }
 
