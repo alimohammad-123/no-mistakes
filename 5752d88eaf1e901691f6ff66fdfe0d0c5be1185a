@@ -1,0 +1,32 @@
+docs/src/content/docs/reference/environment.md
+  s_2d363053910f8f::t_bac87af80fd3a8 104,106
+Makefile
+  s_601e5b981e83de::t_5400bc5d82013b 61
+internal/daemon/subscribe_recover_test.go
+  s_601e5b981e83de::t_3ab016d81c9f4c 497-499,509
+  s_601e5b981e83de::t_cb16f622415482 510
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "5752d88eaf1e901691f6ff66fdfe0d0c5be1185a",
+  "prompts": {},
+  "sessions": {
+    "s_2d363053910f8f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f89be-7de9-7e73-9d91-19410f658f67",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    },
+    "s_601e5b981e83de": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f89ac-fd5a-7b63-933b-947577a2bc2a",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}

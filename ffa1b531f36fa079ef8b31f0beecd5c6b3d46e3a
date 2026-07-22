@@ -1,0 +1,67 @@
+internal/agent/server.go
+  s_036d412ae853f3::t_b47c4b62adabec 57-58,76,80,101-109
+internal/pipeline/source_ref_test.go
+  s_036d412ae853f3::t_2a196274f4435a 7,15-18,23,34-62,66-101
+  s_036d412ae853f3::t_8e995c8122f3fd 63-65
+  s_036d412ae853f3::t_4aea2efff023d3 102
+internal/pipeline/steps/rebase_test.go
+  s_036d412ae853f3::t_88181bc633e0aa 192-194
+internal/agent/pi.go
+  s_036d412ae853f3::t_c4f4e07738e555 40
+internal/sourceprovenance/source_ref_test.go
+  s_036d412ae853f3::t_b4949df6781d36 32
+internal/pipeline/executor.go
+  s_036d412ae853f3::t_5c64c619ce8a68 958-968
+internal/git/git.go
+  s_036d412ae853f3::t_c4f4e07738e555 374-378,386-399
+  s_036d412ae853f3::t_ecf1cef236b778 400-401
+internal/git/git_test.go
+  s_036d412ae853f3::t_2853298b734095 427-441
+internal/agent/claude.go
+  s_036d412ae853f3::t_c4f4e07738e555 80
+internal/agent/rovodev.go
+  s_036d412ae853f3::t_b47c4b62adabec 49,86,89,92-95,101
+internal/agent/opencode.go
+  s_036d412ae853f3::t_b47c4b62adabec 44
+internal/agent/codex.go
+  s_036d412ae853f3::t_c4f4e07738e555 96
+internal/sourceprovenance/source_ref.go
+  s_036d412ae853f3::t_b4949df6781d36 96-99
+  s_036d412ae853f3::t_c4f4e07738e555 85-95,100-102,113-114,125-131
+internal/agent/env.go
+  s_036d412ae853f3::t_c4f4e07738e555 36,40-43,49,62,77-78
+  s_036d412ae853f3::t_8e995c8122f3fd 58,63-66,76
+  s_036d412ae853f3::t_b47c4b62adabec 90-101
+internal/agent/acpx.go
+  s_036d412ae853f3::t_c4f4e07738e555 39
+internal/agent/server_test.go
+  s_036d412ae853f3::t_b47c4b62adabec 24,139
+internal/agent/opencode_http.go
+  s_036d412ae853f3::t_b47c4b62adabec 13,16,19-22,28
+internal/agent/agent.go
+  s_036d412ae853f3::t_c4f4e07738e555 30
+internal/agent/copilot.go
+  s_036d412ae853f3::t_c4f4e07738e555 43
+internal/pipeline/pipeline.go
+  s_036d412ae853f3::t_5c64c619ce8a68 52-62
+internal/pipeline/steps/rebase.go
+  s_036d412ae853f3::t_5c64c619ce8a68 107-109,364-366,403,415
+internal/agent/env_test.go
+  s_036d412ae853f3::t_b4949df6781d36 99-107
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "ffa1b531f36fa079ef8b31f0beecd5c6b3d46e3a",
+  "prompts": {},
+  "sessions": {
+    "s_036d412ae853f3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8989-26b1-7a80-96dd-421464da50a7",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}

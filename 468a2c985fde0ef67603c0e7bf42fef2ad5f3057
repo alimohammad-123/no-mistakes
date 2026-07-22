@@ -1,0 +1,43 @@
+internal/pipeline/steps/ci_fix.go
+  s_036d412ae853f3::t_a13ce2913bd7c2 203-205,222-223
+  s_036d412ae853f3::t_e3bac051c59de1 224
+internal/pipeline/source_ref_test.go
+  s_036d412ae853f3::t_e35e3095b89733 48-57
+  s_036d412ae853f3::t_30fed766a47c6f 68
+  s_036d412ae853f3::t_a13ce2913bd7c2 5-7,30-47,58-64,67,87-92
+internal/pipeline/steps/rebase.go
+  s_036d412ae853f3::t_30fed766a47c6f 133-135
+  s_036d412ae853f3::t_a13ce2913bd7c2 513-515
+internal/pipeline/steps/common_fix.go
+  s_036d412ae853f3::t_a13ce2913bd7c2 157-159
+internal/sourceprovenance/source_ref_test.go
+  s_036d412ae853f3::t_a13ce2913bd7c2 26-32
+internal/git/git.go
+  s_036d412ae853f3::t_a13ce2913bd7c2 373-381
+internal/pipeline/executor.go
+  s_036d412ae853f3::t_a13ce2913bd7c2 659,948,958-959
+  s_036d412ae853f3::t_ed91141a2fa15d 946-947
+  s_036d412ae853f3::t_d3caaf92fce73e 960
+internal/pipeline/steps/rebase_test.go
+  s_036d412ae853f3::t_e35e3095b89733 87-89
+internal/sourceprovenance/source_ref.go
+  s_036d412ae853f3::t_a13ce2913bd7c2 51-52
+internal/pipeline/steps/common_test.go
+  s_036d412ae853f3::t_e35e3095b89733 731-733
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "468a2c985fde0ef67603c0e7bf42fef2ad5f3057",
+  "prompts": {},
+  "sessions": {
+    "s_036d412ae853f3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8989-26b1-7a80-96dd-421464da50a7",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
