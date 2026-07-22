@@ -1,0 +1,110 @@
+internal/sourceprovenance/source_ref.go
+  s_959174e2bce57f::t_ff173f2628ba3c 1-21,29-51,53-56,58-60,62-126
+  s_c1021c4fa7050e::t_f237071bd2d22d 22-28
+  s_c1021c4fa7050e::t_3bbe2b1b146803 52,61
+  s_959174e2bce57f::t_854d4963aeaab9 57
+internal/daemon/subscribe_recover_test.go
+  s_959174e2bce57f::t_45f265dc2d7552 5,379-390
+  s_959174e2bce57f::t_61bf911baa312d 495,499
+  s_c1021c4fa7050e::t_4c3ca6267a8070 401
+  s_c1021c4fa7050e::t_d3c8153d2173e2 500-507
+  s_c1021c4fa7050e::t_4f3bc8c0d83125 355,372,395-400,402-420,427,444,471-474,494,496-498
+  s_c1021c4fa7050e::t_5a46e27c736e08 365-371
+internal/db/schema.go
+  s_959174e2bce57f::t_63240fac78bc9a 28,158-160
+internal/agent/acpx.go
+  s_959174e2bce57f::t_9e31a7f12db6a8 39
+internal/agent/server.go
+  s_959174e2bce57f::t_67785de6e129bf 74,78
+internal/agent/env.go
+  s_959174e2bce57f::t_6cc4b9a70d0128 34,36,74
+  s_c1021c4fa7050e::t_391280bd5dd15d 3-8,35,37-73,75
+internal/agent/rovodev.go
+  s_959174e2bce57f::t_08891817a12a02 49,86,97
+internal/agent/pi.go
+  s_959174e2bce57f::t_ab7510c03bd313 40
+internal/agent/env_test.go
+  s_c1021c4fa7050e::t_d54a02aee7a518 81-98
+internal/agent/server_test.go
+  s_959174e2bce57f::t_9a8a456f294c39 24,139
+docs/src/content/docs/reference/environment.md
+  s_959174e2bce57f::t_76242b3c57a933 93-105
+internal/db/run.go
+  s_959174e2bce57f::t_154a900126edd7 10,24-26,74,80,228-231,240,246-248
+  s_959174e2bce57f::t_5d1364d17221a2 183-189
+  s_959174e2bce57f::t_dce1732747ca72 142-182,190-195
+internal/daemon/manager.go
+  s_959174e2bce57f::t_dd129cbdcf3183 117-119
+internal/agent/pi_test.go
+  s_959174e2bce57f::t_5b326751009d7d 84-106
+internal/agent/agent.go
+  s_959174e2bce57f::t_02b29aec44da67 27-29
+  s_959174e2bce57f::t_434cacd4debdf0 25-26
+internal/agent/codex.go
+  s_959174e2bce57f::t_d591c6316c581e 96
+internal/pipeline/executor.go
+  s_959174e2bce57f::t_623439f0e8058b 147-149,261
+  s_c1021c4fa7050e::t_b593b60c12f6c7 659,946-947
+  s_c1021c4fa7050e::t_7fa10f7d0f5980 969-971
+  s_959174e2bce57f::t_2a533f5e198110 22
+  s_959174e2bce57f::t_0423c2e0eac9d4 263,945,948-968,972
+  s_959174e2bce57f::t_654ea57e2f0caf 262
+internal/agent/claude.go
+  s_959174e2bce57f::t_b308f5b5aae7dc 80
+internal/sourceprovenance/source_ref_test.go
+  s_c1021c4fa7050e::t_5ef73cc9a1c3c5 22-26
+  s_959174e2bce57f::t_5e2ca05b8e3e6b 50-65
+  s_959174e2bce57f::t_c325372f6f84cf 1-21,27-49,66-76,80-89,93,97-99,113-119,123-134,138-139
+  s_959174e2bce57f::t_b95bc3432c4bb6 77-79,90-92,94-96,100-112,120-122,135-137
+internal/db/run_test.go
+  s_959174e2bce57f::t_5480e0d07b9d0e 37-56,63-73,81-112
+  s_c1021c4fa7050e::t_1e64ddfb6e0b94 4,57-62,74-80
+internal/agent/copilot.go
+  s_959174e2bce57f::t_2fb4de9a0a957a 43
+internal/db/db_test.go
+  s_959174e2bce57f::t_c6d5ed84b777d3 49,110-111
+  s_959174e2bce57f::t_80b9c0910f611d 112
+internal/agent/opencode_http.go
+  s_959174e2bce57f::t_a26b6e8d8c63f7 13,24
+internal/agent/opencode.go
+  s_959174e2bce57f::t_f8ec3d1b333802 44
+internal/pipeline/source_ref_test.go
+  s_c1021c4fa7050e::t_af91e7970cd296 23-24,49
+  s_c1021c4fa7050e::t_c61c0b613b2ef5 29-30
+  s_959174e2bce57f::t_75ab54cf07b619 18,20-22
+  s_959174e2bce57f::t_28ce803925118b 1-17,19,25-28,31-48,50-52
+internal/pipeline/pipeline.go
+  s_959174e2bce57f::t_38985597316c14 5
+  s_959174e2bce57f::t_8e31eec523c05b 10,62-89
+  s_959174e2bce57f::t_dd99900036aed0 90
+internal/pipeline/steps/common_exec.go
+  s_959174e2bce57f::t_5962049e55253a 163-169,173-174,252-261
+internal/pipeline/steps/helpers_test.go
+  s_c1021c4fa7050e::t_03786817439134 149,152
+internal/pipeline/steps/test_test.go
+  s_c1021c4fa7050e::t_388080ead08fc0 11,15-17,21-160
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "375e7fbcb4385c4c49391e89d0683185d2a50d06",
+  "prompts": {},
+  "sessions": {
+    "s_959174e2bce57f": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019f893b-1fca-7fd0-93c8-d8f8224f24f8",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    },
+    "s_c1021c4fa7050e": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019f8935-a16a-7698-a565-c4f5d51ef1ea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
