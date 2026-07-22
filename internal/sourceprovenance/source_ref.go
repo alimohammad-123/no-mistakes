@@ -85,6 +85,26 @@ func BindCandidate(ctx context.Context, workDir, ref, candidateSHA string) error
 	return VerifyCandidateBinding(ctx, workDir, ref, candidateSHA)
 }
 
+// BindCandidateIfUnchanged verifies the detached candidate and atomically
+// refreshes its already-matching source ref. The expected-old argument makes a
+// concurrent receive-side ref move a refusal instead of silently rewinding it.
+func BindCandidateIfUnchanged(ctx context.Context, workDir, ref, candidateSHA, expectedOld string) error {
+	if err := VerifyCandidateBinding(ctx, workDir, ref, expectedOld); err != nil {
+		return err
+	}
+	head, err := gitpkg.HeadSHA(ctx, workDir)
+	if err != nil {
+		return fmt.Errorf("resolve pipeline candidate HEAD: %w", err)
+	}
+	if head != candidateSHA {
+		return fmt.Errorf("pipeline candidate mismatch: worktree HEAD %s does not match recorded run head %s", head, candidateSHA)
+	}
+	if _, err := gitpkg.Run(ctx, workDir, "update-ref", ref, candidateSHA, expectedOld); err != nil {
+		return fmt.Errorf("bind unchanged pipeline source ref: %w", err)
+	}
+	return VerifyCandidateBinding(ctx, workDir, ref, candidateSHA)
+}
+
 func VerifyCandidateBinding(ctx context.Context, workDir, ref, candidateSHA string) error {
 	if !strings.HasPrefix(ref, headsPrefix) {
 		return fmt.Errorf("source ref %q is not a local branch ref", ref)

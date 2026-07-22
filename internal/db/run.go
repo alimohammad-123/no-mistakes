@@ -308,6 +308,23 @@ func (d *DB) GetRunsByRepoHead(repoID, branch, headSHA string) ([]*Run, error) {
 	return runs, rows.Err()
 }
 
+// GetLatestRunForBranch returns the newest run for one exact repository branch.
+// It is intentionally bounded to one row for compatibility recovery and other
+// branch-local decisions that must not scan unbounded run history.
+func (d *DB) GetLatestRunForBranch(repoID, branch string) (*Run, error) {
+	r := &Run{}
+	err := scanRun(d.sql.QueryRow(
+		`SELECT `+runColumns+` FROM runs WHERE repo_id = ? AND branch = ? ORDER BY created_at DESC, id DESC LIMIT 1`, repoID, branch,
+	), r)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get latest branch run: %w", err)
+	}
+	return r, nil
+}
+
 // GetActiveRun returns the currently active run (pending or running) for a repo,
 // if any. When branch is non-empty, only a run on that exact branch is returned
 // - the setup wizard relies on this to decide whether a new run is needed for

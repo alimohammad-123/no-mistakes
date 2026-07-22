@@ -121,6 +121,11 @@ Safest local verification sequence after non-trivial changes:
 - `runs.awaiting_agent_since` is non-nil **iff** a step is actually parked at an `awaiting_approval`/`fix_review` gate: the executor sets it on gate entry, clears it when `waitForApproval` returns, and `RecoverStaleRuns` clears it on crash recovery. It is observability only (rendered as `awaiting_agent: parked <duration>` in `axi status`) and never changes gate resolution, auto-resume, or the `--yes` default.
 - Tests: `internal/db/run_test.go`, `internal/pipeline/executor_approval_test.go`, `internal/cli/axi_test.go`, e2e `TestAxiParkedAwaitingAgentSignal`.
 
+**Legacy Interrupted-Gate Recovery**
+
+- Ordinary branch-matched `axi run --intent <same intent>` can restore the same run ID only for the exact pre-fix graceful-shutdown footprint (`failed` plus `daemon shutting down`) when its submitted head, authoritative intent, step topology, findings round, clean registered worktree, pipeline head/source ref, and absence of push/PR/custody provenance all still validate. The runtime owner is `RunManager.HandleRecoverInterruptedGate`; the atomic DB transition is `DB.RestoreLegacyInterruptedGate`. Every mismatch fails closed without replacing or rerunning the run.
+- A current daemon shutdown preserves a fully durable parked gate as `running`, including its worktree, so ordinary startup recovery resumes it. Regression coverage lives in `internal/db/interrupted_recovery_test.go`, `internal/daemon/interrupted_recovery_test.go`, `internal/pipeline/executor_approval_test.go`, and e2e `TestAxiRunRecoversLegacyGracefulShutdownGate`.
+
 **Review-Loop Agent Sessions (`internal/pipeline/sessions.go`)**
 
 - Per run, the review loop keeps ONE durable reviewer session across the initial review and every full rereview, and a SEPARATE fixer session across review-fix turns; roles never share a session (the reviewer must never inherit the fixer's rationale), no other step uses sessions, and sessions are keyed strictly by run. Every review turn is still a full adversarial review of the complete branch diff.

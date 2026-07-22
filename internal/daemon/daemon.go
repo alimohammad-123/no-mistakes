@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -358,6 +359,16 @@ func skipWorktreeCleanup(d *db.DB, runID string) (bool, string) {
 	if run != nil && (run.Status == types.RunPending || run.Status == types.RunRunning) {
 		return true, fmt.Sprintf("run %s is %s", runID, run.Status)
 	}
+	// Preserve only a fully coherent legacy graceful-shutdown gate long enough
+	// for ordinary branch-matched AXI recovery to inspect its pipeline copy.
+	// This is read-only and does not claim the run during daemon startup.
+	if run != nil && run.Status == types.RunFailed && run.Error != nil && *run.Error == db.LegacyDaemonShutdownError {
+		if sourceRef, sourceErr := sourceprovenance.CanonicalSourceRefFromBranch(run.Branch); sourceErr == nil && run.SubmittedHeadSHA != nil && run.Intent != nil {
+			if _, inspectErr := d.InspectLegacyInterruptedGate(run.ID, run.RepoID, run.Branch, run.HeadSHA, *run.SubmittedHeadSHA, *run.Intent, sourceRef, types.AllSteps()); inspectErr == nil {
+				return true, fmt.Sprintf("run %s is eligible for interrupted-gate compatibility inspection", runID)
+			}
+		}
+	}
 	return false, ""
 }
 
@@ -478,6 +489,18 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			return nil, fmt.Errorf("get steps: %w", err)
 		}
 		return &ipc.GetActiveRunResult{Run: runToInfo(d, run, steps)}, nil
+	})
+
+	srv.Handle(ipc.MethodRecoverInterruptedRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		var p ipc.RecoverInterruptedRunParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		runID, matched, err := mgr.HandleRecoverInterruptedGate(ctx, p.RepoID, p.Branch, p.LocalHead, p.Intent)
+		if err != nil {
+			return nil, err
+		}
+		return &ipc.RecoverInterruptedRunResult{RunID: runID, Matched: matched}, nil
 	})
 
 	srv.Handle(ipc.MethodRerun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {

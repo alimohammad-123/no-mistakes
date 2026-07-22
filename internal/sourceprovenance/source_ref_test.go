@@ -118,6 +118,32 @@ func TestBindCandidateDetachedMultipleCommitsDoesNotMutateRemote(t *testing.T) {
 	}
 }
 
+func TestBindCandidateIfUnchangedRefusesMovedRefWithoutRewind(t *testing.T) {
+	dir := t.TempDir()
+	gitTest(t, dir, "init")
+	gitTest(t, dir, "config", "user.name", "test")
+	gitTest(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", ".")
+	gitTest(t, dir, "commit", "-m", "one")
+	first := gitTest(t, dir, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "commit", "-am", "two")
+	second := gitTest(t, dir, "rev-parse", "HEAD")
+	ref := "refs/heads/feature"
+	gitTest(t, dir, "update-ref", ref, first)
+	if err := BindCandidateIfUnchanged(context.Background(), dir, ref, second, second); err == nil {
+		t.Fatal("expected moved source ref refusal")
+	}
+	if got := gitTest(t, dir, "rev-parse", ref); got != first {
+		t.Fatalf("moved source ref was rewound to %s, want %s", got, first)
+	}
+}
+
 func TestBindCandidateRefusesHeadMismatch(t *testing.T) {
 	dir := t.TempDir()
 	gitTest(t, dir, "init")

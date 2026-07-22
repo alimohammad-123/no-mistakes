@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -66,6 +67,47 @@ func TestExecutor_ApprovalFix(t *testing.T) {
 	// Step should have been called twice (initial + after fix)
 	if callCount != 2 {
 		t.Errorf("expected step to be called 2 times, got %d", callCount)
+	}
+}
+
+func TestExecutor_DaemonShutdownPreservesDurableApprovalGate(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"preserve this decision","action":"ask-user"}],"summary":"preserved gate"}`
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{NeedsApproval: true, Findings: findings}, nil
+		},
+	}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(ctx, run, repo, workDir) }()
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	before, _ := database.GetStepsByRun(run.ID)
+	roundsBefore, _ := database.GetRoundsByStep(before[0].ID)
+
+	cancel(ErrDaemonShutdown)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrParkedRunInterrupted) {
+			t.Fatalf("shutdown error = %v, want parked interruption", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not release approval wait")
+	}
+	parked, _ := database.GetRun(run.ID)
+	if parked.Status != types.RunRunning || parked.Error != nil || parked.AwaitingAgentSince == nil {
+		t.Fatalf("shutdown changed parked run: %#v", parked)
+	}
+	after, _ := database.GetStepsByRun(run.ID)
+	if after[0].Status != types.StepStatusAwaitingApproval || after[0].Error != nil || after[0].CompletedAt != nil || after[0].FindingsJSON == nil || *after[0].FindingsJSON != *before[0].FindingsJSON {
+		t.Fatalf("shutdown changed gate: before=%#v after=%#v", before[0], after[0])
+	}
+	roundsAfter, _ := database.GetRoundsByStep(after[0].ID)
+	if len(roundsAfter) != len(roundsBefore) || roundsAfter[0].ID != roundsBefore[0].ID {
+		t.Fatalf("shutdown changed rounds: before=%#v after=%#v", roundsBefore, roundsAfter)
 	}
 }
 
