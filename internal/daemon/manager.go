@@ -337,7 +337,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			"action":      "finished",
 			"trigger":     "recovery",
 			"agent":       string(plan.cfg.Agent),
-			"branch_role": telemetryBranchRole(plan.run.Branch, plan.repo.DefaultBranch, plan.run.EffectiveBaseBranch(plan.repo)),
+			"branch_role": telemetryBranchRole(plan.run.Branch, plan.repo.DefaultBranch),
 			"status":      string(plan.run.Status),
 			"duration_ms": time.Since(startedAt).Milliseconds(),
 			"step_count":  len(plan.steps),
@@ -588,7 +588,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
 // step uses it instead of inferring from transcripts.
 func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent string) (string, error) {
-	branchRole := telemetryBranchRole(branch, repo.DefaultBranch, repo.EffectiveBaseBranch())
+	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
 			"action":      "start_failed",
@@ -924,15 +924,12 @@ func addRunPerformanceSummary(database *db.DB, runID string, fields telemetry.Fi
 	fields["fallback_invocations"] = summary.Fallback
 }
 
-func telemetryBranchRole(branch, defaultBranch, baseBranch string) string {
+func telemetryBranchRole(branch, defaultBranch string) string {
 	if branch == "" {
 		return "unknown"
 	}
 	if defaultBranch != "" && branch == defaultBranch {
 		return "default"
-	}
-	if baseBranch != "" && branch == baseBranch {
-		return "base"
 	}
 	return "feature"
 }

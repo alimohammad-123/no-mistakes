@@ -13,6 +13,8 @@ import (
 
 const repoPolicyPath = ".no-mistakes.yaml"
 
+var getBootstrapOriginURL = git.GetRemoteURL
+
 // resolveBootstrapTestAuthorization authorizes a new run only when a freshly
 // read pipeline base proves the trusted policy absent. The submitted policy is
 // used only as exact-byte and exact-command evidence; the command returned for
@@ -46,9 +48,9 @@ func resolveBootstrapTestAuthorization(
 	if err := config.ValidateBootstrapTestBindings(global.Bootstrap.Test); err != nil {
 		return nil, err
 	}
-	identity, err := repoidentity.Canonical(repo.UpstreamURL)
+	identity, err := bootstrapRepositoryIdentity(ctx, repo, workDir)
 	if err != nil {
-		return nil, fmt.Errorf("resolve bootstrap repository identity: %w", err)
+		return nil, err
 	}
 	baseBranch := run.EffectiveBaseBranch(repo)
 	matches := make([]config.BootstrapTestBinding, 0, 1)
@@ -111,9 +113,12 @@ func applyFrozenBootstrapTestAuthorization(
 	if trustedPolicy.Config != nil {
 		return fmt.Errorf("frozen bootstrap Test authorization received an ambiguous trusted-policy result")
 	}
-	identity, err := repoidentity.Canonical(repo.UpstreamURL)
+	if repo == nil || run == nil {
+		return fmt.Errorf("frozen bootstrap Test authorization requires a repository and run")
+	}
+	identity, err := bootstrapRepositoryIdentity(ctx, repo, workDir)
 	if err != nil {
-		return fmt.Errorf("resolve frozen bootstrap repository identity: %w", err)
+		return err
 	}
 	if identity != auth.Repository || run.EffectiveBaseBranch(repo) != auth.BaseBranch {
 		return fmt.Errorf("frozen bootstrap Test authorization no longer matches the repository and pipeline base")
@@ -130,6 +135,25 @@ func applyFrozenBootstrapTestAuthorization(
 	}
 	cfg.Commands.Test = auth.Command
 	return nil
+}
+
+func bootstrapRepositoryIdentity(ctx context.Context, repo *db.Repo, workDir string) (string, error) {
+	recorded, err := repoidentity.Canonical(repo.UpstreamURL)
+	if err != nil {
+		return "", fmt.Errorf("resolve recorded bootstrap repository identity: %w", err)
+	}
+	originURL, err := getBootstrapOriginURL(ctx, workDir, "origin")
+	if err != nil {
+		return "", fmt.Errorf("resolve bootstrap fetch origin: %w", err)
+	}
+	origin, err := repoidentity.Canonical(originURL)
+	if err != nil {
+		return "", fmt.Errorf("resolve bootstrap fetch origin identity: %w", err)
+	}
+	if origin != recorded {
+		return "", fmt.Errorf("bootstrap fetch origin %q does not match recorded repository identity %q", origin, recorded)
+	}
+	return recorded, nil
 }
 
 func submittedRepoPolicy(ctx context.Context, workDir string, run *db.Run) ([]byte, *config.RepoConfig, error) {

@@ -12,16 +12,16 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func TestTelemetryBranchRoleDistinguishesDefaultAndPipelineBase(t *testing.T) {
+func TestTelemetryBranchRolePreservesExistingShape(t *testing.T) {
 	for _, tc := range []struct {
 		branch string
 		want   string
 	}{
 		{branch: "main", want: "default"},
-		{branch: "staging", want: "base"},
+		{branch: "staging", want: "feature"},
 		{branch: "feature/x", want: "feature"},
 	} {
-		if got := telemetryBranchRole(tc.branch, "main", "staging"); got != tc.want {
+		if got := telemetryBranchRole(tc.branch, "main"); got != tc.want {
 			t.Errorf("telemetryBranchRole(%q) = %q, want %q", tc.branch, got, tc.want)
 		}
 	}

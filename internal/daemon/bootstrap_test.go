@@ -58,6 +58,7 @@ func newBootstrapFixture(t *testing.T, policy []byte) bootstrapFixture {
 	gitCmd(t, workDir, "commit", "-m", "add policy")
 	featureSHA := gitOutput(t, workDir, "rev-parse", "HEAD")
 	gitCmd(t, workDir, "push", "origin", "feature/policy")
+	gitCmd(t, workDir, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
 
 	repo := &db.Repo{ID: "repo", WorkingPath: workDir, UpstreamURL: "https://github.com/owner/repo.git", DefaultBranch: "main", BaseBranch: "staging"}
 	submitted := featureSHA
@@ -89,6 +90,9 @@ func TestPushReceivedUsesOnlyBootstrapTestCommandFromFeaturePolicy(t *testing.T)
 	step := &bootstrapCaptureStep{seen: make(chan *config.Config, 1)}
 	p, database := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{step} })
 	repo, _ := setupTestGitRepo(t, p, database, "bootstrap-integration")
+	oldGetOriginURL := getBootstrapOriginURL
+	getBootstrapOriginURL = func(context.Context, string, string) (string, error) { return repo.UpstreamURL, nil }
+	t.Cleanup(func() { getBootstrapOriginURL = oldGetOriginURL })
 
 	gitCmd(t, repo.WorkingPath, "checkout", "-b", "staging")
 	gitCmd(t, repo.WorkingPath, "rm", ".no-mistakes.yaml")
@@ -244,6 +248,18 @@ func TestResolveBootstrapTestAuthorizationBindsExactPolicyBytes(t *testing.T) {
 	}
 }
 
+func TestResolveBootstrapTestAuthorizationRejectsMismatchedFetchOrigin(t *testing.T) {
+	policy := []byte("commands:\n  test: go test ./...\n")
+	fixture := newBootstrapFixture(t, policy)
+	gitCmd(t, fixture.workDir, "remote", "set-url", "origin", "https://github.com/other/repo.git")
+	global := config.DefaultGlobalConfig()
+	global.Bootstrap.Test = []config.BootstrapTestBinding{bootstrapBindingFor(policy)}
+
+	if auth, err := resolveBootstrapTestAuthorization(context.Background(), global, fixture.repo, fixture.run, fixture.workDir, &trustedRepoPolicy{}); err == nil {
+		t.Fatalf("mismatched fetch origin authorized: %+v", auth)
+	}
+}
+
 func TestResolveBootstrapTestAuthorizationRefusals(t *testing.T) {
 	policy := []byte("commands:\n  test: go test ./...\n")
 	fixture := newBootstrapFixture(t, policy)
@@ -330,6 +346,11 @@ func TestLoadRecoveredConfigUsesFrozenBootstrapAfterGlobalMutation(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	oldFetch := fetchRecoveredRemoteBranch
+	fetchRecoveredRemoteBranch = func(ctx context.Context, workDir, _, branch string) error {
+		return gitpkg.FetchRemoteBranchToRef(ctx, workDir, fixture.bareDir, branch, "refs/remotes/origin/"+branch)
+	}
+	t.Cleanup(func() { fetchRecoveredRemoteBranch = oldFetch })
 
 	mgr := NewRunManager(database, p, nil)
 	cfg, err := mgr.loadRecoveredConfig(context.Background(), run, repo, fixture.workDir)
@@ -363,6 +384,9 @@ func TestRecoverOnStartupRunsTestFromFrozenBootstrapAfterBindingRemoval(t *testi
 	}
 	defer database.Close()
 	repo, _ := setupTestGitRepo(t, p, database, "bootstrap-recovery")
+	oldGetOriginURL := getBootstrapOriginURL
+	getBootstrapOriginURL = func(context.Context, string, string) (string, error) { return repo.UpstreamURL, nil }
+	t.Cleanup(func() { getBootstrapOriginURL = oldGetOriginURL })
 
 	gitCmd(t, repo.WorkingPath, "checkout", "-b", "staging")
 	gitCmd(t, repo.WorkingPath, "rm", ".no-mistakes.yaml")
@@ -488,5 +512,22 @@ func TestLoadRecoveredConfigRejectsBootstrapAfterBasePolicyAppears(t *testing.T)
 
 	if err := applyFrozenBootstrapTestAuthorization(context.Background(), cfg, fixture.run, fixture.repo, fixture.workDir, &trustedRepoPolicy{Present: true, Config: &config.RepoConfig{Commands: config.Commands{Test: "trusted"}}}); err == nil {
 		t.Fatal("recovery accepted stale bootstrap authorization after base policy appeared")
+	}
+}
+
+func TestApplyFrozenBootstrapTestAuthorizationRejectsMismatchedFetchOrigin(t *testing.T) {
+	policy := []byte("commands:\n  test: go test ./...\n")
+	fixture := newBootstrapFixture(t, policy)
+	binding := bootstrapBindingFor(policy)
+	auth := db.BootstrapTestAuthorization(binding)
+	fixture.run.BootstrapTestRepository = &auth.Repository
+	fixture.run.BootstrapTestBaseBranch = &auth.BaseBranch
+	fixture.run.BootstrapTestCommand = &auth.Command
+	fixture.run.BootstrapTestPolicySHA256 = &auth.PolicySHA256
+	gitCmd(t, fixture.workDir, "remote", "set-url", "origin", "https://github.com/other/repo.git")
+	cfg := config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{})
+
+	if err := applyFrozenBootstrapTestAuthorization(context.Background(), cfg, fixture.run, fixture.repo, fixture.workDir, &trustedRepoPolicy{}); err == nil {
+		t.Fatal("recovery accepted bootstrap authorization from a mismatched fetch origin")
 	}
 }
