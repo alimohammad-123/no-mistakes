@@ -1,0 +1,55 @@
+internal/db/schema.go
+  s_529a515e800196::t_961cc4ce663bf7 14-20
+docs/src/content/docs/reference/pipeline-steps.md
+  s_529a515e800196::t_c9a7da6c9cb2b4 92
+AGENTS.md
+  s_529a515e800196::t_347a3c91cb40a4 109
+internal/daemon/bootstrap.go
+  s_529a515e800196::t_cd7bd9e7342d30 81-93
+docs/src/content/docs/concepts/daemon.md
+  s_529a515e800196::t_4524c8455abc68 107
+internal/daemon/bootstrap_test.go
+  s_529a515e800196::t_aa0f2e86bb6a75 277
+  s_529a515e800196::t_565c4221d70dcf 7,713-764
+  s_529a515e800196::t_f99fd5044720f0 6,369-377
+  s_529a515e800196::t_8a318e3bd81ddf 238-242
+  s_529a515e800196::t_4843f7416c9602 245-276,278-343
+  s_529a515e800196::t_9a97e014b7088d 765-772
+  s_529a515e800196::t_f25051ceb6b7f4 344-368,378-395
+  s_529a515e800196::t_f7f36c929f7f68 243,773-774,776-833
+  s_529a515e800196::t_a236e550c93c11 244
+  s_529a515e800196::t_17126745b8dc70 775
+internal/daemon/manager.go
+  s_529a515e800196::t_2461cdb2cb3411 742,744,785-803
+  s_529a515e800196::t_cd0a7708ff041c 764-765
+  s_529a515e800196::t_12ff22f715c11c 199-209,214-216,223,225,237-256
+docs/src/content/docs/reference/global-config.md
+  s_529a515e800196::t_424d4fb6bf748b 238-240,248
+docs/src/content/docs/reference/repo-config.md
+  s_529a515e800196::t_d76f2fb443c504 13,165
+internal/db/bootstrap_test.go
+  s_529a515e800196::t_3c5ef5ffec5db9 4-5,67-147
+internal/db/db_test.go
+  s_529a515e800196::t_55bf06832991ae 41-43
+  s_529a515e800196::t_d6b43d9afcf35c 85-93
+internal/db/run.go
+  s_529a515e800196::t_70b34736c0aa9e 297-299,314-316,326-332
+internal/db/bootstrap.go
+  s_529a515e800196::t_87286f21731360 1-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "109a8a7900299744ae268c1fdea1e9dca121ac84",
+  "prompts": {},
+  "sessions": {
+    "s_529a515e800196": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019f872d-0c23-7c21-9187-d37f6f3ba779",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
