@@ -41,7 +41,7 @@ func (a *opencodeAgent) recoverTransientRetry(label string) {
 
 func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	// Start server on first invocation (synchronized)
-	baseURL, err := a.ensureServer(ctx, opts.CWD, opts.Env)
+	baseURL, err := a.ensureServer(ctx, opts.CWD, opts.Env, opts.UnsetEnv)
 	if err != nil {
 		return nil, err
 	}

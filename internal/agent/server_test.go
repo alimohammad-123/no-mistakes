@@ -21,7 +21,7 @@ func TestStartServerWithPort_DetectsEarlyExit(t *testing.T) {
 	}
 
 	start := time.Now()
-	srv, err := startServerWithPort(context.Background(), "test", bin, nil, t.TempDir(), nil, "/healthcheck", 1)
+	srv, err := startServerWithPort(context.Background(), "test", bin, nil, t.TempDir(), nil, nil, "/healthcheck", 1)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -136,7 +136,7 @@ func TestStartServerWithPort_RemovesPIDFileOnEarlyExit(t *testing.T) {
 	SetServerPIDsDir(pidsDir)
 	t.Cleanup(func() { SetServerPIDsDir("") })
 
-	srv, err := startServerWithPort(context.Background(), "test", bin, nil, t.TempDir(), nil, "/healthcheck", 1)
+	srv, err := startServerWithPort(context.Background(), "test", bin, nil, t.TempDir(), nil, nil, "/healthcheck", 1)
 	if err == nil {
 		srv.shutdown()
 		t.Fatal("expected error when server exits before becoming healthy")

@@ -40,7 +40,7 @@ func (a *copilotAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
-	cmd.Env = gitSafeEnv(opts.CWD, opts.Env)
+	cmd.Env = gitSafeEnv(opts.CWD, opts.Env, opts.UnsetEnv)
 	shellenv.ConfigureShellCommand(cmd)
 
 	var stderrBuf []byte

@@ -29,7 +29,7 @@ func TestCanonicalSourceRefFromBranch(t *testing.T) {
 		}
 	}
 
-	invalid := []string{"", "HEAD", "(detached)", "@", "refs/tags/v1", "refs/remotes/origin/feature", "refs/notes/x", "feature..bad", "feature@{bad", "/feature", "feature/", ".feature", "fm/.feature", "feature.lock", "-feature", "feature bad"}
+	invalid := []string{"", "HEAD", "(detached)", "@", "@{-1}", "refs/heads/@{-1}", "refs/tags/v1", "refs/remotes/origin/feature", "refs/notes/x", "feature..bad", "feature@{bad", "/feature", "feature/", ".feature", "fm/.feature", "feature.lock", "-feature", "feature bad"}
 	for _, branch := range invalid {
 		branch := branch
 		t.Run(strings.ReplaceAll(branch, "/", "_"), func(t *testing.T) {

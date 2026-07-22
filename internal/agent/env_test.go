@@ -96,3 +96,12 @@ func TestGitSafeEnv_RemovesInheritedRuntimeOverride(t *testing.T) {
 		t.Fatalf("source ref entries = %d", count)
 	}
 }
+
+func TestGitSafeEnv_UnsetsInheritedRuntimeValue(t *testing.T) {
+	const key = "NO_MISTAKES_SOURCE_REF"
+	t.Setenv(key, "refs/heads/spoof")
+	resolved := resolveAgentEnv(gitSafeEnv("/work/dir", []string{key + "=refs/heads/context-spoof"}, []string{key}))
+	if value, ok := resolved[key]; ok {
+		t.Fatalf("source ref remained present as %q", value)
+	}
+}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -103,6 +102,9 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	if sctx.Fixing {
 		for _, target := range targets {
 			if err := rebaseWithAgent(ctx, sctx, target); err != nil {
+				return nil, err
+			}
+			if _, err := updateHeadSHA(ctx, sctx); err != nil {
 				return nil, err
 			}
 		}
@@ -359,6 +361,9 @@ func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef 
 	if skip {
 		return nil
 	}
+	if _, err := sctx.BindSourceRef(); err != nil {
+		return fmt.Errorf("bind source ref before rebase: %w", err)
+	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
 	if _, err := git.Run(ctx, sctx.WorkDir, "rebase", targetRef); err == nil {
@@ -395,7 +400,7 @@ Instructions:
 	}
 	prompt += userIntentPromptSection(sctx)
 
-	_, err = sctx.Agent.Run(ctx, agent.RunOpts{
+	_, err = sctx.Agent.Run(pipeline.RebaseConflictAgentContext(ctx), agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		JSONSchema: commitSummarySchema,
@@ -407,7 +412,7 @@ Instructions:
 	}
 
 	// Verify rebase completed (no rebase still in progress)
-	if rebaseInProgress(ctx, sctx.WorkDir) {
+	if git.RebaseInProgress(ctx, sctx.WorkDir) {
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
 		return fmt.Errorf("agent did not complete the rebase")
 	}
@@ -445,24 +450,6 @@ func shouldSkipRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef
 		return true, nil
 	}
 	return false, nil
-}
-
-// rebaseInProgress returns true if a git rebase is currently in progress.
-// Uses git rev-parse --git-path which works for both regular repos and worktrees.
-func rebaseInProgress(ctx context.Context, workDir string) bool {
-	for _, dir := range []string{"rebase-merge", "rebase-apply"} {
-		p, err := git.Run(ctx, workDir, "rev-parse", "--git-path", dir)
-		if err != nil {
-			continue
-		}
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(workDir, p)
-		}
-		if _, err := os.Stat(p); err == nil {
-			return true
-		}
-	}
-	return false
 }
 
 func rebaseConflictFiles(ctx context.Context, workDir string) []string {

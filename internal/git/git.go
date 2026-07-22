@@ -371,12 +371,32 @@ func ValidatePortableBranchName(branch string) error {
 }
 
 func ValidateLocalBranchName(branch string) error {
-	cmd := exec.Command("git", "check-ref-format", "--branch", branch)
+	if branch == "" || strings.HasPrefix(branch, "-") || strings.HasPrefix(branch, "refs/") {
+		return fmt.Errorf("invalid short branch name %q", branch)
+	}
+	ref := "refs/heads/" + branch
+	cmd := exec.Command("git", "check-ref-format", ref)
 	winproc.Harden(cmd)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("invalid branch name %q: %w: %s", branch, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func RebaseInProgress(ctx context.Context, workDir string) bool {
+	for _, dir := range []string{"rebase-merge", "rebase-apply"} {
+		p, err := Run(ctx, workDir, "rev-parse", "--git-path", dir)
+		if err != nil {
+			continue
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(workDir, p)
+		}
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // FetchRemoteBranch fetches a single branch into a remote-tracking ref.

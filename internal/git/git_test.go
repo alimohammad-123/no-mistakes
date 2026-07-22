@@ -424,3 +424,18 @@ func TestWorktreeAddRemoveOnBareRepoUnderSafeBareRepositoryExplicit(t *testing.T
 		t.Fatalf("worktree remove from bare repo: %v", err)
 	}
 }
+
+func TestValidateLocalBranchNameRejectsCheckoutShorthand(t *testing.T) {
+	repo := initTestRepo(t)
+	original := run(t, repo, "git", "branch", "--show-current")
+	run(t, repo, "git", "checkout", "-b", "other")
+	run(t, repo, "git", "checkout", original)
+	cmd := exec.Command("git", "check-ref-format", "--branch", "@{-1}")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "other" {
+		t.Fatalf("checkout shorthand precondition = %q, %v", out, err)
+	}
+	if err := ValidateLocalBranchName("@{-1}"); err == nil {
+		t.Fatal("checkout shorthand was accepted as a canonical branch")
+	}
+}

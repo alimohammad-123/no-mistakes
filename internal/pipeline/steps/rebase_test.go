@@ -189,6 +189,9 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	if mergeBase != originMain {
 		t.Fatalf("merge-base = %s, want origin/main %s", mergeBase, originMain)
 	}
+	if got := gitCmd(t, dir, "rev-parse", *sctx.Run.SourceRef); got != sctx.Run.HeadSHA {
+		t.Fatalf("source ref = %s, want completed rebase candidate %s", got, sctx.Run.HeadSHA)
+	}
 }
 
 func TestRebaseStep_ForkSyncsPushBranchBeforeDefaultBranch(t *testing.T) {

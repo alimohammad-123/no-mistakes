@@ -93,7 +93,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
-	cmd.Env = gitSafeEnv(opts.CWD, opts.Env)
+	cmd.Env = gitSafeEnv(opts.CWD, opts.Env, opts.UnsetEnv)
 	shellenv.ConfigureShellCommand(cmd)
 
 	var stderrBuf []byte

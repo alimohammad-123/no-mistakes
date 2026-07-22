@@ -955,6 +955,17 @@ func (a *sourceRefAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Re
 	if err != nil {
 		return nil, err
 	}
+	if isRebaseConflictAgentContext(ctx) {
+		if !git.RebaseInProgress(ctx, a.workDir) {
+			return nil, fmt.Errorf("source ref suppression requires an active rebase")
+		}
+		if err := sourceprovenance.VerifyCandidateBinding(ctx, a.workDir, ref, a.run.HeadSHA); err != nil {
+			return nil, fmt.Errorf("verify source ref during rebase conflict: %w", err)
+		}
+		opts.Env = sourceprovenance.WithoutEnvironmentVariable(opts.Env)
+		opts.UnsetEnv = append(opts.UnsetEnv, sourceprovenance.EnvironmentVariable)
+		return a.inner.Run(ctx, opts)
+	}
 	if err := sourceprovenance.BindCandidate(ctx, a.workDir, ref, a.run.HeadSHA); err != nil {
 		return nil, fmt.Errorf("bind source ref before agent: %w", err)
 	}

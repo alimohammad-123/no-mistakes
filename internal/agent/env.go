@@ -33,16 +33,20 @@ const GateRoleEnvVar = "NO_MISTAKES_GATE"
 // directory; see git.NonInteractiveEnv for why this matters.
 func gitSafeEnv(dir string, extra ...[]string) []string {
 	runtimeEnv := []string(nil)
+	unsetEnv := []string(nil)
 	if len(extra) > 0 {
 		runtimeEnv = extra[0]
 	}
-	return mergeAgentEnv(git.NonInteractiveEnv(dir), append(runtimeEnv, GateRoleEnvVar+"=1"))
+	if len(extra) > 1 {
+		unsetEnv = extra[1]
+	}
+	return mergeAgentEnv(git.NonInteractiveEnv(dir), append(runtimeEnv, GateRoleEnvVar+"=1"), unsetEnv)
 }
 
 // mergeAgentEnv removes inherited entries overridden by runtime-owned values
 // and appends each runtime value once, in order. This keeps the final process
 // environment unambiguous instead of relying on duplicate-key resolution.
-func mergeAgentEnv(base, runtimeValues []string) []string {
+func mergeAgentEnv(base, runtimeValues, unsetNames []string) []string {
 	key := func(entry string) string {
 		name, _, _ := strings.Cut(entry, "=")
 		if runtime.GOOS == "windows" {
@@ -51,8 +55,14 @@ func mergeAgentEnv(base, runtimeValues []string) []string {
 		return name
 	}
 	overridden := make(map[string]struct{}, len(runtimeValues))
+	unset := make(map[string]struct{}, len(unsetNames))
 	for _, entry := range runtimeValues {
 		overridden[key(entry)] = struct{}{}
+	}
+	for _, name := range unsetNames {
+		name = key(name)
+		overridden[name] = struct{}{}
+		unset[name] = struct{}{}
 	}
 	out := make([]string, 0, len(base)+len(runtimeValues))
 	for _, entry := range base {
@@ -63,6 +73,9 @@ func mergeAgentEnv(base, runtimeValues []string) []string {
 	seen := make(map[string]struct{}, len(runtimeValues))
 	for i := len(runtimeValues) - 1; i >= 0; i-- {
 		name := key(runtimeValues[i])
+		if _, ok := unset[name]; ok {
+			continue
+		}
 		if _, ok := seen[name]; ok {
 			continue
 		}
@@ -73,4 +86,16 @@ func mergeAgentEnv(base, runtimeValues []string) []string {
 		out[left], out[right] = out[right], out[left]
 	}
 	return out
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -49,6 +49,17 @@ type StepContext struct {
 	Shared *RunShared
 }
 
+type rebaseConflictAgentContextKey struct{}
+
+func RebaseConflictAgentContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, rebaseConflictAgentContextKey{}, true)
+}
+
+func isRebaseConflictAgentContext(ctx context.Context) bool {
+	marked, _ := ctx.Value(rebaseConflictAgentContextKey{}).(bool)
+	return marked
+}
+
 // BaseBranch returns the immutable pipeline integration and trusted-config
 // branch for this run. Historical runs without a snapshot retain their old
 // behavior by falling back only to the repository's recorded remote default.

@@ -46,7 +46,7 @@ func (a *rovodevAgent) recoverTransientRetry(label string) {
 
 func (a *rovodevAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	// Start server on first invocation (synchronized)
-	baseURL, err := a.ensureServer(ctx, opts.CWD, opts.Env)
+	baseURL, err := a.ensureServer(ctx, opts.CWD, opts.Env, opts.UnsetEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -83,18 +83,22 @@ func (a *rovodevAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 	return finalizeTextResult("rovodev", text, opts.JSONSchema, usage)
 }
 
-func (a *rovodevAgent) ensureServer(ctx context.Context, cwd string, env []string) (string, error) {
+func (a *rovodevAgent) ensureServer(ctx context.Context, cwd string, env, unsetEnv []string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.server != nil {
+	if a.server != nil && sameStrings(a.server.runtimeEnv, env) && sameStrings(a.server.unsetEnv, unsetEnv) {
 		return a.server.baseURL(), nil
+	}
+	if a.server != nil {
+		a.server.shutdown()
+		a.server = nil
 	}
 	port, err := getAvailablePort()
 	if err != nil {
 		return "", fmt.Errorf("rovodev port: %w", err)
 	}
 	args := buildRovodevServeArgs(a.extraArgs, port)
-	srv, err := startServerWithPort(ctx, "rovodev", a.bin, args, cwd, env, "/healthcheck", port)
+	srv, err := startServerWithPort(ctx, "rovodev", a.bin, args, cwd, env, unsetEnv, "/healthcheck", port)
 	if err != nil {
 		return "", fmt.Errorf("rovodev server: %w", err)
 	}
