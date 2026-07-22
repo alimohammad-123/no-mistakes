@@ -90,6 +90,23 @@ Disable background update checks.
 
 Update checks run on every CLI invocation except `update` itself and version queries (`--version` / `-v`, which stay side-effect-free), hit GitHub releases, cache the result in `$NM_HOME/update-check.json`, and print a one-line notification to stderr when a newer version is available. Dev builds (non-semver versions) suppress the check automatically.
 
+## `NO_MISTAKES_SOURCE_REF`
+
+Canonical full source branch ref supplied by the runtime when a pipeline process operates on a stable candidate.
+
+|         |                                                   |
+| ------- | ------------------------------------------------- |
+| Type    | `refs/heads/<branch>`                              |
+| Default | unset outside a no-mistakes pipeline process      |
+
+The runtime derives this value only from the branch identity accepted at run intake, freezes it in the run record, and reuses the same value across approval gates and daemon recovery. For an active run created by an older binary, recovery may fill the missing value once from that run's already-frozen valid branch record. Missing, detached, malformed, tag, remote-tracking, notes, and other non-branch identities are rejected instead of guessed.
+
+Before a configured command or stable-candidate agent runs, the runtime requires the isolated pipeline repository's `HEAD` to match the exact recorded candidate commit, including pipeline fix commits. A mismatch is refused before the child process starts. The runtime then binds this local ref to that commit. This does not move the developer's worktree branch or contact a remote; the normal Push step remains the first remote update. The runtime removes any inherited `NO_MISTAKES_SOURCE_REF` and appends its frozen value last at child-process launch. Manually exporting this variable for a direct local invocation is not delivery provenance and cannot override the pipeline-owned value.
+
+The only exception is the narrowly scoped agent process that resolves conflicts while Git proves an agent-assisted rebase is in progress. That process receives `NO_MISTAKES_SOURCE_REF` unset, cannot run or satisfy configured delivery evidence, and operates while `HEAD` may be a partial candidate. During this interval, the frozen ref remains bound to the last recorded pre-rebase candidate. After the rebase completes, no-mistakes persists the final candidate SHA, atomically rebinds the canonical ref, verifies the binding, and only then restores the variable for Review, Test, configured commands, and later stable-candidate agents.
+
+Consumers that require delivery provenance must refuse an absent `NO_MISTAKES_SOURCE_REF`. Presence is meaningful only because no-mistakes validates the stable candidate and owns the binding and child environment; an inherited or user-supplied value is outside this trust boundary.
+
 ## `XDG_DATA_HOME`
 
 Data directory used to discover OpenCode transcripts for intent extraction.

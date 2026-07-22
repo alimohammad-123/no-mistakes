@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/repoidentity"
+	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -20,6 +21,9 @@ type Run struct {
 	// BaseBranch freezes the effective pipeline integration and trusted-config
 	// branch for this run. Empty is reserved for migrated historical rows.
 	BaseBranch string
+	// SourceRef is the canonical full refs/heads identity frozen from Branch at
+	// authoritative run intake. Nil is reserved for pre-upgrade rows.
+	SourceRef *string
 	// Bootstrap Test authorization fields are either all nil or all present.
 	// They freeze the exact user-owned first-policy authorization before any
 	// pipeline step executes so recovery never replaces it with mutable global
@@ -67,13 +71,13 @@ type Run struct {
 	UpdatedAt       int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(base_branch, ''), bootstrap_test_repository, bootstrap_test_base_branch, bootstrap_test_command, bootstrap_test_policy_sha256, submitted_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(base_branch, ''), source_ref, bootstrap_test_repository, bootstrap_test_base_branch, bootstrap_test_command, bootstrap_test_policy_sha256, submitted_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
 }, r *Run) error {
 	return row.Scan(
-		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.BaseBranch,
+		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.BaseBranch, &r.SourceRef,
 		&r.BootstrapTestRepository, &r.BootstrapTestBaseBranch, &r.BootstrapTestCommand, &r.BootstrapTestPolicySHA256,
 		&r.SubmittedHeadSHA, &r.Status,
 		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt,
@@ -135,6 +139,60 @@ func (r *Run) FrozenBootstrapTestAuthorization() (*BootstrapTestAuthorization, e
 	return auth, nil
 }
 
+// FrozenSourceRef returns the run's canonical full source ref and rejects
+// missing, malformed, non-head, or branch-mismatched provenance.
+func (r *Run) FrozenSourceRef() (string, error) {
+	if r == nil || r.SourceRef == nil {
+		return "", fmt.Errorf("run source ref is not frozen")
+	}
+	if err := sourceprovenance.ValidateFrozenSourceRef(*r.SourceRef, r.Branch); err != nil {
+		return "", fmt.Errorf("run has invalid source ref: %w", err)
+	}
+	return *r.SourceRef, nil
+}
+
+// EnsureActiveRunSourceRef performs the one-way compatibility migration for a
+// pre-upgrade active run. It derives only from the already-frozen Branch field
+// and uses a compare-and-set write so an existing value is never replaced.
+func (d *DB) EnsureActiveRunSourceRef(r *Run) (string, error) {
+	if r == nil {
+		return "", fmt.Errorf("ensure run source ref: run is nil")
+	}
+	if r.SourceRef != nil {
+		return r.FrozenSourceRef()
+	}
+	if r.Status != types.RunPending && r.Status != types.RunRunning {
+		return "", fmt.Errorf("ensure run source ref: legacy run is not active")
+	}
+	ref, err := sourceprovenance.CanonicalSourceRefFromBranch(r.Branch)
+	if err != nil {
+		return "", fmt.Errorf("ensure run source ref: invalid frozen branch: %w", err)
+	}
+	result, err := d.sql.Exec(
+		`UPDATE runs SET source_ref = ?, updated_at = ? WHERE id = ? AND branch = ? AND source_ref IS NULL AND status IN (?, ?)`,
+		ref, now(), r.ID, r.Branch, types.RunPending, types.RunRunning,
+	)
+	if err != nil {
+		return "", fmt.Errorf("ensure run source ref: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("ensure run source ref: %w", err)
+	}
+	if count != 1 {
+		current, getErr := d.GetRun(r.ID)
+		if getErr == nil && current != nil && (current.Status == types.RunPending || current.Status == types.RunRunning) {
+			if currentRef, frozenErr := current.FrozenSourceRef(); frozenErr == nil {
+				r.SourceRef = current.SourceRef
+				return currentRef, nil
+			}
+		}
+		return "", fmt.Errorf("ensure run source ref: run changed or is no longer active")
+	}
+	r.SourceRef = &ref
+	return ref, nil
+}
+
 // EffectiveBaseBranch returns this run's frozen pipeline base. Historical rows
 // without a snapshot fall back only to the repository's recorded remote
 // default, never to a newer repo base override.
@@ -167,6 +225,10 @@ func (d *DB) InsertRunWithBaseBranch(repoID, branch, headSHA, baseSHA, baseBranc
 }
 
 func (d *DB) insertRun(repoID, branch, headSHA, baseSHA, baseBranch string) (*Run, error) {
+	sourceRef, err := sourceprovenance.CanonicalSourceRefFromBranch(branch)
+	if err != nil {
+		return nil, fmt.Errorf("insert run: invalid source branch: %w", err)
+	}
 	ts := now()
 	r := &Run{
 		ID:               newID(),
@@ -175,14 +237,15 @@ func (d *DB) insertRun(repoID, branch, headSHA, baseSHA, baseBranch string) (*Ru
 		HeadSHA:          headSHA,
 		BaseSHA:          baseSHA,
 		BaseBranch:       baseBranch,
+		SourceRef:        &sourceRef,
 		SubmittedHeadSHA: &headSHA,
 		Status:           types.RunPending,
 		CreatedAt:        ts,
 		UpdatedAt:        ts,
 	}
-	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, base_branch, submitted_head_sha, status, pr_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, nullableString(r.BaseBranch), headSHA, r.Status, r.CreatedAt, r.UpdatedAt,
+	_, err = d.sql.Exec(
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, base_branch, source_ref, submitted_head_sha, status, pr_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, nullableString(r.BaseBranch), sourceRef, headSHA, r.Status, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

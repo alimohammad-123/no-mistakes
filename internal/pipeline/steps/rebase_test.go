@@ -84,6 +84,9 @@ func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
 	if !strings.Contains(headLog, "main non-conflicting update") {
 		t.Errorf("expected HEAD to include the origin/main rebase; git log:\n%s", headLog)
 	}
+	if got := gitCmd(t, dir, "rev-parse", *sctx.Run.SourceRef); got != sctx.Run.HeadSHA {
+		t.Fatalf("source ref = %s, want rebased candidate %s", got, sctx.Run.HeadSHA)
+	}
 
 	// Verify worktree is clean
 	status := gitStatusPorcelain(t, dir)
@@ -185,6 +188,9 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	originMain := gitCmd(t, dir, "rev-parse", "origin/main")
 	if mergeBase != originMain {
 		t.Fatalf("merge-base = %s, want origin/main %s", mergeBase, originMain)
+	}
+	if got := gitCmd(t, dir, "rev-parse", *sctx.Run.SourceRef); got != sctx.Run.HeadSHA {
+		t.Fatalf("source ref = %s, want completed rebase candidate %s", got, sctx.Run.HeadSHA)
 	}
 }
 

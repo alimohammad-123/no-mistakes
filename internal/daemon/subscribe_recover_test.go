@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -351,6 +352,7 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	mockClaude := writeMockClaude(t, t.TempDir())
+	marker := filepath.Join(tmpDir, "resumed-test-marker")
 	if err := os.WriteFile(p.ConfigFile(), []byte("agent: claude\nagent_path_override:\n  claude: "+mockClaude+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -360,25 +362,69 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	}
 	defer d.Close()
 	repo, headSHA := setupTestGitRepo(t, p, d, "resume-parked-run")
-	run, err := d.InsertRun(repo.ID, "main", headSHA, headSHA)
+	trustedConfig := "auto_fix:\n  lint: 0\n  test: 0\n  review: 0\ncommands:\n  test: >-\n    test \"$NO_MISTAKES_SOURCE_REF\" = \"refs/heads/fm/resume/source-ref\" && test \"$(git rev-parse \"$NO_MISTAKES_SOURCE_REF\")\" = \"$(git rev-parse HEAD)\" && printf passed > " + marker + "\n"
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, ".no-mistakes.yaml"), []byte(trustedConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", ".no-mistakes.yaml")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "configure provenance test")
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main")
+	run, err := d.InsertRun(repo.ID, "fm/resume/source-ref", headSHA, headSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
+	legacy, err := sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`UPDATE runs SET source_ref = NULL WHERE id = ?`, run.ID); err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	run.SourceRef = nil
 	worktree := p.WorktreeDir(repo.ID, run.ID)
 	if err := gitpkg.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, headSHA); err != nil {
 		t.Fatal(err)
 	}
-	step, err := d.InsertStepResult(run.ID, types.StepReview)
+	if _, err := gitpkg.Run(context.Background(), worktree, "config", "user.name", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitpkg.Run(context.Background(), worktree, "config", "user.email", "test@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{"review fix\n", "test fix\n"} {
+		if err := os.WriteFile(filepath.Join(worktree, "pipeline-fix.txt"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := gitpkg.Run(context.Background(), worktree, "add", "pipeline-fix.txt"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := gitpkg.Run(context.Background(), worktree, "commit", "-m", "pipeline fix"); err != nil {
+			t.Fatal(err)
+		}
+		candidate, err := gitpkg.HeadSHA(context.Background(), worktree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		run.HeadSHA = candidate
+		if err := d.UpdateRunHeadSHA(run.ID, candidate); err != nil {
+			t.Fatal(err)
+		}
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepTest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := d.StartStep(step.ID); err != nil {
 		t.Fatal(err)
 	}
-	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs approval","action":"ask-user"}],"summary":"needs approval"}`
+	findings := `{"findings":[{"id":"test-1","severity":"error","description":"source ref provenance preflight failed","action":"auto-fix"}],"summary":"source ref was missing"}`
 	if err := d.SetStepFindings(step.ID, findings); err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +441,7 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- RunWithOptions(p, d, func() []pipeline.Step {
-			return []pipeline.Step{&mockApprovalStep{name: types.StepReview}}
+			return []pipeline.Step{&steps.TestStep{}}
 		})
 	}()
 	defer func() {
@@ -422,9 +468,10 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 		if err == nil {
 			var response ipc.RespondResult
 			err = client.Call(ipc.MethodRespond, &ipc.RespondParams{
-				RunID:  run.ID,
-				Step:   types.StepReview,
-				Action: types.ActionApprove,
+				RunID:      run.ID,
+				Step:       types.StepTest,
+				Action:     types.ActionFix,
+				FindingIDs: []string{"test-1"},
 			}, &response)
 			_ = client.Close()
 			if err == nil {
@@ -444,6 +491,23 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	if completed.AwaitingAgentSince != nil {
 		t.Fatal("recovered run remained parked after approval")
 	}
+	if completed.SourceRef == nil || *completed.SourceRef != "refs/heads/fm/resume/source-ref" {
+		t.Fatalf("legacy active run source ref = %v", completed.SourceRef)
+	}
+	markerData, err := os.ReadFile(marker)
+	if err != nil || string(markerData) != "passed" {
+		t.Fatalf("resumed Test command marker = %q, err=%v", markerData, err)
+	}
+	logData, err := os.ReadFile(filepath.Join(p.RunLogDir(run.ID), "test.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBinding := "configured command source ref: refs/heads/fm/resume/source-ref -> " + run.HeadSHA
+	if !strings.Contains(string(logData), wantBinding) {
+		t.Fatalf("resumed Test log does not record binding %q: %s", wantBinding, logData)
+	}
+	t.Logf("recovered legacy run completed: status=%s source_ref=%s marker=%s", completed.Status, *completed.SourceRef, markerData)
+	t.Logf("configured Test command provenance: %s", wantBinding)
 	// The executor marks the run terminal before its owner goroutine performs
 	// worktree cleanup. Wait for that cleanup rather than assuming it completed
 	// in the same scheduling slice, which is especially unreliable on Windows.

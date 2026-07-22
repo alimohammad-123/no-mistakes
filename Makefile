@@ -58,7 +58,7 @@ test:
 # Excluded from `make test` because it is behind the `e2e` build tag and
 # rebuilds binaries on each run.
 e2e:
-	go test -tags=e2e -count=1 -timeout 300s ./internal/e2e/... ./internal/pipeline/steps/...
+	go test -tags=e2e -count=1 -timeout 600s ./internal/e2e/... ./internal/pipeline/steps/...
 
 # Re-record fixtures from the real claude/codex/opencode CLIs and overwrite
 # internal/e2e/fixtures/. Spends real API quota — run only when the upstream

@@ -154,6 +154,9 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
 		return err
 	}
+	if _, err := sctx.BindSourceRef(); err != nil {
+		return fmt.Errorf("bind source ref after %s fix: %w", stepName, err)
+	}
 	sctx.Log(fmt.Sprintf("committed agent fixes: %s", commitMessage))
 	return nil
 }

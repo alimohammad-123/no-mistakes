@@ -19,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -143,6 +144,9 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 // If the context is cancelled with a cause (via context.WithCancelCause),
 // the cause message is preserved as the run's error in the DB.
 func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
+	if _, err := run.FrozenSourceRef(); err != nil {
+		return e.failRun(run, repo, err)
+	}
 	// Mark run as running. Route write failures through failRun so the
 	// in-memory lifecycle and subscriber stream still become terminal instead
 	// of leaving a silent pending run.
@@ -252,6 +256,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return fmt.Errorf("recovered run has no repository")
 	}
 	if err := ValidateRecoveredRun(e.db, run, e.steps); err != nil {
+		return err
+	}
+	if _, err := run.FrozenSourceRef(); err != nil {
 		return err
 	}
 	gate, err := e.recoveredGate(run.ID)
@@ -649,6 +656,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			stepName: stepName,
 			round:    func() int { return roundNum + 1 },
 		}
+		stepAgent = &sourceRefAgent{inner: stepAgent, run: run, workDir: workDir}
 	}
 	sctx := &StepContext{
 		Ctx:              ctx,
@@ -932,6 +940,49 @@ func roundInsertID(_ string, inserted *db.StepRound, err error) string {
 		return ""
 	}
 	return inserted.ID
+}
+
+type sourceRefAgent struct {
+	inner   agent.Agent
+	run     *db.Run
+	workDir string
+}
+
+func (a *sourceRefAgent) Name() string { return a.inner.Name() }
+func (a *sourceRefAgent) Close() error { return a.inner.Close() }
+func (a *sourceRefAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	ref, err := a.run.FrozenSourceRef()
+	if err != nil {
+		return nil, err
+	}
+	if isRebaseConflictAgentContext(ctx) {
+		if !git.RebaseInProgress(ctx, a.workDir) {
+			return nil, fmt.Errorf("source ref suppression requires an active rebase")
+		}
+		if err := sourceprovenance.VerifyCandidateBinding(ctx, a.workDir, ref, a.run.HeadSHA); err != nil {
+			return nil, fmt.Errorf("verify source ref during rebase conflict: %w", err)
+		}
+		opts.Env = sourceprovenance.WithoutEnvironmentVariable(opts.Env)
+		opts.UnsetEnv = append(opts.UnsetEnv, sourceprovenance.EnvironmentVariable)
+		return a.inner.Run(ctx, opts)
+	}
+	if err := sourceprovenance.BindCandidate(ctx, a.workDir, ref, a.run.HeadSHA); err != nil {
+		return nil, fmt.Errorf("bind source ref before agent: %w", err)
+	}
+	opts.Env = sourceprovenance.AuthoritativeEnv(opts.Env, ref)
+	return a.inner.Run(ctx, opts)
+}
+func (a *sourceRefAgent) SupportsSessionResume() bool {
+	return agent.SupportsSessionResume(a.inner)
+}
+func (a *sourceRefAgent) SupportsSessionProvider(provider string) bool {
+	return agent.SupportsSessionProvider(a.inner, provider)
+}
+func (a *sourceRefAgent) ReportsAgentAttempts() bool {
+	return agent.ReportsAgentAttempts(a.inner)
+}
+func (a *sourceRefAgent) NeutralizesGateInstructions() bool {
+	return agent.NeutralizesGateInstructions(a.inner)
 }
 
 type lifecycleAgent struct {

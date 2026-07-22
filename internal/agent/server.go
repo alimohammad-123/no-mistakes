@@ -54,6 +54,8 @@ type managedServer struct {
 	exited        chan struct{} // closed exactly once when cmd.Wait returns
 	waitErr       error         // result of cmd.Wait; only read after exited is closed
 	healthTimeout time.Duration // health-check deadline; defaults to defaultHealthTimeout when zero
+	runtimeEnv    []string
+	unsetEnv      []string
 }
 
 // getAvailablePort finds an ephemeral port by binding to :0 and releasing.
@@ -71,11 +73,11 @@ func getAvailablePort() (int, error) {
 // The process is not tied to ctx - it outlives individual Run calls and is stopped via shutdown().
 // ctx is only used for the health check timeout.
 // agentName tags the PID tracking file so crash-recovery can identify orphans.
-func startServerWithPort(ctx context.Context, agentName, bin string, args []string, cwd string, healthPath string, port int) (*managedServer, error) {
+func startServerWithPort(ctx context.Context, agentName, bin string, args []string, cwd string, env, unsetEnv []string, healthPath string, port int) (*managedServer, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
 	cmd.Stdin = nil
-	cmd.Env = gitSafeEnv(cwd)
+	cmd.Env = gitSafeEnv(cwd, env, unsetEnv)
 	out := currentManagedServerOutput()
 	cmd.Stdout = out // server stdout goes to the configured sink for debugging
 	cmd.Stderr = out
@@ -96,7 +98,15 @@ func startServerWithPort(ctx context.Context, agentName, bin string, args []stri
 		StartedAt:      time.Now().UTC(),
 	})
 
-	srv := &managedServer{cmd: cmd, port: port, pidFile: pidFile, exited: make(chan struct{}), healthTimeout: defaultHealthTimeout}
+	srv := &managedServer{
+		cmd:           cmd,
+		port:          port,
+		pidFile:       pidFile,
+		exited:        make(chan struct{}),
+		healthTimeout: defaultHealthTimeout,
+		runtimeEnv:    append([]string(nil), env...),
+		unsetEnv:      append([]string(nil), unsetEnv...),
+	}
 	go func() {
 		srv.waitErr = cmd.Wait()
 		close(srv.exited)

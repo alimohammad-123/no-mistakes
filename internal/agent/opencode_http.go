@@ -10,18 +10,22 @@ import (
 	"time"
 )
 
-func (a *opencodeAgent) ensureServer(ctx context.Context, cwd string) (string, error) {
+func (a *opencodeAgent) ensureServer(ctx context.Context, cwd string, env, unsetEnv []string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.server != nil {
+	if a.server != nil && sameStrings(a.server.runtimeEnv, env) && sameStrings(a.server.unsetEnv, unsetEnv) {
 		return a.server.baseURL(), nil
+	}
+	if a.server != nil {
+		a.server.shutdown()
+		a.server = nil
 	}
 	port, err := getAvailablePort()
 	if err != nil {
 		return "", fmt.Errorf("opencode port: %w", err)
 	}
 	args := buildOpencodeServeArgs(a.extraArgs, port)
-	srv, err := startServerWithPort(ctx, "opencode", a.bin, args, cwd, "/global/health", port)
+	srv, err := startServerWithPort(ctx, "opencode", a.bin, args, cwd, env, unsetEnv, "/global/health", port)
 	if err != nil {
 		return "", fmt.Errorf("opencode server: %w", err)
 	}

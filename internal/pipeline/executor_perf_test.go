@@ -58,7 +58,7 @@ func (a *fallbackUsageAgent) Close() error { return nil }
 // the raw session id never lands in the telemetry row.
 func TestExecutor_RecordsAgentInvocationsLocally(t *testing.T) {
 	database, p, run, repo := setupTest(t)
-	workDir := t.TempDir()
+	workDir := initExecutorGitRepo(t, database, run)
 
 	step := &adaptiveCallStep{
 		name: types.StepReview,

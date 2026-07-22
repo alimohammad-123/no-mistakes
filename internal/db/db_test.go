@@ -46,7 +46,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Fatalf("repos.%s column missing from fresh schema", column)
 		}
 	}
-	for _, column := range []string{"base_branch", "bootstrap_test_repository", "bootstrap_test_base_branch", "bootstrap_test_command", "bootstrap_test_policy_sha256", "submitted_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "pr_state", "pr_state_observed_at", "ci_ready_at", "custody_returned_at"} {
+	for _, column := range []string{"base_branch", "source_ref", "bootstrap_test_repository", "bootstrap_test_base_branch", "bootstrap_test_command", "bootstrap_test_policy_sha256", "submitted_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "pr_state", "pr_state_observed_at", "ci_ready_at", "custody_returned_at"} {
 		if !hasColumn(t, d, "runs", column) {
 			t.Fatalf("runs.%s column missing from fresh schema", column)
 		}
@@ -106,6 +106,9 @@ func TestOpenMigratesRunSyncProvenanceWithoutBackfillingMutableHead(t *testing.T
 	}
 	if run.BaseBranch != "" {
 		t.Fatalf("legacy run gained a base snapshot: %#v", run)
+	}
+	if run.SourceRef != nil {
+		t.Fatalf("legacy migration guessed source ref: %#v", run)
 	}
 	if auth, err := run.FrozenBootstrapTestAuthorization(); err != nil || auth != nil {
 		t.Fatalf("legacy run gained bootstrap authorization: auth=%+v err=%v", auth, err)

@@ -78,3 +78,30 @@ func TestGitSafeEnv_GateMarkerWinsOverAmbient(t *testing.T) {
 		t.Errorf("%s = %q, want \"1\" (managed stamp must win over ambient)", GateRoleEnvVar, resolved[GateRoleEnvVar])
 	}
 }
+
+func TestGitSafeEnv_RemovesInheritedRuntimeOverride(t *testing.T) {
+	const key = "NO_MISTAKES_SOURCE_REF"
+	t.Setenv(key, "refs/heads/spoof")
+	env := gitSafeEnv("/work/dir", []string{key + "=refs/heads/fm/feature"})
+	count := 0
+	for _, entry := range env {
+		if strings.HasPrefix(entry, key+"=") {
+			count++
+			if entry != key+"=refs/heads/fm/feature" {
+				t.Fatalf("source ref entry = %q", entry)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("source ref entries = %d", count)
+	}
+}
+
+func TestGitSafeEnv_UnsetsInheritedRuntimeValue(t *testing.T) {
+	const key = "NO_MISTAKES_SOURCE_REF"
+	t.Setenv(key, "refs/heads/spoof")
+	resolved := resolveAgentEnv(gitSafeEnv("/work/dir", []string{key + "=refs/heads/context-spoof"}, []string{key}))
+	if value, ok := resolved[key]; ok {
+		t.Fatalf("source ref remained present as %q", value)
+	}
+}

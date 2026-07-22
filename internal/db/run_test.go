@@ -1,6 +1,7 @@
 package db
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -30,6 +31,82 @@ func TestRunInsertAndGet(t *testing.T) {
 	}
 	if got.HeadSHA != "abc123" {
 		t.Errorf("head sha = %q, want %q", got.HeadSHA, "abc123")
+	}
+}
+
+func TestRunFreezesCanonicalSourceRef(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/source-ref", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "fm/feature/slash", "abc123", "def456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.SourceRef == nil || *run.SourceRef != "refs/heads/fm/feature/slash" {
+		t.Fatalf("source ref = %v", run.SourceRef)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref, err := got.FrozenSourceRef(); err != nil || ref != "refs/heads/fm/feature/slash" {
+		t.Fatalf("frozen source ref = %q, err=%v", ref, err)
+	}
+}
+
+func TestEnsureActiveRunSourceRefMigratesLegacyOnceAndSurvivesReopen(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.sqlite")
+	d, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	repo, _ := d.InsertRepo("/home/user/legacy-source-ref", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "fm/legacy", "abc123", "def456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`UPDATE runs SET source_ref = NULL WHERE id = ?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run.SourceRef = nil
+	if ref, err := d.EnsureActiveRunSourceRef(run); err != nil || ref != "refs/heads/fm/legacy" {
+		t.Fatalf("migrate source ref = %q, err=%v", ref, err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d, err = Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref, err := got.FrozenSourceRef(); err != nil || ref != "refs/heads/fm/legacy" {
+		t.Fatalf("reopened source ref = %q, err=%v", ref, err)
+	}
+	bad := "refs/tags/v1"
+	got.SourceRef = &bad
+	if _, err := d.EnsureActiveRunSourceRef(got); err == nil {
+		t.Fatal("expected existing malformed source ref rejection")
+	}
+}
+
+func TestEnsureActiveRunSourceRefRejectsInvalidLegacyIdentity(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/invalid-legacy-source-ref", "git@github.com:user/project.git", "main")
+	now := now()
+	_, err := d.sql.Exec(`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, created_at, updated_at) VALUES ('legacy-bad', ?, 'refs/remotes/origin/feature', 'head', 'base', 'running', ?, ?)`, repo.ID, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.GetRun("legacy-bad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.EnsureActiveRunSourceRef(run); err == nil {
+		t.Fatal("expected invalid legacy branch rejection")
 	}
 }
 
