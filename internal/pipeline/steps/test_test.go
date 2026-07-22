@@ -8,11 +8,155 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestTestStep_ConfiguredCommandSeesAuthoritativeSourceRef(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell assertion")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	observed := filepath.Join(dir, "source-ref.txt")
+	command := `test "$NO_MISTAKES_SOURCE_REF" = "refs/heads/feature" && test "$(git rev-parse "$NO_MISTAKES_SOURCE_REF")" = "$(git rev-parse HEAD)" && printf '%s' "$NO_MISTAKES_SOURCE_REF" > source-ref.txt`
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: command})
+	t.Setenv("NO_MISTAKES_SOURCE_REF", "refs/heads/ambient-spoof")
+	sctx.Env = []string{"NO_MISTAKES_SOURCE_REF=refs/heads/context-spoof"}
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("configured command failed: %s", outcome.Findings)
+	}
+	data, err := os.ReadFile(observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "refs/heads/feature" {
+		t.Fatalf("child saw %q", data)
+	}
+}
+
+func TestTestStep_RefusesCandidateMismatchBeforeConfiguredCommand(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	marker := filepath.Join(dir, "must-not-run")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "echo ran > must-not-run"})
+	sctx.Run.HeadSHA = baseSHA
+	_, err := (&TestStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "pipeline candidate mismatch") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("configured command executed despite mismatch: %v", statErr)
+	}
+}
+
+func TestTestStep_ResumeRunsExactCommandWithCurrentPipelineCandidate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell assertion")
+	}
+	dir, baseSHA, submittedSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", submittedSHA)
+	for i := 1; i <= 2; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "pipeline-fix.txt"), []byte(strings.Repeat("fix\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, dir, "add", "pipeline-fix.txt")
+		gitCmd(t, dir, "commit", "-m", "pipeline fix")
+	}
+	candidate := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	repo, err := database.InsertRepo(dir, "https://example.invalid/owner/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRunWithBaseBranch(repo.ID, "fm/arena/source-ref", submittedSHA, baseSHA, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunHeadSHA(run.ID, candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	result, err := database.InsertStepResult(run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(result.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"test-1","severity":"error","description":"source ref was missing","action":"auto-fix"}],"summary":"provenance preflight failed"}`
+	if err := database.SetStepFindings(result.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertStepRound(result.ID, 1, "initial", &findings, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatusWithDuration(result.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(t.TempDir(), "resumed")
+	command := `test "$NO_MISTAKES_SOURCE_REF" = "refs/heads/fm/arena/source-ref" && test "$(git rev-parse "$NO_MISTAKES_SOURCE_REF")" = "$(git rev-parse HEAD)" && printf passed > ` + marker
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: json.RawMessage(`{"summary":"retry provenance preflight"}`)}, nil
+	}}
+	executor := pipeline.NewExecutor(database, p, &config.Config{Commands: config.Commands{Test: command}}, ag, []pipeline.Step{&TestStep{}}, nil)
+	done := make(chan error, 1)
+	go func() { done <- executor.Resume(context.Background(), run, repo, dir) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err = executor.Respond(types.StepTest, types.ActionFix, []string{"test-1"})
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("recovered Test gate never accepted response: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("resume exact Test: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("resumed Test timed out")
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "passed" {
+		t.Fatalf("resumed command marker = %q, err=%v", data, err)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "refs/heads/fm/arena/source-ref"); got != candidate {
+		t.Fatalf("resumed source ref = %s, want candidate %s", got, candidate)
+	}
+}
 
 func TestTestStep_FixMode(t *testing.T) {
 	t.Parallel()

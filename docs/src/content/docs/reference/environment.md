@@ -90,6 +90,19 @@ Disable background update checks.
 
 Update checks run on every CLI invocation except `update` itself and version queries (`--version` / `-v`, which stay side-effect-free), hit GitHub releases, cache the result in `$NM_HOME/update-check.json`, and print a one-line notification to stderr when a newer version is available. Dev builds (non-semver versions) suppress the check automatically.
 
+## `NO_MISTAKES_SOURCE_REF`
+
+Canonical full source branch ref supplied by the runtime to pipeline-owned commands and agent processes.
+
+|         |                                                   |
+| ------- | ------------------------------------------------- |
+| Type    | `refs/heads/<branch>`                              |
+| Default | unset outside a no-mistakes pipeline process      |
+
+The runtime derives this value only from the branch identity accepted at run intake, freezes it in the run record, and reuses the same value across approval gates and daemon recovery. For an active run created by an older binary, recovery may fill the missing value once from that run's already-frozen valid branch record. Missing, detached, malformed, tag, remote-tracking, notes, and other non-branch identities are rejected instead of guessed.
+
+Before a configured Test command runs, the isolated pipeline repository binds this local ref to the exact recorded candidate commit, including pipeline fix commits. This does not move the developer's worktree branch or contact a remote; the normal Push step remains the first remote update. The runtime removes any inherited `NO_MISTAKES_SOURCE_REF` and appends its frozen value last at child-process launch. Manually exporting this variable for a direct local invocation is not delivery provenance and cannot override the pipeline-owned value.
+
 ## `XDG_DATA_HOME`
 
 Data directory used to discover OpenCode transcripts for intent extraction.

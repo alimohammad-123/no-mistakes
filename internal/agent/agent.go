@@ -22,8 +22,11 @@ type Agent interface {
 
 // RunOpts configures a single agent invocation.
 type RunOpts struct {
-	Prompt      string
-	CWD         string
+	Prompt string
+	CWD    string
+	// Env carries runtime-owned environment entries for the concrete agent
+	// subprocess. Adapters merge it after ambient environment values.
+	Env         []string
 	JSONSchema  json.RawMessage      // structured output schema (optional)
 	OnChunk     func(text string)    // streaming text callback (optional)
 	OnLifecycle func(LifecycleEvent) // native agent lifecycle callback (optional)

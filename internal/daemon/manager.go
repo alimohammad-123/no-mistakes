@@ -114,6 +114,9 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil || run.Branch == "" {
 		return nil, fmt.Errorf("run is not a parked running run")
 	}
+	if _, err := m.db.EnsureActiveRunSourceRef(run); err != nil {
+		return nil, err
+	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil {
 		return nil, fmt.Errorf("get repo: %w", err)

@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS runs (
     head_sha                TEXT NOT NULL,
     base_sha                TEXT NOT NULL,
     base_branch                 TEXT,
+    source_ref                  TEXT,
     bootstrap_test_repository   TEXT,
     bootstrap_test_base_branch  TEXT,
     bootstrap_test_command      TEXT,
@@ -154,6 +155,9 @@ var migrationStatements = []string{
 	// pre-feature behavior by falling back only to repos.default_branch.
 	`ALTER TABLE repos ADD COLUMN base_branch TEXT`,
 	`ALTER TABLE runs ADD COLUMN base_branch TEXT`,
+	// Source-ref provenance is nullable only for pre-upgrade rows. New runs
+	// freeze it at intake; active legacy runs migrate it one way from branch.
+	`ALTER TABLE runs ADD COLUMN source_ref TEXT`,
 	// A bootstrap Test authorization is all-null for ordinary/historical runs
 	// and all-present for an exact first-policy adoption. Recovery rejects any
 	// partial row rather than inferring missing authorization.

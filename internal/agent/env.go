@@ -1,6 +1,11 @@
 package agent
 
-import "github.com/kunchenguid/no-mistakes/internal/git"
+import (
+	"runtime"
+	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/git"
+)
 
 // GateRoleEnvVar is exported into every spawned gate agent's environment as an
 // unspoofable-from-outside marker that the process is a no-mistakes gate agent
@@ -26,6 +31,46 @@ const GateRoleEnvVar = "NO_MISTAKES_GATE"
 //
 // dir must be the value assigned to cmd.Dir so PWD stays coupled to the working
 // directory; see git.NonInteractiveEnv for why this matters.
-func gitSafeEnv(dir string) []string {
-	return append(git.NonInteractiveEnv(dir), GateRoleEnvVar+"=1")
+func gitSafeEnv(dir string, extra ...[]string) []string {
+	runtimeEnv := []string(nil)
+	if len(extra) > 0 {
+		runtimeEnv = extra[0]
+	}
+	return mergeAgentEnv(git.NonInteractiveEnv(dir), append(runtimeEnv, GateRoleEnvVar+"=1"))
+}
+
+// mergeAgentEnv removes inherited entries overridden by runtime-owned values
+// and appends each runtime value once, in order. This keeps the final process
+// environment unambiguous instead of relying on duplicate-key resolution.
+func mergeAgentEnv(base, runtimeValues []string) []string {
+	key := func(entry string) string {
+		name, _, _ := strings.Cut(entry, "=")
+		if runtime.GOOS == "windows" {
+			return strings.ToUpper(name)
+		}
+		return name
+	}
+	overridden := make(map[string]struct{}, len(runtimeValues))
+	for _, entry := range runtimeValues {
+		overridden[key(entry)] = struct{}{}
+	}
+	out := make([]string, 0, len(base)+len(runtimeValues))
+	for _, entry := range base {
+		if _, ok := overridden[key(entry)]; !ok {
+			out = append(out, entry)
+		}
+	}
+	seen := make(map[string]struct{}, len(runtimeValues))
+	for i := len(runtimeValues) - 1; i >= 0; i-- {
+		name := key(runtimeValues[i])
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, runtimeValues[i])
+	}
+	for left, right := len(out)-len(seen), len(out)-1; left < right; left, right = left+1, right-1 {
+		out[left], out[right] = out[right], out[left]
+	}
+	return out
 }

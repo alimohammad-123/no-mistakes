@@ -81,6 +81,29 @@ func writeFakePi(t *testing.T, dir, posixScript, windowsScript string) string {
 	return bin
 }
 
+func TestPiAgent_RunChildSeesProvidedEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture")
+	}
+	dir := t.TempDir()
+	bin := writeFakePi(t, dir, `#!/bin/sh
+cat > /dev/null
+printf '%s\n' "{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"content\":\"$NO_MISTAKES_SOURCE_REF\"}]}"
+`, "")
+	pa := &piAgent{bin: bin}
+	result, err := pa.Run(context.Background(), RunOpts{
+		Prompt: "inspect env",
+		CWD:    t.TempDir(),
+		Env:    []string{"NO_MISTAKES_SOURCE_REF=refs/heads/fm/feature"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "refs/heads/fm/feature" {
+		t.Fatalf("agent child saw %q", result.Text)
+	}
+}
+
 func TestPiAgent_RunParsesAssistantContentAndUsage(t *testing.T) {
 	dir := t.TempDir()
 	// Fake pi that emits a streaming text_delta plus a final message_end with

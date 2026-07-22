@@ -2,10 +2,12 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -55,6 +57,35 @@ func (sctx *StepContext) BaseBranch() string {
 		return ""
 	}
 	return sctx.Run.EffectiveBaseBranch(sctx.Repo)
+}
+
+// BindSourceRef verifies the current detached candidate against the durable run
+// head, then advances only the pipeline-local authoritative source ref.
+func (sctx *StepContext) BindSourceRef() (string, error) {
+	if sctx == nil || sctx.Run == nil {
+		return "", fmt.Errorf("pipeline source-ref context is missing")
+	}
+	ref, err := sctx.Run.FrozenSourceRef()
+	if err != nil {
+		return "", err
+	}
+	if err := sourceprovenance.BindCandidate(sctx.Ctx, sctx.WorkDir, ref, sctx.Run.HeadSHA); err != nil {
+		return "", err
+	}
+	return ref, nil
+}
+
+// AuthoritativeEnv removes spoofed source-ref values and appends the frozen
+// runtime value last.
+func (sctx *StepContext) AuthoritativeEnv(env []string) ([]string, error) {
+	if sctx == nil || sctx.Run == nil {
+		return nil, fmt.Errorf("pipeline source-ref context is missing")
+	}
+	ref, err := sctx.Run.FrozenSourceRef()
+	if err != nil {
+		return nil, err
+	}
+	return sourceprovenance.AuthoritativeEnv(env, ref), nil
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,

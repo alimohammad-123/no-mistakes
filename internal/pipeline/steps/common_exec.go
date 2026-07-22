@@ -160,11 +160,18 @@ func stepCmd(sctx *pipeline.StepContext, name string, args ...string) *exec.Cmd 
 	cmd := exec.CommandContext(sctx.Ctx, resolved, args...)
 	cmd.Dir = sctx.WorkDir
 	winproc.Harden(cmd)
-	if len(sctx.Env) > 0 {
-		cmd.Env = mergeEnv(sctx.Env)
+	env := sctx.Env
+	var envErr error
+	if sctx.Run != nil {
+		env, envErr = sctx.AuthoritativeEnv(env)
+	}
+	if envErr == nil && len(env) > 0 {
+		cmd.Env = mergeEnv(env)
 	}
 	if missingFromPath {
 		cmd.Err = &exec.Error{Name: name, Err: exec.ErrNotFound}
+	} else if envErr != nil {
+		cmd.Err = envErr
 	}
 	return cmd
 }
@@ -242,7 +249,16 @@ func runShellCommand(ctx context.Context, dir, cmdStr string) (string, int, erro
 }
 
 func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int, error) {
-	return runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, sctx.Env, cmdStr)
+	ref, err := sctx.BindSourceRef()
+	if err != nil {
+		return "", -1, fmt.Errorf("bind source ref before configured command: %w", err)
+	}
+	sctx.Log(fmt.Sprintf("configured command source ref: %s -> %s", ref, sctx.Run.HeadSHA))
+	env, err := sctx.AuthoritativeEnv(sctx.Env)
+	if err != nil {
+		return "", -1, err
+	}
+	return runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, env, cmdStr)
 }
 
 func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdStr string) (string, int, error) {
