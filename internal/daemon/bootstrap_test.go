@@ -71,7 +71,7 @@ func newBootstrapFixture(t *testing.T, policy []byte) bootstrapFixture {
 func bootstrapBindingFor(policy []byte) config.BootstrapTestBinding {
 	digest := sha256.Sum256(policy)
 	return config.BootstrapTestBinding{
-		Repository:   "github.com/owner/repo",
+		Repository:   "repoid://github.com/owner/repo",
 		BaseBranch:   "staging",
 		Command:      "go test ./...",
 		PolicySHA256: fmt.Sprintf("%x", digest),
@@ -79,7 +79,7 @@ func bootstrapBindingFor(policy []byte) config.BootstrapTestBinding {
 }
 
 func bootstrapAbsenceProof() *trustedRepoPolicy {
-	return &trustedRepoPolicy{RepositoryIdentity: "github.com/owner/repo"}
+	return &trustedRepoPolicy{RepositoryIdentity: "repoid://github.com/owner/repo"}
 }
 
 type bootstrapCaptureStep struct {
@@ -136,7 +136,7 @@ func TestPushReceivedUsesOnlyBootstrapTestCommandFromFeaturePolicy(t *testing.T)
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(policy)
-	configData = append(configData, []byte(fmt.Sprintf("bootstrap:\n  test:\n    - repository: github.com/test/repo\n      base_branch: staging\n      command: go test ./...\n      policy_sha256: %x\n", digest))...)
+	configData = append(configData, []byte(fmt.Sprintf("bootstrap:\n  test:\n    - repository: repoid://github.com/test/repo\n      base_branch: staging\n      command: go test ./...\n      policy_sha256: %x\n", digest))...)
 	if err := os.WriteFile(p.ConfigFile(), configData, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestPushReceivedTrustedPolicyIgnoresUnrelatedBootstrapBinding(t *testing.T)
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(policy)
-	configData = append(configData, []byte(fmt.Sprintf("bootstrap:\n  test:\n    - repository: github.com/other/repo\n      base_branch: main\n      command: stale-bootstrap-test\n      policy_sha256: %x\n", digest))...)
+	configData = append(configData, []byte(fmt.Sprintf("bootstrap:\n  test:\n    - repository: repoid://github.com/other/repo\n      base_branch: main\n      command: stale-bootstrap-test\n      policy_sha256: %x\n", digest))...)
 	if err := os.WriteFile(p.ConfigFile(), configData, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestPushReceivedTrustedPolicyIgnoresUnrelatedBootstrapBinding(t *testing.T)
 	if auth, err := run.FrozenBootstrapTestAuthorization(); err != nil || auth != nil {
 		t.Fatalf("trusted-policy run gained bootstrap authorization: auth=%+v err=%v", auth, err)
 	}
-	for _, key := range [][2]string{{"github.com/other/repo", "main"}, {"github.com/test/repo", "main"}} {
+	for _, key := range [][2]string{{"repoid://github.com/other/repo", "main"}, {"repoid://github.com/test/repo", "main"}} {
 		if retired, err := database.IsBootstrapTestRetired(key[0], key[1]); err != nil || retired {
 			t.Fatalf("unrelated binding retired %s/%s: retired=%v err=%v", key[0], key[1], retired, err)
 		}
@@ -274,7 +274,7 @@ func TestPushReceivedRetiresBootstrapAfterTrustedPolicyObservation(t *testing.T)
 
 	candidatePolicy := []byte("commands:\n  test: go test ./...\n")
 	binding := bootstrapBindingFor(candidatePolicy)
-	binding.Repository = "github.com/test/repo"
+	binding.Repository = "repoid://github.com/test/repo"
 	binding.BaseBranch = "main"
 	configData, err := os.ReadFile(p.ConfigFile())
 	if err != nil {
@@ -356,7 +356,7 @@ func TestPushReceivedStopsWhenBootstrapRetirementCannotPersist(t *testing.T) {
 
 	policy := []byte("commands:\n  test: go test ./...\n")
 	binding := bootstrapBindingFor(policy)
-	binding.Repository = "github.com/test/repo"
+	binding.Repository = "repoid://github.com/test/repo"
 	binding.BaseBranch = "main"
 	configData, err := os.ReadFile(p.ConfigFile())
 	if err != nil {
@@ -405,7 +405,7 @@ func TestResolveBootstrapTestAuthorizationSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveBootstrapTestAuthorization: %v", err)
 	}
-	if auth == nil || auth.Command != "go test ./..." || auth.Repository != "github.com/owner/repo" || auth.BaseBranch != "staging" {
+	if auth == nil || auth.Command != "go test ./..." || auth.Repository != "repoid://github.com/owner/repo" || auth.BaseBranch != "staging" {
 		t.Fatalf("authorization = %+v", auth)
 	}
 }
@@ -442,6 +442,21 @@ func TestBootstrapFetchSourceRejectsMismatchedOrigin(t *testing.T) {
 	}
 }
 
+func TestBootstrapFetchSourceAcceptsCanonicalAliases(t *testing.T) {
+	policy := []byte("commands:\n  test: go test ./...\n")
+	fixture := newBootstrapFixture(t, policy)
+	fixture.repo.UpstreamURL = "https://github.com/Owner/Repo.git"
+	gitCmd(t, fixture.workDir, "remote", "set-url", "origin", "git@github.com:owner/repo.git")
+
+	source, identity, err := bootstrapFetchSource(context.Background(), fixture.repo, fixture.workDir)
+	if err != nil {
+		t.Fatalf("bootstrapFetchSource: %v", err)
+	}
+	if source != "git@github.com:owner/repo.git" || identity != "repoid://github.com/owner/repo" {
+		t.Fatalf("source=%q identity=%q", source, identity)
+	}
+}
+
 func TestResolveBootstrapTestAuthorizationRefusals(t *testing.T) {
 	policy := []byte("commands:\n  test: go test ./...\n")
 	fixture := newBootstrapFixture(t, policy)
@@ -470,7 +485,11 @@ func TestResolveBootstrapTestAuthorizationIgnoresUnrelatedBindings(t *testing.T)
 	fixture := newBootstrapFixture(t, policy)
 	valid := bootstrapBindingFor(policy)
 	for _, binding := range []config.BootstrapTestBinding{
-		func() config.BootstrapTestBinding { b := valid; b.Repository = "github.com/other/repo"; return b }(),
+		func() config.BootstrapTestBinding {
+			b := valid
+			b.Repository = "repoid://github.com/other/repo"
+			return b
+		}(),
 		func() config.BootstrapTestBinding { b := valid; b.BaseBranch = "main"; return b }(),
 	} {
 		global := config.DefaultGlobalConfig()
@@ -624,7 +643,7 @@ func TestRecoverOnStartupRunsTestFromFrozenBootstrapAfterBindingRemoval(t *testi
 	}
 	digest := sha256.Sum256(policy)
 	if err := database.SetRunBootstrapTestAuthorization(run.ID, db.BootstrapTestAuthorization{
-		Repository: "github.com/test/repo", BaseBranch: "staging", Command: "go test ./...", PolicySHA256: fmt.Sprintf("%x", digest),
+		Repository: "repoid://github.com/test/repo", BaseBranch: "staging", Command: "go test ./...", PolicySHA256: fmt.Sprintf("%x", digest),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -858,7 +877,7 @@ func TestApplyFrozenBootstrapTestAuthorizationRejectsMismatchedFetchOrigin(t *te
 	fixture.run.BootstrapTestPolicySHA256 = &auth.PolicySHA256
 	cfg := config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{})
 
-	if err := applyFrozenBootstrapTestAuthorization(context.Background(), cfg, fixture.run, fixture.repo, fixture.workDir, &trustedRepoPolicy{RepositoryIdentity: "github.com/other/repo"}); err == nil {
+	if err := applyFrozenBootstrapTestAuthorization(context.Background(), cfg, fixture.run, fixture.repo, fixture.workDir, &trustedRepoPolicy{RepositoryIdentity: "repoid://github.com/other/repo"}); err == nil {
 		t.Fatal("recovery accepted bootstrap authorization from a mismatched fetch origin")
 	}
 }

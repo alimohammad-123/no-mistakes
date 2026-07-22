@@ -418,7 +418,7 @@ log_level: info
 # complete bytes. Remove it after the policy reaches the pipeline base.
 # bootstrap:
 #   test:
-#     - repository: github.com/owner/repo
+#     - repository: repoid://github.com/owner/repo
 #       base_branch: staging
 #       command: go test ./...
 #       policy_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -1032,7 +1032,7 @@ func ValidateBootstrapTestBindings(bindings []BootstrapTestBinding) error {
 		prefix := fmt.Sprintf("bootstrap.test[%d]", i)
 		identity, err := repoidentity.Canonical(binding.Repository)
 		if err != nil || identity != binding.Repository {
-			return fmt.Errorf("%s.repository must be a canonical host/path identity", prefix)
+			return fmt.Errorf("%s.repository must be a canonical repoid identity", prefix)
 		}
 		if binding.BaseBranch == "" || strings.TrimSpace(binding.BaseBranch) != binding.BaseBranch || strings.HasPrefix(binding.BaseBranch, "refs/") {
 			return fmt.Errorf("%s.base_branch must be a short branch name", prefix)

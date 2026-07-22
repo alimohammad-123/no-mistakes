@@ -82,13 +82,13 @@ func TestOpenMigratesRunSyncProvenanceWithoutBackfillingMutableHead(t *testing.T
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Close() })
-	if retired, err := d.IsBootstrapTestRetired("github.com/owner/repo", "main"); err != nil || retired {
+	if retired, err := d.IsBootstrapTestRetired("repoid://github.com/owner/repo", "main"); err != nil || retired {
 		t.Fatalf("legacy migration inferred retirement: retired=%v err=%v", retired, err)
 	}
-	if err := d.RetireBootstrapTest("github.com/owner/repo", "main"); err != nil {
+	if err := d.RetireBootstrapTest("repoid://github.com/owner/repo", "main"); err != nil {
 		t.Fatalf("legacy migration did not create retirement storage: %v", err)
 	}
-	if retired, err := d.IsBootstrapTestRetired("github.com/owner/repo", "main"); err != nil || !retired {
+	if retired, err := d.IsBootstrapTestRetired("repoid://github.com/owner/repo", "main"); err != nil || !retired {
 		t.Fatalf("legacy retirement round trip = %v, err=%v", retired, err)
 	}
 	run, err := d.GetRun("run-1")

@@ -21,7 +21,7 @@ func TestRunBootstrapTestAuthorizationIsFrozenAndRoundTrips(t *testing.T) {
 		t.Fatal(err)
 	}
 	auth := BootstrapTestAuthorization{
-		Repository:   "github.com/owner/repo",
+		Repository:   "repoid://github.com/owner/repo",
 		BaseBranch:   "staging",
 		Command:      "go test ./...",
 		PolicySHA256: strings.Repeat("a", 64),
@@ -61,7 +61,7 @@ func TestRunBootstrapTestAuthorizationIsFrozenAndRoundTrips(t *testing.T) {
 
 func TestRunBootstrapTestAuthorizationRejectsPartialSnapshot(t *testing.T) {
 	run := &Run{}
-	value := "github.com/owner/repo"
+	value := "repoid://github.com/owner/repo"
 	run.BootstrapTestRepository = &value
 	if _, err := run.FrozenBootstrapTestAuthorization(); err == nil {
 		t.Fatal("partial bootstrap snapshot was accepted")
@@ -74,10 +74,10 @@ func TestBootstrapTestRetirementPersistsAcrossReopenAndUsesExactKey(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if retired, err := d.IsBootstrapTestRetired("github.com/owner/repo", "staging"); err != nil || retired {
+	if retired, err := d.IsBootstrapTestRetired("repoid://github.com/owner/repo", "staging"); err != nil || retired {
 		t.Fatalf("initial retirement = %v, err=%v", retired, err)
 	}
-	if err := d.RetireBootstrapTest("github.com/owner/repo", "staging"); err != nil {
+	if err := d.RetireBootstrapTest("repoid://github.com/owner/repo", "staging"); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -85,9 +85,9 @@ func TestBootstrapTestRetirementPersistsAcrossReopenAndUsesExactKey(t *testing.T
 		base       string
 		want       bool
 	}{
-		{repository: "github.com/owner/repo", base: "staging", want: true},
-		{repository: "github.com/owner/repo", base: "main", want: false},
-		{repository: "github.com/other/repo", base: "staging", want: false},
+		{repository: "repoid://github.com/owner/repo", base: "staging", want: true},
+		{repository: "repoid://github.com/owner/repo", base: "main", want: false},
+		{repository: "repoid://github.com/other/repo", base: "staging", want: false},
 	} {
 		retired, err := d.IsBootstrapTestRetired(tc.repository, tc.base)
 		if err != nil || retired != tc.want {
@@ -103,7 +103,7 @@ func TestBootstrapTestRetirementPersistsAcrossReopenAndUsesExactKey(t *testing.T
 		t.Fatal(err)
 	}
 	defer d.Close()
-	if retired, err := d.IsBootstrapTestRetired("github.com/owner/repo", "staging"); err != nil || !retired {
+	if retired, err := d.IsBootstrapTestRetired("repoid://github.com/owner/repo", "staging"); err != nil || !retired {
 		t.Fatalf("reopened retirement = %v, err=%v", retired, err)
 	}
 }
@@ -118,28 +118,34 @@ func TestBootstrapTestRetirementUsesCanonicalRepositoryIdentity(t *testing.T) {
 		{
 			name: "URL canonical SCP and defaults",
 			remotes: []string{
-				"github.com/owner/repo",
+				"repoid://github.com/owner/repo",
+				"https://github.com/Owner/Repo.git",
 				"https://github.com:443/owner/repo.git",
 				"https://github.com./owner/repo.git",
-				"git@github.com:owner/repo.git",
+				"git@github.com:Owner/Repo.git",
 				"ssh://git@github.com:22/owner/repo.git",
 			},
-			want: "github.com/owner/repo",
+			want: "repoid://github.com/owner/repo",
 		},
 		{
 			name:    "non-default scheme port",
-			remotes: []string{"https://github.com:22/owner/repo.git", "github.com:22/owner/repo"},
-			want:    "github.com:22/owner/repo",
+			remotes: []string{"https://github.com:22/owner/repo.git", "repoid://github.com:22/owner/repo"},
+			want:    "repoid://github.com:22/owner/repo",
 		},
 		{
 			name:    "IPv4",
-			remotes: []string{"https://192.0.2.1:8443/owner/repo.git", "192.0.2.1:8443/owner/repo"},
-			want:    "192.0.2.1:8443/owner/repo",
+			remotes: []string{"https://192.0.2.1:8443/owner/repo.git", "repoid://192.0.2.1:8443/owner/repo"},
+			want:    "repoid://192.0.2.1:8443/owner/repo",
 		},
 		{
 			name:    "bracketed IPv6",
-			remotes: []string{"https://[2001:0db8::1]:8443/owner/repo.git", "[2001:db8::1]:8443/owner/repo"},
-			want:    "[2001:db8::1]:8443/owner/repo",
+			remotes: []string{"https://[2001:0db8::1]:8443/owner/repo.git", "repoid://[2001:db8::1]:8443/owner/repo"},
+			want:    "repoid://[2001:db8::1]:8443/owner/repo",
+		},
+		{
+			name:    "repository ending git",
+			remotes: []string{"https://git.example.test/Group/Repo.git.git", "repoid://git.example.test/Group/Repo.git"},
+			want:    "repoid://git.example.test/Group/Repo.git",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -163,7 +169,7 @@ func TestBootstrapTestRetirementUsesCanonicalRepositoryIdentity(t *testing.T) {
 		})
 	}
 
-	if retired, err := d.IsBootstrapTestRetired("github.com:8443/owner/repo", "base-0"); err != nil || retired {
+	if retired, err := d.IsBootstrapTestRetired("repoid://github.com:8443/owner/repo", "base-0"); err != nil || retired {
 		t.Fatalf("distinct non-default-port retirement = %v, err=%v", retired, err)
 	}
 }
@@ -179,7 +185,7 @@ func TestSetRunBootstrapTestAuthorizationRefusesRetiredKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	auth := BootstrapTestAuthorization{
-		Repository: "github.com/owner/repo", BaseBranch: "staging", Command: "go test ./...", PolicySHA256: strings.Repeat("a", 64),
+		Repository: "repoid://github.com/owner/repo", BaseBranch: "staging", Command: "go test ./...", PolicySHA256: strings.Repeat("a", 64),
 	}
 	if err := d.RetireBootstrapTest(auth.Repository, auth.BaseBranch); err != nil {
 		t.Fatal(err)
@@ -201,10 +207,10 @@ func TestBootstrapTestRetirementStorageErrorsFailClosed(t *testing.T) {
 	if _, err := d.sql.Exec(`DROP TABLE bootstrap_test_retirements`); err != nil {
 		t.Fatal(err)
 	}
-	if retired, err := d.IsBootstrapTestRetired("github.com/owner/repo", "staging"); err == nil || retired {
+	if retired, err := d.IsBootstrapTestRetired("repoid://github.com/owner/repo", "staging"); err == nil || retired {
 		t.Fatalf("retirement lookup did not fail closed: retired=%v err=%v", retired, err)
 	}
-	if err := d.RetireBootstrapTest("github.com/owner/repo", "staging"); err == nil {
+	if err := d.RetireBootstrapTest("repoid://github.com/owner/repo", "staging"); err == nil {
 		t.Fatal("retirement persistence error was ignored")
 	}
 }

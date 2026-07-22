@@ -35,7 +35,7 @@ agent_args_override:
 # Temporary first-policy adoption only. Omit during normal operation.
 bootstrap:
   test:
-    - repository: github.com/owner/repo
+    - repository: repoid://github.com/owner/repo
       base_branch: staging
       command: go test ./...
       policy_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -224,11 +224,13 @@ For Codex, `service_tier` and `model_reasoning_effort` tune different things: `s
 
 Temporary, user-owned authorization for the Test command in a repository's first policy change. It is disabled when the list is empty or omitted.
 
+Repository bindings use the versioned `repoid://authority/path` envelope so stored identities cannot be reinterpreted as raw URL or SCP syntax. Hosts and ports are canonicalized, GitHub owner and repository paths are lowercase, and generic provider paths retain their case.
+
 Each entry requires all four fields:
 
 | Field | Type | Description |
 |---|---|---|
-| `repository` | `string` | Canonical parent identity in `host/namespace/repository` form |
+| `repository` | `string` | Canonical parent identity in `repoid://authority/namespace/repository` form |
 | `base_branch` | `string` | Exact registered pipeline base |
 | `command` | `string` | Exact Test command that the submitted policy installs |
 | `policy_sha256` | `string` | 64 lowercase hex characters for SHA-256 of the complete submitted policy bytes |
@@ -243,7 +245,7 @@ First adoption procedure:
 
 1. Register the intended base, for example with `no-mistakes init --base-branch staging`.
 2. Add and commit the complete `.no-mistakes.yaml` on the policy feature branch, including the intended `commands.test`.
-3. Compute the committed bytes with `git show HEAD:.no-mistakes.yaml | shasum -a 256` and add one complete binding to the user-owned global config. Use the credential-free parent remote identity with a lowercase host and no scheme or `.git` suffix.
+3. Compute the committed bytes with `git show HEAD:.no-mistakes.yaml | shasum -a 256` and add one complete binding to the user-owned global config. Express the credential-free parent remote as `repoid://authority/path`; for example, `https://github.com/owner/repo.git` becomes `repoid://github.com/owner/repo`.
 4. Start the policy branch's validation normally. Do not change the policy file or binding during that run.
 5. Remove the global binding as soon as the policy reaches the pipeline base. The daemon has already retired bootstrap permanently for that repository/base; removing the now-inert binding keeps the global config clear.
 
