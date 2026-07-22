@@ -127,10 +127,11 @@ no-mistakes axi run --intent "<the same goal supplied to the interrupted run>"
 
 AXI restores the same run ID and returns its preserved approval gate. Continue
 with `no-mistakes axi respond` as usual. It does not create a replacement run,
-rerun Review or Test, return custody, move the operator branch, or contact a
-remote. The pipeline-local `refs/heads/<branch>` ref is derived from the durable
-branch identity and bound to the recorded pipeline head before execution can
-continue.
+rerun Review or Test, return custody, move the operator branch, push, or
+otherwise mutate a remote. It may fetch the frozen pipeline base to reload
+trusted repository policy. The pipeline-local `refs/heads/<branch>` ref is
+derived from the durable branch identity and bound to the recorded pipeline
+head before execution can continue.
 
 Recovery is allowed only for the exact legacy shutdown error with one preserved
 failed gate, a nonempty matching findings round, completed earlier steps, and
