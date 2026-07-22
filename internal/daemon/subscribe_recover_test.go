@@ -494,8 +494,9 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	if completed.SourceRef == nil || *completed.SourceRef != "refs/heads/fm/resume/source-ref" {
 		t.Fatalf("legacy active run source ref = %v", completed.SourceRef)
 	}
-	if data, err := os.ReadFile(marker); err != nil || string(data) != "passed" {
-		t.Fatalf("resumed Test command marker = %q, err=%v", data, err)
+	markerData, err := os.ReadFile(marker)
+	if err != nil || string(markerData) != "passed" {
+		t.Fatalf("resumed Test command marker = %q, err=%v", markerData, err)
 	}
 	logData, err := os.ReadFile(filepath.Join(p.RunLogDir(run.ID), "test.log"))
 	if err != nil {
@@ -505,6 +506,8 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	if !strings.Contains(string(logData), wantBinding) {
 		t.Fatalf("resumed Test log does not record binding %q: %s", wantBinding, logData)
 	}
+	t.Logf("recovered legacy run completed: status=%s source_ref=%s marker=%s", completed.Status, *completed.SourceRef, markerData)
+	t.Logf("configured Test command provenance: %s", wantBinding)
 	// The executor marks the run terminal before its owner goroutine performs
 	// worktree cleanup. Wait for that cleanup rather than assuming it completed
 	// in the same scheduling slice, which is especially unreliable on Windows.
