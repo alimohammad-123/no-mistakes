@@ -48,9 +48,9 @@ func resolveBootstrapTestAuthorization(
 	if err := config.ValidateBootstrapTestBindings(global.Bootstrap.Test); err != nil {
 		return nil, err
 	}
-	identity, err := bootstrapRepositoryIdentity(ctx, repo, workDir)
-	if err != nil {
-		return nil, err
+	identity := trustedPolicy.RepositoryIdentity
+	if identity == "" {
+		return nil, fmt.Errorf("bootstrap Test authorization requires fetch-bound repository identity")
 	}
 	baseBranch := run.EffectiveBaseBranch(repo)
 	matches := make([]config.BootstrapTestBinding, 0, 1)
@@ -116,9 +116,9 @@ func applyFrozenBootstrapTestAuthorization(
 	if repo == nil || run == nil {
 		return fmt.Errorf("frozen bootstrap Test authorization requires a repository and run")
 	}
-	identity, err := bootstrapRepositoryIdentity(ctx, repo, workDir)
-	if err != nil {
-		return err
+	identity := trustedPolicy.RepositoryIdentity
+	if identity == "" {
+		return fmt.Errorf("frozen bootstrap Test authorization requires fetch-bound repository identity")
 	}
 	if identity != auth.Repository || run.EffectiveBaseBranch(repo) != auth.BaseBranch {
 		return fmt.Errorf("frozen bootstrap Test authorization no longer matches the repository and pipeline base")
@@ -137,23 +137,23 @@ func applyFrozenBootstrapTestAuthorization(
 	return nil
 }
 
-func bootstrapRepositoryIdentity(ctx context.Context, repo *db.Repo, workDir string) (string, error) {
+func bootstrapFetchSource(ctx context.Context, repo *db.Repo, workDir string) (string, string, error) {
 	recorded, err := repoidentity.Canonical(repo.UpstreamURL)
 	if err != nil {
-		return "", fmt.Errorf("resolve recorded bootstrap repository identity: %w", err)
+		return "", "", fmt.Errorf("resolve recorded bootstrap repository identity: %w", err)
 	}
 	originURL, err := getBootstrapOriginURL(ctx, workDir, "origin")
 	if err != nil {
-		return "", fmt.Errorf("resolve bootstrap fetch origin: %w", err)
+		return "", "", fmt.Errorf("resolve bootstrap fetch origin: %w", err)
 	}
 	origin, err := repoidentity.Canonical(originURL)
 	if err != nil {
-		return "", fmt.Errorf("resolve bootstrap fetch origin identity: %w", err)
+		return "", "", fmt.Errorf("resolve bootstrap fetch origin identity: %w", err)
 	}
 	if origin != recorded {
-		return "", fmt.Errorf("bootstrap fetch origin %q does not match recorded repository identity %q", origin, recorded)
+		return "", "", fmt.Errorf("bootstrap fetch origin %q does not match recorded repository identity %q", origin, recorded)
 	}
-	return recorded, nil
+	return originURL, recorded, nil
 }
 
 func submittedRepoPolicy(ctx context.Context, workDir string, run *db.Run) ([]byte, *config.RepoConfig, error) {

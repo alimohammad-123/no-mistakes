@@ -89,6 +89,12 @@ func TestNeedsBranch(t *testing.T) {
 	}
 }
 
+func TestWizardBranchRolePreservesExistingShape(t *testing.T) {
+	if got := wizardBranchRole("staging", "main", false); got != "feature" {
+		t.Fatalf("wizardBranchRole(staging) = %q, want feature", got)
+	}
+}
+
 func TestFeatureBranchStartPointUsesPipelineBaseFromEveryHeadState(t *testing.T) {
 	states := []repoState{
 		{currentBranch: "main", defaultBranch: "main", baseBranch: "staging"},

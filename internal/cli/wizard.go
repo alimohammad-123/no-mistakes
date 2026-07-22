@@ -315,7 +315,7 @@ func runWizardWithMode(ctx context.Context, p *paths.Paths, state *repoState, sk
 		"needs_branch":        state.needsBranch(),
 		"is_dirty":            state.dirty,
 		"detached":            state.detached,
-		"current_branch_role": wizardBranchRole(state.currentBranch, state.defaultBranch, state.baseBranch, state.detached),
+		"current_branch_role": wizardBranchRole(state.currentBranch, state.defaultBranch, state.detached),
 	})
 
 	run := wizardRun
@@ -414,15 +414,12 @@ func waitForActiveRun(ctx context.Context, client *ipc.Client, repoID, branch st
 	}
 }
 
-func wizardBranchRole(currentBranch, defaultBranch, baseBranch string, detached bool) string {
+func wizardBranchRole(currentBranch, defaultBranch string, detached bool) string {
 	if detached {
 		return "detached"
 	}
 	if currentBranch != "" && currentBranch == defaultBranch {
 		return "default"
-	}
-	if currentBranch != "" && currentBranch == baseBranch {
-		return "base"
 	}
 	return "feature"
 }

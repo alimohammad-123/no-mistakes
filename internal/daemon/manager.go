@@ -29,7 +29,13 @@ type StepFactory func() []pipeline.Step
 
 var recoveredConfigFetchTimeout = 10 * time.Second
 
-var fetchRecoveredRemoteBranch = git.FetchRemoteBranch
+var fetchInitialTrustedRemoteBranch = func(ctx context.Context, dir, remote, branch string) error {
+	return git.FetchRemoteBranchToRef(ctx, dir, remote, branch, "refs/remotes/origin/"+branch)
+}
+
+var fetchRecoveredRemoteBranch = func(ctx context.Context, dir, remote, branch string) error {
+	return git.FetchRemoteBranchToRef(ctx, dir, remote, branch, "refs/remotes/origin/"+branch)
+}
 
 // RunManager tracks active pipeline executors and manages run lifecycle.
 type RunManager struct {
@@ -190,11 +196,23 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 		return nil, fmt.Errorf("load repo config: %w", err)
 	}
 	baseBranch := run.EffectiveBaseBranch(repo)
+	fetchSource := "origin"
+	bootstrapIdentity := ""
+	frozenBootstrap, err := run.FrozenBootstrapTestAuthorization()
+	if err != nil {
+		return nil, err
+	}
+	if frozenBootstrap != nil {
+		fetchSource, bootstrapIdentity, err = bootstrapFetchSource(ctx, repo, workDir)
+		if err != nil {
+			return nil, err
+		}
+	}
 	var trustedSHA string
 	if baseBranch != "" {
 		fetchCtx, cancel := context.WithTimeout(ctx, recoveredConfigFetchTimeout)
 		defer cancel()
-		if err := fetchRecoveredRemoteBranch(fetchCtx, workDir, "origin", baseBranch); err != nil {
+		if err := fetchRecoveredRemoteBranch(fetchCtx, workDir, fetchSource, baseBranch); err != nil {
 			slog.Warn("failed to fetch pipeline base while recovering run; trusted config disabled", "run_id", run.ID, "branch", baseBranch, "error", err)
 		} else if sha, err := git.ResolveRef(ctx, workDir, "refs/remotes/origin/"+baseBranch); err != nil {
 			slog.Warn("failed to resolve pipeline base while recovering run; trusted config disabled", "run_id", run.ID, "branch", baseBranch, "error", err)
@@ -208,6 +226,7 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	if err != nil {
 		return nil, err
 	}
+	trustedPolicy.RepositoryIdentity = bootstrapIdentity
 	trustedRepoCfg := trustedPolicy.Config
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	cfg := config.Merge(globalCfg, config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands))
@@ -452,8 +471,9 @@ func protectedSourceBranch(repo *db.Repo, branch string) bool {
 }
 
 type trustedRepoPolicy struct {
-	Present bool
-	Config  *config.RepoConfig
+	Present            bool
+	Config             *config.RepoConfig
+	RepositoryIdentity string
 }
 
 // readTrustedRepoPolicy performs one authoritative read of the freshly pinned
@@ -645,6 +665,12 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			run.IntentScore = &score
 		}
 	}
+	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
+		trackStartFailure("load_global_config")
+		return "", fmt.Errorf("load global config: %w", err)
+	}
 
 	// Create worktree from the gate bare repo.
 	gateDir := m.paths.RepoDir(repo.ID)
@@ -659,6 +685,16 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		trackStartFailure("configure_worktree_identity")
 		return "", fmt.Errorf("configure worktree git identity: %w", err)
 	}
+	fetchSource := "origin"
+	bootstrapIdentity := ""
+	if len(globalCfg.Bootstrap.Test) > 0 {
+		fetchSource, bootstrapIdentity, err = bootstrapFetchSource(ctx, repo, wtDir)
+		if err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("bootstrap_fetch_origin")
+			return "", err
+		}
+	}
 	// Fetch the trusted pipeline base and resolve it to an exact commit SHA
 	// before any read. Reading the trusted config at this pinned SHA (rather
 	// than the origin/<baseBranch> remote-tracking ref) is what makes a
@@ -670,7 +706,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// base has already removed - silently running stale shell.
 	var trustedSHA string
 	if baseBranch != "" {
-		if err := git.FetchRemoteBranch(ctx, wtDir, "origin", baseBranch); err != nil {
+		if err := fetchInitialTrustedRemoteBranch(ctx, wtDir, fetchSource, baseBranch); err != nil {
 			slog.Warn("failed to fetch pipeline base into worktree; trusted config disabled (commands/agent from pushed branch will be dropped)", "run_id", run.ID, "branch", baseBranch, "error", err)
 		} else if sha, err := git.ResolveRef(ctx, wtDir, "refs/remotes/origin/"+baseBranch); err != nil {
 			slog.Warn("failed to resolve fetched pipeline-base ref; trusted config disabled", "run_id", run.ID, "branch", baseBranch, "error", err)
@@ -690,12 +726,6 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		}
 	}()
 
-	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
-	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
-		trackStartFailure("load_global_config")
-		return "", fmt.Errorf("load global config: %w", err)
-	}
 	repoCfg, err := config.LoadRepo(wtDir)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
@@ -725,6 +755,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		trackStartFailure("trusted_config_unreadable")
 		return "", err
 	}
+	trustedPolicy.RepositoryIdentity = bootstrapIdentity
 	trustedRepoCfg := trustedPolicy.Config
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
