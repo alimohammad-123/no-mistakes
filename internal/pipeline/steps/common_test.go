@@ -728,6 +728,9 @@ func TestCommitAgentFixes_UsesFallbackSummary(t *testing.T) {
 	if got := lastCommitMessage(t, dir); got != "no-mistakes(lint): fallback lint fix" {
 		t.Errorf("commit message = %q, want fallback-based message", got)
 	}
+	if got := gitCmd(t, dir, "rev-parse", *sctx.Run.SourceRef); got != sctx.Run.HeadSHA {
+		t.Fatalf("source ref = %s, want fix candidate %s", got, sctx.Run.HeadSHA)
+	}
 }
 
 func TestMatchIgnorePattern(t *testing.T) {

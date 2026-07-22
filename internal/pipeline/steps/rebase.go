@@ -130,6 +130,9 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	}
 
 	if len(conflictTargets) > 0 {
+		if _, err := updateHeadSHA(ctx, sctx); err != nil {
+			return nil, err
+		}
 		summary := fmt.Sprintf("conflict rebasing onto %s", strings.Join(conflictTargets, ", "))
 		findingsJSON, _ := json.Marshal(Findings{Items: dedupeRebaseFindings(conflictFindings), Summary: summary})
 		return &pipeline.StepOutcome{
@@ -506,6 +509,9 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 		sctx.Run.HeadSHA = headSHA
 		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
 			return nil, err
+		}
+		if _, err := sctx.BindSourceRef(); err != nil {
+			return nil, fmt.Errorf("bind source ref after rebase: %w", err)
 		}
 		sctx.Log(fmt.Sprintf("updated head SHA to %s", shortSHA(headSHA)))
 	}

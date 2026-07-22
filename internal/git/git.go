@@ -370,6 +370,15 @@ func ValidatePortableBranchName(branch string) error {
 	return nil
 }
 
+func ValidateLocalBranchName(branch string) error {
+	cmd := exec.Command("git", "check-ref-format", "--branch", branch)
+	winproc.Harden(cmd)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("invalid branch name %q: %w: %s", branch, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // FetchRemoteBranch fetches a single branch into a remote-tracking ref.
 // Uses a force-update refspec (+) so non-fast-forward updates (e.g. after
 // a force push on the remote) are accepted instead of silently rejected.

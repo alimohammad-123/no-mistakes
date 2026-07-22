@@ -200,6 +200,9 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, newHeadSHA); err != nil {
 			return false, err
 		}
+		if _, err := sctx.BindSourceRef(); err != nil {
+			return false, fmt.Errorf("bind source ref after CI fix: %w", err)
+		}
 		return false, nil
 	}
 	if err := stepGitPush(sctx, pushURL, ref, decision.remoteSHA, !decision.newBranch); err != nil {
@@ -215,6 +218,9 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 	sctx.Run.HeadSHA = newHeadSHA
 	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, newHeadSHA); err != nil {
 		return false, err
+	}
+	if _, err := sctx.BindSourceRef(); err != nil {
+		return false, fmt.Errorf("bind source ref after CI fix: %w", err)
 	}
 
 	sctx.Log("committed and pushed fixes")

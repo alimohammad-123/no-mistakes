@@ -656,7 +656,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			stepName: stepName,
 			round:    func() int { return roundNum + 1 },
 		}
-		stepAgent = &sourceRefAgent{inner: stepAgent, run: run}
+		stepAgent = &sourceRefAgent{inner: stepAgent, run: run, workDir: workDir}
 	}
 	sctx := &StepContext{
 		Ctx:              ctx,
@@ -943,8 +943,9 @@ func roundInsertID(_ string, inserted *db.StepRound, err error) string {
 }
 
 type sourceRefAgent struct {
-	inner agent.Agent
-	run   *db.Run
+	inner   agent.Agent
+	run     *db.Run
+	workDir string
 }
 
 func (a *sourceRefAgent) Name() string { return a.inner.Name() }
@@ -953,6 +954,9 @@ func (a *sourceRefAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Re
 	ref, err := a.run.FrozenSourceRef()
 	if err != nil {
 		return nil, err
+	}
+	if err := sourceprovenance.BindCandidate(ctx, a.workDir, ref, a.run.HeadSHA); err != nil {
+		return nil, fmt.Errorf("bind source ref before agent: %w", err)
 	}
 	opts.Env = sourceprovenance.AuthoritativeEnv(opts.Env, ref)
 	return a.inner.Run(ctx, opts)

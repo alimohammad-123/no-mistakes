@@ -23,7 +23,13 @@ func TestCanonicalSourceRefFromBranch(t *testing.T) {
 		t.Fatalf("full head ref = %q, err=%v", full, err)
 	}
 
-	invalid := []string{"", "HEAD", "(detached)", "@", "refs/tags/v1", "refs/remotes/origin/feature", "refs/notes/x", "feature..bad", "feature@{bad", "/feature", "feature/", ".feature", "fm/.feature", "feature.lock", "-feature", "feature bad", "feature;bad"}
+	for _, branch := range []string{"feature!", "feature$", "feature%", "feature;next", "feature&next", "feature(test)"} {
+		if _, err := CanonicalSourceRefFromBranch(branch); err != nil {
+			t.Fatalf("Git-valid branch %q rejected: %v", branch, err)
+		}
+	}
+
+	invalid := []string{"", "HEAD", "(detached)", "@", "refs/tags/v1", "refs/remotes/origin/feature", "refs/notes/x", "feature..bad", "feature@{bad", "/feature", "feature/", ".feature", "fm/.feature", "feature.lock", "-feature", "feature bad"}
 	for _, branch := range invalid {
 		branch := branch
 		t.Run(strings.ReplaceAll(branch, "/", "_"), func(t *testing.T) {

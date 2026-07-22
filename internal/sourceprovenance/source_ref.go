@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
-	"unicode"
 
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 )
@@ -46,26 +45,11 @@ func ValidateFrozenSourceRef(ref, branch string) error {
 }
 
 func validateBranch(branch string) error {
-	if branch == "" || strings.TrimSpace(branch) != branch {
-		return fmt.Errorf("source branch is empty or has surrounding whitespace")
-	}
 	if branch == "HEAD" || branch == "(detached)" || branch == "@" || strings.HasPrefix(branch, "refs/") || strings.HasPrefix(branch, "-") {
 		return fmt.Errorf("source branch %q is not a branch name", branch)
 	}
-	if strings.HasPrefix(branch, "/") || strings.HasSuffix(branch, "/") || strings.Contains(branch, "//") ||
-		strings.Contains(branch, "..") || strings.Contains(branch, "@{") || strings.HasSuffix(branch, ".") ||
-		strings.ContainsAny(branch, "~^:?*[\\;&|<>()%!$`'\"") {
-		return fmt.Errorf("source branch %q is malformed", branch)
-	}
-	for _, component := range strings.Split(branch, "/") {
-		if component == "" || strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
-			return fmt.Errorf("source branch %q is malformed", branch)
-		}
-	}
-	for _, r := range branch {
-		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			return fmt.Errorf("source branch %q contains whitespace or control characters", branch)
-		}
+	if err := gitpkg.ValidateLocalBranchName(branch); err != nil {
+		return fmt.Errorf("source branch %q is malformed: %w", branch, err)
 	}
 	return nil
 }
