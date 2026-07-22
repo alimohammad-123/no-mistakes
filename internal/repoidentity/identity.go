@@ -101,19 +101,35 @@ func canonicalURL(value string) (string, error) {
 }
 
 func canonicalSCP(value string) (string, error) {
-	colon := strings.IndexByte(value, ':')
-	if colon <= 0 || strings.Count(value[:colon], "@") != 1 {
+	if strings.Count(value, "@") != 1 {
 		return "", fmt.Errorf("repository remote must be an explicit URL or user-qualified SCP remote")
 	}
-	left, repoPath := value[:colon], value[colon+1:]
-	at := strings.IndexByte(left, '@')
-	if at <= 0 || at == len(left)-1 {
+	at := strings.IndexByte(value, '@')
+	if at <= 0 || at == len(value)-1 {
 		return "", fmt.Errorf("repository SSH authority is invalid")
 	}
-	authority, err := canonicalAuthority(left[at+1:], "")
+	authorityStart := at + 1
+	separator := -1
+	if value[authorityStart] == '[' {
+		close := strings.IndexByte(value[authorityStart:], ']')
+		if close < 0 {
+			return "", fmt.Errorf("repository SSH authority is invalid")
+		}
+		separator = authorityStart + close + 1
+		if separator >= len(value) || value[separator] != ':' {
+			return "", fmt.Errorf("repository SSH authority is invalid")
+		}
+	} else if offset := strings.IndexByte(value[authorityStart:], ':'); offset >= 0 {
+		separator = authorityStart + offset
+	}
+	if separator < 0 || separator == len(value)-1 {
+		return "", fmt.Errorf("repository SSH authority is invalid")
+	}
+	authority, err := canonicalAuthority(value[authorityStart:separator], "")
 	if err != nil {
 		return "", err
 	}
+	repoPath := value[separator+1:]
 	repoPath, err = canonicalPath(repoPath, true, githubAuthority(authority))
 	if err != nil {
 		return "", err
@@ -124,6 +140,9 @@ func canonicalSCP(value string) (string, error) {
 func canonicalPath(repoPath string, stripTransportSuffix, lowercase bool) (string, error) {
 	if repoPath == "" || strings.HasPrefix(repoPath, "/") || strings.HasSuffix(repoPath, "/") || strings.Contains(repoPath, "//") || strings.ContainsAny(repoPath, `\%?#@`) {
 		return "", fmt.Errorf("repository path is not canonical")
+	}
+	if lowercase {
+		repoPath = strings.ToLower(repoPath)
 	}
 	if stripTransportSuffix {
 		repoPath = strings.TrimSuffix(repoPath, ".git")
@@ -136,9 +155,6 @@ func canonicalPath(repoPath string, stripTransportSuffix, lowercase bool) (strin
 		if part == "" || part == "." || part == ".." || strings.IndexFunc(part, unicode.IsSpace) >= 0 {
 			return "", fmt.Errorf("repository path is not canonical")
 		}
-	}
-	if lowercase {
-		repoPath = strings.ToLower(repoPath)
 	}
 	return repoPath, nil
 }

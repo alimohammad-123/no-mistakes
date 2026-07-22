@@ -10,6 +10,7 @@ func TestCanonicalEquivalentRepositorySpellings(t *testing.T) {
 	}{
 		{name: "canonical", raw: want},
 		{name: "HTTPS", raw: "https://GitHub.com/Owner/Repo.git"},
+		{name: "HTTPS uppercase suffix", raw: "https://github.com/Owner/Repo.GIT"},
 		{name: "HTTPS default port", raw: "https://github.com:443/owner/repo.git"},
 		{name: "HTTP default port", raw: "http://github.com:80/owner/repo.git"},
 		{name: "DNS trailing dot", raw: "https://github.com./owner/repo.git"},
@@ -38,6 +39,7 @@ func TestCanonicalIsIdempotent(t *testing.T) {
 		{name: "URL", raw: "https://Git.Example.test/Group/Repo.git", want: "repoid://git.example.test/Group/Repo"},
 		{name: "SCP", raw: "git@Git.Example.test:Group/Repo.git", want: "repoid://git.example.test/Group/Repo"},
 		{name: "SCP numeric namespace", raw: "git@Git.Example.test:123/Repo.git", want: "repoid://git.example.test/123/Repo"},
+		{name: "SCP IPv6", raw: "git@[2001:0db8::1]:Group/Repo.git", want: "repoid://[2001:db8::1]/Group/Repo"},
 		{name: "HTTPS default port", raw: "https://Git.Example.test:443/Group/Repo.git", want: "repoid://git.example.test/Group/Repo"},
 		{name: "HTTP default port", raw: "http://Git.Example.test:80/Group/Repo.git", want: "repoid://git.example.test/Group/Repo"},
 		{name: "SSH default port", raw: "ssh://git@Git.Example.test:22/Group/Repo.git", want: "repoid://git.example.test/Group/Repo"},

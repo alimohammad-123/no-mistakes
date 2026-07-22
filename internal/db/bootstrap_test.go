@@ -120,6 +120,7 @@ func TestBootstrapTestRetirementUsesCanonicalRepositoryIdentity(t *testing.T) {
 			remotes: []string{
 				"repoid://github.com/owner/repo",
 				"https://github.com/Owner/Repo.git",
+				"https://github.com/Owner/Repo.GIT",
 				"https://github.com:443/owner/repo.git",
 				"https://github.com./owner/repo.git",
 				"git@github.com:Owner/Repo.git",
@@ -141,6 +142,11 @@ func TestBootstrapTestRetirementUsesCanonicalRepositoryIdentity(t *testing.T) {
 			name:    "bracketed IPv6",
 			remotes: []string{"https://[2001:0db8::1]:8443/owner/repo.git", "repoid://[2001:db8::1]:8443/owner/repo"},
 			want:    "repoid://[2001:db8::1]:8443/owner/repo",
+		},
+		{
+			name:    "bracketed IPv6 SCP",
+			remotes: []string{"git@[2001:0db8::1]:owner/repo.git", "repoid://[2001:db8::1]/owner/repo"},
+			want:    "repoid://[2001:db8::1]/owner/repo",
 		},
 		{
 			name:    "repository ending git",
