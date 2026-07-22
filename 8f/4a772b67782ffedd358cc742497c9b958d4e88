@@ -1,0 +1,78 @@
+internal/git/git.go
+  s_529a515e800196::t_77a317c68a9fbc 579-601
+internal/daemon/bootstrap_test.go
+  s_529a515e800196::t_fb65cc33ddf2dc 423-425
+  s_529a515e800196::t_29c4206f21ce53 1-10,12-14,17,20-74,153-155,210-215,217-224,247-264,266-271,285-292,294-308,310-343,478-488,490-492
+  s_529a515e800196::t_82746644496bb8 309
+  s_529a515e800196::t_0ba93fea969283 15
+  s_529a515e800196::t_383c67c7b0f1d1 156-209
+  s_529a515e800196::t_86589c1fc0c2e0 225-246
+  s_529a515e800196::t_b8e83139a9abdc 272-279,281-284
+  s_529a515e800196::t_8cf67affa036af 216,265,280,293,489
+  s_529a515e800196::t_0e60cc070e97d0 11,16,18-19,75-152
+  s_529a515e800196::t_e4a89c06e69ef0 344-422,426-477
+internal/config/config.go
+  s_529a515e800196::t_2623b50f022226 18-19,72-89,109,414-425,1026-1062
+  s_529a515e800196::t_9fdc0ffd43f411 958-960,1021
+  s_529a515e800196::t_f9f965e8cdcf4b 1063
+  s_529a515e800196::t_06c8cd0b18f968 6
+internal/db/schema.go
+  s_529a515e800196::t_0d7c95400f7027 20-26,150-156
+internal/db/bootstrap_test.go
+  s_529a515e800196::t_1d922053807582 1-64
+docs/src/content/docs/concepts/daemon.md
+  s_529a515e800196::t_3c36a9e6f5722a 107
+internal/db/run.go
+  s_529a515e800196::t_e12629f957c877 5,22-24,27-43,70,76-78,88-122,127-137,296-327
+  s_529a515e800196::t_3244b20e5c4f31 25-26
+  s_529a515e800196::t_4574853949180e 9,123-126
+  s_529a515e800196::t_0af31ba787c539 328
+internal/daemon/manager.go
+  s_529a515e800196::t_85d6eef289b241 205-208,211,213,215-217,454-456,459-463,465,468,471,473,475,478,480,482,484-486,488-510,719-723,728,741-756
+  s_529a515e800196::t_88800ba234ee60 214,740
+internal/config/bootstrap_test.go
+  s_529a515e800196::t_9b6a6471454d08 36-50
+  s_529a515e800196::t_6e889a8a87811f 1-35,51-78
+internal/repoidentity/identity.go
+  s_529a515e800196::t_dda1b5ab63a6c6 40,73-84
+  s_529a515e800196::t_8058ea266b424b 1-39,41-72,85-92
+internal/daemon/bootstrap.go
+  s_529a515e800196::t_de79b20bdcf9ea 26,28-34,36-38,96,105-108,110-112
+  s_529a515e800196::t_f984a5cc29e6cc 1-25,27,35,39-95,97-104,109,113-142,144-146,148-150,152
+  s_529a515e800196::t_d5387ee54d0721 143,147,151
+docs/src/content/docs/reference/pipeline-steps.md
+  s_529a515e800196::t_77cc4c6d221e4c 91-92
+AGENTS.md
+  s_529a515e800196::t_6ce5d18ce3d59e 108,112
+  s_529a515e800196::t_30cea8a463115d 109
+internal/git/git_showfile_test.go
+  s_529a515e800196::t_780a6d2ada80a5 44-56
+docs/src/content/docs/reference/global-config.md
+  s_529a515e800196::t_594146ae88546e 35-42,223-237,239-248
+  s_529a515e800196::t_c2fb5ffea62230 238
+  s_529a515e800196::t_4ffd669ef5a3a6 249
+docs/src/content/docs/reference/repo-config.md
+  s_529a515e800196::t_6019b10cf326ec 13,164-165
+internal/repoidentity/identity_test.go
+  s_529a515e800196::t_567f298ba59b94 15-16
+  s_529a515e800196::t_2925ab28ac6d14 1-14,17-48
+internal/db/db_test.go
+  s_529a515e800196::t_212097c81d7d70 46,98-99
+  s_529a515e800196::t_d972d02e0ab51b 100
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "8f4a772b67782ffedd358cc742497c9b958d4e88",
+  "prompts": {},
+  "sessions": {
+    "s_529a515e800196": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019f872d-0c23-7c21-9187-d37f6f3ba779",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
