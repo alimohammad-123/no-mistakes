@@ -15,6 +15,20 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
+var trustedGitExecutable, trustedGitExecutableErr = resolveTrustedGitExecutable()
+
+func resolveTrustedGitExecutable() (string, error) {
+	path, err := exec.LookPath("git")
+	if err != nil {
+		return "", fmt.Errorf("trusted git executable: %w", err)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve trusted git executable %q: %w", path, err)
+	}
+	return abs, nil
+}
+
 // EmptyTreeSHA is the well-known SHA of an empty tree in git.
 // Used as a base when there is no prior commit to diff against.
 const EmptyTreeSHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -34,10 +48,13 @@ func IsZeroSHA(sha string) bool {
 // and hardened CI inject that setting, so gate operations must never depend
 // on discovering a bare repo from the working directory (issue #362).
 func Run(ctx context.Context, dir string, args ...string) (string, error) {
+	if trustedGitExecutableErr != nil {
+		return "", trustedGitExecutableErr
+	}
 	if isBareGitDir(dir) {
 		args = append([]string{"--git-dir=" + dir}, args...)
 	}
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, trustedGitExecutable, args...)
 	cmd.Dir = dir
 	cmd.Env = NonInteractiveEnv(dir)
 	winproc.Harden(cmd)
@@ -375,10 +392,8 @@ func ValidateLocalBranchName(branch string) error {
 		return fmt.Errorf("invalid short branch name %q", branch)
 	}
 	ref := "refs/heads/" + branch
-	cmd := exec.Command("git", "check-ref-format", ref)
-	winproc.Harden(cmd)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("invalid branch name %q: %w: %s", branch, err, strings.TrimSpace(string(out)))
+	if _, err := Run(context.Background(), "", "check-ref-format", ref); err != nil {
+		return fmt.Errorf("invalid branch name %q: %w", branch, err)
 	}
 	return nil
 }

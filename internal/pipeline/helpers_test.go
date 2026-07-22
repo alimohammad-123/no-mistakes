@@ -244,6 +244,21 @@ func initGitRepo(t *testing.T, dir string) {
 	execGit(t, dir, "commit", "-m", "initial")
 }
 
+// initExecutorGitRepo creates the detached repository required by source-ref
+// binding and makes the run's frozen candidate match its HEAD.
+func initExecutorGitRepo(t *testing.T, database *db.DB, run *db.Run) string {
+	t.Helper()
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	headSHA := execGitOutput(t, dir, "rev-parse", "HEAD")
+	execGit(t, dir, "checkout", "--detach", headSHA)
+	run.HeadSHA = headSHA
+	if err := database.UpdateRunHeadSHA(run.ID, headSHA); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func execGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
@@ -252,6 +267,17 @@ func execGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
+}
+
+func execGitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func writeTestFile(t *testing.T, dir, name, content string) {

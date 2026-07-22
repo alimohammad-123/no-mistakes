@@ -133,6 +133,13 @@ func TestBindCandidateRefusesHeadMismatch(t *testing.T) {
 	}
 }
 
+func TestBindCandidateRejectsNonGitDirectory(t *testing.T) {
+	err := BindCandidate(context.Background(), t.TempDir(), "refs/heads/feature", strings.Repeat("0", 40))
+	if err == nil || !strings.Contains(err.Error(), "not a git repository") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func gitTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)

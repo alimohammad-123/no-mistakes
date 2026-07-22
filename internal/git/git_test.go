@@ -439,3 +439,29 @@ func TestValidateLocalBranchNameRejectsCheckoutShorthand(t *testing.T) {
 		t.Fatal("checkout shorthand was accepted as a canonical branch")
 	}
 }
+
+func TestRunFailsWhenTrustedGitIsUnavailable(t *testing.T) {
+	if os.Getenv("NO_MISTAKES_TEST_MISSING_TRUSTED_GIT") == "1" {
+		if _, err := Run(context.Background(), t.TempDir(), "rev-parse", "HEAD"); err == nil || !strings.Contains(err.Error(), "trusted git executable") {
+			t.Fatalf("Run error = %v", err)
+		}
+		return
+	}
+
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(testBinary, "-test.run=^TestRunFailsWhenTrustedGitIsUnavailable$")
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !strings.EqualFold(key, "PATH") && key != "NO_MISTAKES_TEST_MISSING_TRUSTED_GIT" {
+			env = append(env, entry)
+		}
+	}
+	cmd.Env = append(env, "PATH="+t.TempDir(), "NO_MISTAKES_TEST_MISSING_TRUSTED_GIT=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("missing trusted Git subprocess: %v\n%s", err, out)
+	}
+}

@@ -45,6 +45,30 @@ func TestTestStep_ConfiguredCommandSeesAuthoritativeSourceRef(t *testing.T) {
 	}
 }
 
+func TestTestStep_EmptyChildPathKeepsInfrastructureGitAndChildPathIsEmpty(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell assertion")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: `test -z "$PATH" && test "$NO_MISTAKES_SOURCE_REF" = "refs/heads/feature" && printf passed > child-path.txt`})
+	sctx.Env = []string{"PATH="}
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("configured command failed: %s", outcome.Findings)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "child-path.txt")); err != nil || string(data) != "passed" {
+		t.Fatalf("child PATH assertion = %q, err=%v", data, err)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); got != headSHA {
+		t.Fatalf("source ref = %s, want %s", got, headSHA)
+	}
+}
+
 func TestTestStep_RefusesCandidateMismatchBeforeConfiguredCommand(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)

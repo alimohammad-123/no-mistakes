@@ -125,6 +125,7 @@ func TestExecutor_AwaitingAgentMarkerSetOnGateClearedOnRespond(t *testing.T) {
 
 func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	database, p, run, repo := setupTest(t)
+	workDir := initExecutorGitRepo(t, database, run)
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +179,7 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	exec := NewExecutor(database, p, &config.Config{SessionReuse: true}, fake, []Step{step}, nil)
 	done := make(chan error, 1)
 	go func() {
-		done <- exec.Resume(context.Background(), run, repo, t.TempDir())
+		done <- exec.Resume(context.Background(), run, repo, workDir)
 	}()
 
 	deadline := time.Now().Add(5 * time.Second)
