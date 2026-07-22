@@ -32,6 +32,14 @@ agent_args_override:
     - -c
     - model_reasoning_effort="low"
 
+# Temporary first-policy adoption only. Omit during normal operation.
+bootstrap:
+  test:
+    - repository: repoid://github.com/owner/repo
+      base_branch: staging
+      command: go test ./...
+      policy_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
 ci_timeout: "168h"
 
 step_quiet_warning: "10m"
@@ -212,6 +220,37 @@ agent_args_override:
 
 For Codex, `service_tier` and `model_reasoning_effort` tune different things: `service_tier` selects the speed or priority lane, while `model_reasoning_effort` selects reasoning depth. no-mistakes reloads global config while setting up each run, so edits made before `no-mistakes axi run` apply to that run. For repeatable profiles, use separately initialized `NM_HOME` directories; each has its own `config.yaml` and no-mistakes state.
 
+### bootstrap.test
+
+Temporary, user-owned authorization for the Test command in a repository's first policy change. It is disabled when the list is empty or omitted.
+
+Repository bindings use versioned identity envelopes so stored identities cannot be reinterpreted as raw URL or SCP syntax. Transport-neutral identities use `repoid://authority/path`. Generic SSH identities use `repoid+ssh-abs://user@authority/path` for SSH URLs and `repoid+ssh-rel://user@authority/path` for SCP remotes, preserving username case and path semantics. Only GitHub aliases collapse to a transport-neutral identity. Hosts and ports are canonicalized, GitHub owner and repository paths are lowercase, and generic provider paths retain their case.
+
+Each entry requires all four fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `repository` | `string` | Canonical parent identity using `repoid://authority/path`, `repoid+ssh-abs://user@authority/path`, or `repoid+ssh-rel://user@authority/path` |
+| `base_branch` | `string` | Exact registered pipeline base |
+| `command` | `string` | Exact Test command that the submitted policy installs |
+| `policy_sha256` | `string` | 64 lowercase hex characters for SHA-256 of the complete submitted policy bytes |
+
+The daemon considers this path only after a fresh fetch and pinned-tree read prove that the pipeline base has no `.no-mistakes.yaml`. It then requires exactly one matching repository and base entry, requires the submitted policy's `commands.test` to equal `command`, and checks the digest over the committed file's complete bytes. Missing fields, malformed values, duplicate repository/base entries, mismatches, a missing submitted policy, and unreadable trust state fail closed. The feature branch supplies only digest and command-match evidence; no feature value supplies executable input or changes repository identity, base, or authorization.
+
+On success, the complete binding and command are frozen in the run record before execution. Recovery does not use later valid edits to `bootstrap.test` to change that snapshot. The global file must still remain well formed; malformed or partial bindings are rejected like any other invalid global configuration.
+
+When a matching binding exists and the freshly pinned base contains policy, the daemon records a durable retirement in user-owned local state for that canonical repository and base before proceeding. This retirement is one-way: future initial and recovered runs cannot bootstrap that repository/base even if the policy is later deleted or the binding remains. A persistence or retirement-state read failure stops safely without executing submitted commands. Other repositories and bases are unaffected, and the current base-owned policy remains authoritative.
+
+First adoption procedure:
+
+1. Register the intended base, for example with `no-mistakes init --base-branch staging`.
+2. Add and commit the complete `.no-mistakes.yaml` on the policy feature branch, including the intended `commands.test`.
+3. Compute the committed bytes with `git show HEAD:.no-mistakes.yaml | shasum -a 256` and add one complete binding to the user-owned global config. Derive the identity from the credential-free parent remote: HTTPS `https://host/group/repo.git` becomes `repoid://host/group/repo`, generic SSH URL `ssh://Alice@host/group/repo.git` becomes `repoid+ssh-abs://Alice@host/group/repo`, and generic SCP `Alice@host:group/repo.git` becomes `repoid+ssh-rel://Alice@host/group/repo`. GitHub HTTPS, SSH URL, and SCP aliases all use the transport-neutral `repoid://github.com/owner/repo` form.
+4. Start the policy branch's validation normally. Do not change the policy file or binding during that run.
+5. Remove the global binding as soon as the policy reaches the pipeline base. The daemon has already retired bootstrap permanently for that repository/base; removing the now-inert binding keeps the global config clear.
+
+This is not a global `commands.test` default and does not authorize Lint, Format, agent selection, or any other repo command. Do not put credentials or secrets in the command.
+
 ### ci_timeout
 
 How long the CI step monitors an open PR, including provider CI status and on GitHub, GitLab, or Azure DevOps PR mergeability, before giving up.
@@ -223,7 +262,7 @@ How long the CI step monitors an open PR, including provider CI status and on Gi
 
 Accepts any Go `time.ParseDuration` string: `30m`, `2h`, `4h30m`, etc.
 
-This is an idle timeout, not an absolute deadline: every time the base branch advances, the monitor re-arms it.
+This is an idle timeout, not an absolute deadline: every time the run's frozen pipeline base advances, the monitor re-arms it.
 So an actively-updated green PR keeps its monitor no matter how long it stays open.
 If it later develops an actual GitHub, GitLab, or Azure DevOps merge conflict, the CI auto-fix path rebases and re-pushes it, while a clean behind PR needs no command.
 A genuinely idle/abandoned PR still parks at an approval gate after the timeout elapses.

@@ -15,6 +15,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
@@ -74,9 +75,10 @@ func TestNeedsBranch(t *testing.T) {
 		state repoState
 		want  bool
 	}{
-		{"default branch", repoState{currentBranch: "main", defaultBranch: "main"}, true},
-		{"feature branch", repoState{currentBranch: "feat/x", defaultBranch: "main"}, false},
-		{"detached HEAD", repoState{currentBranch: "HEAD", defaultBranch: "main", detached: true}, true},
+		{"default branch", repoState{currentBranch: "main", defaultBranch: "main", baseBranch: "staging"}, true},
+		{"pipeline base", repoState{currentBranch: "staging", defaultBranch: "main", baseBranch: "staging"}, true},
+		{"feature branch", repoState{currentBranch: "feat/x", defaultBranch: "main", baseBranch: "staging"}, false},
+		{"detached HEAD", repoState{currentBranch: "HEAD", defaultBranch: "main", baseBranch: "staging", detached: true}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,6 +86,70 @@ func TestNeedsBranch(t *testing.T) {
 				t.Fatalf("needsBranch() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestWizardBranchRolePreservesExistingShape(t *testing.T) {
+	if got := wizardBranchRole("staging", "main", false); got != "feature" {
+		t.Fatalf("wizardBranchRole(staging) = %q, want feature", got)
+	}
+}
+
+func TestFeatureBranchStartPointUsesPipelineBaseFromEveryHeadState(t *testing.T) {
+	states := []repoState{
+		{currentBranch: "main", defaultBranch: "main", baseBranch: "staging"},
+		{currentBranch: "staging", defaultBranch: "main", baseBranch: "staging"},
+		{currentBranch: "feature/old", defaultBranch: "main", baseBranch: "staging"},
+		{currentBranch: "HEAD", defaultBranch: "main", baseBranch: "staging", detached: true},
+	}
+	for _, state := range states {
+		if got := state.featureBranchStartPoint(); got != "origin/staging" {
+			t.Fatalf("featureBranchStartPoint(%+v) = %q, want origin/staging", state, got)
+		}
+	}
+}
+
+func TestCreateFeatureBranchFetchesFreshPipelineBase(t *testing.T) {
+	ctx := context.Background()
+	origin := t.TempDir()
+	mustGit := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := gitpkg.Run(ctx, dir, args...)
+		if err != nil {
+			t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+		}
+		return strings.TrimSpace(out)
+	}
+	mustGit(origin, "init")
+	mustGit(origin, "config", "user.email", "test@example.com")
+	mustGit(origin, "config", "user.name", "Tester")
+	if err := os.WriteFile(filepath.Join(origin, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(origin, "add", ".")
+	mustGit(origin, "commit", "-m", "base")
+	mustGit(origin, "checkout", "-b", "staging")
+	if err := os.WriteFile(filepath.Join(origin, "staging.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(origin, "add", ".")
+	mustGit(origin, "commit", "-m", "old staging")
+
+	workDir := filepath.Join(t.TempDir(), "work")
+	mustGit(t.TempDir(), "clone", origin, workDir)
+	if err := os.WriteFile(filepath.Join(origin, "staging.txt"), []byte("fresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(origin, "add", ".")
+	mustGit(origin, "commit", "-m", "fresh staging")
+	freshBase := mustGit(origin, "rev-parse", "HEAD")
+
+	state := &repoState{workDir: workDir, currentBranch: "HEAD", defaultBranch: "main", baseBranch: "staging", detached: true}
+	if err := state.createFeatureBranch(ctx, "feature/fresh"); err != nil {
+		t.Fatalf("createFeatureBranch: %v", err)
+	}
+	if got := mustGit(workDir, "rev-parse", "HEAD"); got != freshBase {
+		t.Fatalf("feature HEAD = %q, want fresh pipeline base %q", got, freshBase)
 	}
 }
 

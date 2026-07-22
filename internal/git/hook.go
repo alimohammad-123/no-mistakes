@@ -107,6 +107,10 @@ func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
+func ShellSingleQuote(value string) string {
+	return shellSingleQuote(value)
+}
+
 func isManagedPostReceiveHook(content []byte) bool {
 	text := string(content)
 	return strings.Contains(text, "# no-mistakes post-receive hook") && strings.Contains(text, "daemon notify-push")

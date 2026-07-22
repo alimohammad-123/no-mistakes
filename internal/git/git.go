@@ -332,7 +332,7 @@ func IsDetachedHEAD(ctx context.Context, dir string) (bool, error) {
 	winproc.Harden(cmd)
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
-			// Exit 1 means HEAD is not a symbolic ref — detached.
+			// Exit 1 means HEAD is not a symbolic ref because it is detached.
 			if ee.ExitCode() == 1 {
 				return true, nil
 			}
@@ -361,6 +361,13 @@ func DefaultBranch(ctx context.Context, dir, remote string) string {
 		}
 	}
 	return "main"
+}
+
+func ValidatePortableBranchName(branch string) error {
+	if branch == "" || strings.TrimSpace(branch) != branch || strings.ContainsAny(branch, " \t\r\n;&|<>^()%!$`'\"") {
+		return fmt.Errorf("branch name contains command-unsafe characters")
+	}
+	return nil
 }
 
 // FetchRemoteBranch fetches a single branch into a remote-tracking ref.
@@ -529,7 +536,7 @@ func WorktreeRemove(ctx context.Context, repoDir, wtPath string) error {
 
 // ResolveRef returns the commit SHA that ref resolves to via
 // `git rev-parse --verify <ref>^{commit}`. Use it to pin an exact commit
-// (e.g. the default-branch tip just fetched) before reading a file from it,
+// (e.g. the pipeline-base tip just fetched) before reading a file from it,
 // so a shared-ref worktree cannot serve a stale remote-tracking ref. Returns
 // an error if the ref does not resolve to a commit.
 func ResolveRef(ctx context.Context, dir, ref string) (string, error) {
@@ -566,6 +573,29 @@ func ShowFile(ctx context.Context, dir, ref, path string) (string, error) {
 	out, err := Run(ctx, dir, "show", fmt.Sprintf("%s:%s", ref, path))
 	if err != nil {
 		return "", err
+	}
+	return out, nil
+}
+
+// ShowFileBytes returns a blob's exact bytes without Run's stdout trimming.
+// Callers use it when whitespace and final newlines are security-relevant, such
+// as digest-bound policy authorization.
+func ShowFileBytes(ctx context.Context, dir, ref, path string) ([]byte, error) {
+	args := []string{"show", fmt.Sprintf("%s:%s", ref, path)}
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = NonInteractiveEnv(dir)
+	winproc.Harden(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		return nil, fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
 	}
 	return out, nil
 }

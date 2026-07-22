@@ -119,7 +119,7 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 	}
 	if branch == "HEAD" {
 		return emitError(cmd, 1, "detached HEAD: check out a branch before validating",
-			"Run `git switch -c <branch>` to put your commits on a branch")
+			"Run `"+featureBranchStartCommand(env.repo.DefaultBranch, env.repo.EffectiveBaseBranch())+"` to start from the pipeline base")
 	}
 
 	headSHA, err := git.Run(ctx, ".", "rev-parse", "HEAD")
@@ -201,14 +201,21 @@ func activeRunInfoForHead(run *ipc.RunInfo, headSHA string) *ipc.RunInfo {
 
 // preflightGuard returns an emitter for the first unmet pre-flight condition
 // when starting a new run, or nil when the branch is ready to validate. It
-// mirrors the wizard's branch/commit hygiene as detect-and-guide: refuse the
-// default branch, and refuse an uncommitted working tree, each with the
-// command the agent should run.
+// mirrors the wizard's branch/commit hygiene as detect-and-guide: refuse both
+// policy branches and an uncommitted working tree, each with the command the
+// agent should run.
 func preflightGuard(ctx context.Context, env *axiEnv, branch string) func(*cobra.Command) error {
 	if env.repo.DefaultBranch != "" && branch == env.repo.DefaultBranch {
 		return func(cmd *cobra.Command) error {
-			return emitError(cmd, 1, fmt.Sprintf("refusing to validate %q: it is the default branch", branch),
-				"Put your changes on a feature branch: `git switch -c <branch>`, then re-run")
+			baseBranch := env.repo.EffectiveBaseBranch()
+			next := "Start the feature from the pipeline base: `" + featureBranchStartCommand(env.repo.DefaultBranch, baseBranch) + "`, then re-run"
+			return emitError(cmd, 1, fmt.Sprintf("refusing to validate %q: it is the repository default branch", branch), next)
+		}
+	}
+	if baseBranch := env.repo.EffectiveBaseBranch(); baseBranch != "" && branch == baseBranch {
+		return func(cmd *cobra.Command) error {
+			return emitError(cmd, 1, fmt.Sprintf("refusing to validate %q: it is the pipeline base", branch),
+				"Start the feature from the pipeline base: `"+featureBranchStartCommand(env.repo.DefaultBranch, baseBranch)+"`, then re-run")
 		}
 	}
 	dirty, err := git.HasUncommittedChanges(ctx, ".")

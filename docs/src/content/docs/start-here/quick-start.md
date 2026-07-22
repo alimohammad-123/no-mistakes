@@ -50,6 +50,14 @@ no-mistakes init --fork-url git@github.com:you/my-repo.git
 
 The gate will push validated branches to the fork while opening PRs against the parent.
 
+For a long-lived integration branch that differs from the provider default, register it explicitly:
+
+```sh
+no-mistakes init --base-branch staging
+```
+
+This leaves the provider default unchanged. Future runs use `staging` for trusted configuration, rebase and diff scope, PR targeting, and CI base monitoring. The branch is repository policy, not the current feature branch; protect it to the same standard as executable gate configuration. See [Repo Config](/no-mistakes/reference/repo-config/#base_branch) for persistence and precedence.
+
 ```
 $ no-mistakes init
   ✓ Gate initialized
@@ -57,6 +65,8 @@ $ no-mistakes init
     repo  /Users/you/src/my-repo
     gate  no-mistakes → /Users/you/.no-mistakes/repos/abc123def456.git
   remote  git@github.com:you/my-repo.git
+ default  main
+    base  main (trusted config source)
    skill  /no-mistakes installed for agents at user level
 
   Push through the gate with:
@@ -67,7 +77,7 @@ $ no-mistakes init
 Without fork routing, you can bypass the gate for a specific push with `git push origin <branch>`.
 With `--fork-url`, bypassing the gate means pushing to your fork URL yourself.
 
-You can safely re-run `no-mistakes init` later to refresh gate wiring or update the installed agent skill after an upgrade.
+You can safely re-run `no-mistakes init` later to refresh gate wiring or update the installed agent skill after an upgrade. A stored base override survives a plain refresh when the trusted config omits `base_branch`; use `--clear-base-branch` to return future runs to the detected default.
 If you rename or move the repo directory, re-run `no-mistakes init` from the new path to reattach the existing gate and keep its run history.
 Copied repos get their own fresh gate while the original path still exists.
 
@@ -80,6 +90,12 @@ git checkout -b feature/login-fix
 # do work, commit...
 git push no-mistakes
 ```
+
+If the configured pipeline base differs from the provider default, start the
+feature from the fetched base instead. For example, use
+`git fetch origin staging && git switch -c feature/login-fix origin/staging`.
+The setup wizard handles this automatically. See
+[Repo Config](/no-mistakes/reference/repo-config/#base_branch) for the policy.
 
 The push lands in the local bare repo, the hook notifies the daemon, and the daemon starts the pipeline in a disposable worktree.
 

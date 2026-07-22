@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -134,14 +135,60 @@ type repoState struct {
 	workDir       string
 	currentBranch string
 	defaultBranch string
+	baseBranch    string
 	detached      bool
 	dirty         bool
 }
 
-// needsBranch reports whether the user has no feature branch to work on —
-// either they're on the default branch, or HEAD is detached.
+// needsBranch reports whether the user has no feature branch to work on:
+// either they're on a protected policy branch, or HEAD is detached.
 func (s *repoState) needsBranch() bool {
-	return s.detached || s.currentBranch == s.defaultBranch
+	return s.detached || s.currentBranch == s.defaultBranch || s.currentBranch == s.baseBranch
+}
+
+// featureBranchStartPoint returns an explicit base whenever pipeline policy
+// differs from the provider default.
+func (s *repoState) featureBranchStartPoint() string {
+	if s == nil || s.baseBranch == "" || s.baseBranch == s.defaultBranch {
+		return ""
+	}
+	return "origin/" + s.baseBranch
+}
+
+func (s *repoState) createFeatureBranch(ctx context.Context, name string) error {
+	startPoint := s.featureBranchStartPoint()
+	if startPoint == "" {
+		return git.CreateBranch(ctx, s.workDir, name)
+	}
+	if err := git.FetchRemoteBranch(ctx, s.workDir, "origin", s.baseBranch); err != nil {
+		return fmt.Errorf("fetch pipeline base %s: %w", s.baseBranch, err)
+	}
+	if _, err := git.Run(ctx, s.workDir, "checkout", "-b", name, startPoint); err != nil {
+		return fmt.Errorf("create branch %s from pipeline base %s: %w", name, s.baseBranch, err)
+	}
+	return nil
+}
+
+func featureBranchStartCommand(defaultBranch, baseBranch string) string {
+	command, err := featureBranchStartCommandForOS(runtime.GOOS, defaultBranch, baseBranch)
+	if err != nil {
+		return "no-mistakes init --clear-base-branch"
+	}
+	return command
+}
+
+func featureBranchStartCommandForOS(goos, defaultBranch, baseBranch string) (string, error) {
+	if baseBranch != "" && baseBranch != defaultBranch {
+		if err := git.ValidatePortableBranchName(baseBranch); err != nil {
+			return "", err
+		}
+		quote := git.ShellSingleQuote
+		if goos == "windows" {
+			quote = func(value string) string { return `"` + value + `"` }
+		}
+		return fmt.Sprintf("git fetch origin %s && git switch -c <branch> %s", quote(baseBranch), quote("origin/"+baseBranch)), nil
+	}
+	return "git switch -c <branch>", nil
 }
 
 // shouldRouteToWizard reports whether the active-run check should be
@@ -178,10 +225,15 @@ func detectRepoState(ctx context.Context, repo *db.Repo) (*repoState, error) {
 	if defaultBranch == "" {
 		defaultBranch = git.DefaultBranch(ctx, workDir, "origin")
 	}
+	baseBranch := repo.EffectiveBaseBranch()
+	if baseBranch == "" {
+		baseBranch = defaultBranch
+	}
 	return &repoState{
 		workDir:       workDir,
 		currentBranch: currentBranch,
 		defaultBranch: defaultBranch,
+		baseBranch:    baseBranch,
 		detached:      detached,
 		dirty:         dirty,
 	}, nil
@@ -226,14 +278,14 @@ func runWizardWithMode(ctx context.Context, p *paths.Paths, state *repoState, sk
 		Context:       ctx,
 		RepoDir:       workDir,
 		CurrentBranch: state.currentBranch,
-		DefaultBranch: state.defaultBranch,
+		DefaultBranch: state.baseBranch,
 		AutoAdvance:   auto && visible,
 		NeedsBranch:   state.needsBranch(),
 		IsDirty:       state.dirty,
 		GateRemote:    gate.RemoteName,
 
 		CreateBranch: func(ctx context.Context, name string) error {
-			return git.CreateBranch(ctx, workDir, name)
+			return state.createFeatureBranch(ctx, name)
 		},
 		CommitAll: func(ctx context.Context, msg string) error {
 			return git.CommitAll(ctx, workDir, msg)

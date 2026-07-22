@@ -38,10 +38,15 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if err := d.sql.QueryRow("SELECT count(*) FROM step_results").Scan(&count); err != nil {
 		t.Fatalf("step_results table missing: %v", err)
 	}
-	if !hasColumn(t, d, "repos", "fork_url") {
-		t.Fatal("repos.fork_url column missing from fresh schema")
+	if err := d.sql.QueryRow("SELECT count(*) FROM bootstrap_test_retirements").Scan(&count); err != nil {
+		t.Fatalf("bootstrap_test_retirements table missing: %v", err)
 	}
-	for _, column := range []string{"submitted_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "pr_state", "pr_state_observed_at", "ci_ready_at", "custody_returned_at"} {
+	for _, column := range []string{"fork_url", "base_branch"} {
+		if !hasColumn(t, d, "repos", column) {
+			t.Fatalf("repos.%s column missing from fresh schema", column)
+		}
+	}
+	for _, column := range []string{"base_branch", "bootstrap_test_repository", "bootstrap_test_base_branch", "bootstrap_test_command", "bootstrap_test_policy_sha256", "submitted_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "pr_state", "pr_state_observed_at", "ci_ready_at", "custody_returned_at"} {
 		if !hasColumn(t, d, "runs", column) {
 			t.Fatalf("runs.%s column missing from fresh schema", column)
 		}
@@ -77,6 +82,15 @@ func TestOpenMigratesRunSyncProvenanceWithoutBackfillingMutableHead(t *testing.T
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Close() })
+	if retired, err := d.IsBootstrapTestRetired("repoid://github.com/owner/repo", "main"); err != nil || retired {
+		t.Fatalf("legacy migration inferred retirement: retired=%v err=%v", retired, err)
+	}
+	if err := d.RetireBootstrapTest("repoid://github.com/owner/repo", "main"); err != nil {
+		t.Fatalf("legacy migration did not create retirement storage: %v", err)
+	}
+	if retired, err := d.IsBootstrapTestRetired("repoid://github.com/owner/repo", "main"); err != nil || !retired {
+		t.Fatalf("legacy retirement round trip = %v, err=%v", retired, err)
+	}
 	run, err := d.GetRun("run-1")
 	if err != nil {
 		t.Fatal(err)
@@ -89,6 +103,19 @@ func TestOpenMigratesRunSyncProvenanceWithoutBackfillingMutableHead(t *testing.T
 	}
 	if run.CustodyReturnedAt != nil {
 		t.Fatalf("legacy run gained a custody-return stamp: %#v", run)
+	}
+	if run.BaseBranch != "" {
+		t.Fatalf("legacy run gained a base snapshot: %#v", run)
+	}
+	if auth, err := run.FrozenBootstrapTestAuthorization(); err != nil || auth != nil {
+		t.Fatalf("legacy run gained bootstrap authorization: auth=%+v err=%v", auth, err)
+	}
+	repo, err := d.GetRepo("repo-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo == nil || repo.BaseBranch != "" || run.EffectiveBaseBranch(repo) != "main" {
+		t.Fatalf("legacy base compatibility = repo %#v run %#v", repo, run)
 	}
 }
 
@@ -204,6 +231,9 @@ func TestOpenMigratesReposForkURLColumn(t *testing.T) {
 	}
 	if repo.ForkURL != "" {
 		t.Fatalf("fork url = %q, want empty", repo.ForkURL)
+	}
+	if repo.BaseBranch != "" || repo.EffectiveBaseBranch() != "main" {
+		t.Fatalf("migrated base = %q effective %q, want empty/main", repo.BaseBranch, repo.EffectiveBaseBranch())
 	}
 	updated, err := d.UpdateRepoForkURL(repo.ID, "git@github.com:fork/repo.git")
 	if err != nil {

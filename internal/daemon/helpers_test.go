@@ -39,11 +39,20 @@ func TestMain(m *testing.M) {
 	if os.Getenv("NM_HOOK_HELPER") == "1" {
 		os.Exit(0)
 	}
+	configDir, err := os.MkdirTemp("", "daemon-git-config-")
+	if err != nil {
+		panic(err)
+	}
+	_ = os.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(configDir, "gitconfig"))
+	_ = os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	_ = os.Setenv("GIT_AI_SKIP_ALL_HOOKS", "1")
 	// Agent harnesses inject git config (e.g. safe.bareRepository=explicit)
 	// via GIT_CONFIG_COUNT/KEY_n/VALUE_n; tests that need it re-set it with
 	// t.Setenv (issue #362).
 	os.Unsetenv("GIT_CONFIG_COUNT")
-	os.Exit(m.Run())
+	code := m.Run()
+	_ = os.RemoveAll(configDir)
+	os.Exit(code)
 }
 
 // startTestDaemon starts RunWithResources in a goroutine with a temp root.
@@ -239,9 +248,10 @@ func setupTestGitRepo(t *testing.T, p *paths.Paths, d *db.DB, repoID string) (*d
 	// Push from work to bare so it has refs.
 	gitCmd(t, workDir, "remote", "add", "gate", bareDir)
 	gitCmd(t, workDir, "push", "gate", "HEAD:refs/heads/main")
+	gitCmd(t, workDir, "push", "gate", "HEAD:refs/heads/feature/test")
 
 	// Point the gate bare repo's origin at itself so a run worktree can fetch
-	// and resolve the trusted default branch (as a real init-configured gate
+	// and resolve the trusted pipeline base (as a real init-configured gate
 	// does). Without this the trusted-config fetch fails, which now aborts the
 	// run (the disable_project_settings security boundary).
 	gitCmd(t, bareDir, "remote", "add", "origin", bareDir)

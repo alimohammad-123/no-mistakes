@@ -178,7 +178,7 @@ func defaultRunIntent(ctx context.Context, sctx *pipeline.StepContext) (*intent.
 		gitWorkDir = repo.WorkingPath
 	}
 
-	resolvedBaseSHA := resolveIntentBaseSHA(ctx, gitWorkDir, run.BaseSHA, repo.DefaultBranch)
+	resolvedBaseSHA := resolveIntentBaseSHA(ctx, gitWorkDir, sctx.BaseBranch())
 	diffFiles, err := diffFilesForIntentMatching(ctx, gitWorkDir, resolvedBaseSHA, run.HeadSHA)
 	if err != nil {
 		return nil, err
@@ -188,8 +188,8 @@ func defaultRunIntent(ctx context.Context, sctx *pipeline.StepContext) (*intent.
 	}
 
 	baseTime, err := git.CommitTime(ctx, gitWorkDir, resolvedBaseSHA)
-	if err != nil || git.IsZeroSHA(run.BaseSHA) {
-		baseTime = time.Now().Add(-7 * 24 * time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("resolve intent base time: %w", err)
 	}
 	headTime, err := git.CommitTime(ctx, gitWorkDir, run.HeadSHA)
 	if err != nil {
@@ -251,26 +251,11 @@ func splitDiffNameOnly(out string) []string {
 	return files
 }
 
-// resolveIntentBaseSHA returns a usable base SHA for diff'ing against head.
-// Prefers an explicit run.BaseSHA when reachable in the worktree, but falls
-// back to merge-base against the default branch when the SHA is the zero ref
-// (new branch push) or has been orphaned by a force push that rewrote the
-// prior remote tip away. Final fallback is git's empty-tree SHA so the diff
-// always succeeds.
-func resolveIntentBaseSHA(ctx context.Context, workDir, baseSHA, defaultBranch string) string {
-	if !git.IsZeroSHA(baseSHA) && commitReachable(ctx, workDir, baseSHA) {
-		return baseSHA
-	}
-	if mb := mergeBaseWithDefaultBranch(ctx, workDir, defaultBranch); mb != "" {
+// resolveIntentBaseSHA returns the full branch base for intent matching.
+// Final fallback is git's empty-tree SHA so the diff always succeeds.
+func resolveIntentBaseSHA(ctx context.Context, workDir, baseBranch string) string {
+	if mb := mergeBaseWithPipelineBase(ctx, workDir, baseBranch); mb != "" {
 		return mb
 	}
 	return git.EmptyTreeSHA
-}
-
-func commitReachable(ctx context.Context, workDir, sha string) bool {
-	if strings.TrimSpace(sha) == "" {
-		return false
-	}
-	_, err := git.Run(ctx, workDir, "cat-file", "-e", sha+"^{commit}")
-	return err == nil
 }

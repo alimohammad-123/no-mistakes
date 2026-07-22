@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,7 +43,9 @@ func initIntentRepo(t *testing.T) (repoDir, fakeHome, base, head string) {
 	}
 	gitCmd(t, repoDir, "add", ".")
 	gitCmd(t, repoDir, "commit", "-m", "base")
+	gitCmd(t, repoDir, "branch", "-M", "main")
 	base = gitCmd(t, repoDir, "rev-parse", "HEAD")
+	gitCmd(t, repoDir, "checkout", "-b", "feature")
 	if err := os.WriteFile(filepath.Join(repoDir, "internal_foo.go"), []byte("package foo\nfunc Bar() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +86,26 @@ func withFakeHome(t *testing.T, fakeHome string) {
 	t.Helper()
 	t.Setenv("HOME", fakeHome)
 	t.Setenv("USERPROFILE", fakeHome)
+}
+
+func gitCmdAt(t *testing.T, dir string, when time.Time, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	date := when.UTC().Format(time.RFC3339)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test",
+		"GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test",
+		"GIT_COMMITTER_EMAIL=test@test.com",
+		"GIT_AUTHOR_DATE="+date,
+		"GIT_COMMITTER_DATE="+date,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func openIntentTestDB(t *testing.T) *db.DB {
@@ -210,7 +233,9 @@ func TestIntentStep_Integration_DeletedFilesDoNotDiluteIntentMatch(t *testing.T)
 	}
 	gitCmd(t, repoDir, "add", ".")
 	gitCmd(t, repoDir, "commit", "-m", "base")
+	gitCmd(t, repoDir, "branch", "-M", "main")
 	base := gitCmd(t, repoDir, "rev-parse", "HEAD")
+	gitCmd(t, repoDir, "checkout", "-b", "feature")
 
 	for i := 0; i < 40; i++ {
 		if err := os.Remove(filepath.Join(repoDir, fmt.Sprintf("obsolete_%02d.go", i))); err != nil {
@@ -266,7 +291,7 @@ func TestIntentStep_Integration_ZeroBaseSHA_NewBranchPush(t *testing.T) {
 	repoDir, fakeHome, base, _ := initIntentRepo(t)
 	withFakeHome(t, fakeHome)
 
-	gitCmd(t, repoDir, "checkout", "-b", "feature", base)
+	gitCmd(t, repoDir, "checkout", "-B", "feature", base)
 	if err := os.WriteFile(filepath.Join(repoDir, "internal_foo.go"), []byte("package foo\nfunc Bar() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -295,9 +320,114 @@ func TestIntentStep_Integration_ZeroBaseSHA_NewBranchPush(t *testing.T) {
 	}
 }
 
+func TestIntentStep_Integration_ZeroBaseUsesOldFeatureSessionNotRecentUnrelated(t *testing.T) {
+	repoDir := t.TempDir()
+	gitCmd(t, repoDir, "init")
+	gitCmd(t, repoDir, "config", "user.email", "test@example.com")
+	gitCmd(t, repoDir, "config", "user.name", "Tester")
+	headTime := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	baseTime := headTime.Add(-60 * 24 * time.Hour)
+	oldSessionTime := baseTime.Add(24 * time.Hour)
+	recentSessionTime := headTime.Add(-30 * time.Minute)
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repoDir, "add", ".")
+	gitCmdAt(t, repoDir, baseTime, "commit", "-m", "base")
+	gitCmd(t, repoDir, "branch", "-M", "main")
+	gitCmd(t, repoDir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repoDir, "feature.go"), []byte("package feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repoDir, "add", ".")
+	gitCmdAt(t, repoDir, headTime, "commit", "-m", "feature")
+	head := gitCmd(t, repoDir, "rev-parse", "HEAD")
+
+	fakeHome := t.TempDir()
+	claudeDir := filepath.Join(fakeHome, ".claude", "projects", testClaudeProjectDirName(repoDir))
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTranscript := func(name, request, file string, when time.Time) {
+		t.Helper()
+		transcript := `{"type":"user","cwd":` + testJSONString(t, repoDir) + `,"timestamp":` + testJSONString(t, when.Format(time.RFC3339Nano)) + `,"uuid":"u1","sessionId":` + testJSONString(t, name) + `,"message":{"role":"user","content":` + testJSONString(t, request) + `}}
+{"type":"assistant","cwd":` + testJSONString(t, repoDir) + `,"timestamp":` + testJSONString(t, when.Add(time.Minute).Format(time.RFC3339Nano)) + `,"uuid":"u2","sessionId":` + testJSONString(t, name) + `,"message":{"role":"assistant","content":[{"type":"tool_use","name":"Edit","input":{"file_path":` + testJSONString(t, filepath.Join(repoDir, file)) + `}}]}}
+`
+		path := filepath.Join(claudeDir, name+".jsonl")
+		if err := os.WriteFile(path, []byte(transcript), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTranscript("old-feature", "add the feature package", "feature.go", oldSessionTime)
+	writeTranscript("recent-unrelated", "change unrelated code", "unrelated.go", recentSessionTime)
+	withFakeHome(t, fakeHome)
+
+	const zeroSHA = "0000000000000000000000000000000000000000"
+	disabledReaders := map[string]bool{"codex": true, "opencode": true, "rovodev": true, "pi": true, "copilot": true}
+	cfg := &config.Config{Intent: config.Intent{Enabled: true, Threshold: 0.1, DisabledReaders: disabledReaders}}
+	sctx := newIntentIntegrationContext(t, repoDir, zeroSHA, head, cfg)
+
+	outcome, err := (&IntentStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if outcome == nil || outcome.Skipped {
+		t.Fatalf("expected old feature session to match, got %+v", outcome)
+	}
+	got, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IntentSessionID == nil || *got.IntentSessionID != "old-feature" {
+		t.Fatalf("intent session = %v, want old-feature", got.IntentSessionID)
+	}
+}
+
+func TestResolveIntentBaseSHAUsesPipelineBaseAfterSubsequentPush(t *testing.T) {
+	repoDir := t.TempDir()
+	gitCmd(t, repoDir, "init")
+	gitCmd(t, repoDir, "config", "user.email", "test@example.com")
+	gitCmd(t, repoDir, "config", "user.name", "Tester")
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repoDir, "add", ".")
+	gitCmd(t, repoDir, "commit", "-m", "base")
+	gitCmd(t, repoDir, "checkout", "-b", "staging")
+	if err := os.WriteFile(filepath.Join(repoDir, "staging.txt"), []byte("staging\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repoDir, "add", ".")
+	gitCmd(t, repoDir, "commit", "-m", "staging")
+	pipelineBase := gitCmd(t, repoDir, "rev-parse", "HEAD")
+	gitCmd(t, repoDir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repoDir, "first.txt"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repoDir, "add", ".")
+	gitCmd(t, repoDir, "commit", "-m", "first push")
+	previousFeatureTip := gitCmd(t, repoDir, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(repoDir, "second.txt"), []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repoDir, "add", ".")
+	gitCmd(t, repoDir, "commit", "-m", "second push")
+
+	got := resolveIntentBaseSHA(context.Background(), repoDir, "staging")
+	if got != pipelineBase {
+		t.Fatalf("resolveIntentBaseSHA = %q, want pipeline base %q", got, pipelineBase)
+	}
+	if got == previousFeatureTip {
+		t.Fatalf("resolveIntentBaseSHA reused previous feature tip %q", got)
+	}
+}
+
 func TestIntentStep_Integration_UsesPipelineWorkDirForGitState(t *testing.T) {
 	originRepo := t.TempDir()
-	gitCmd(t, originRepo, "init")
+	gitCmd(t, originRepo, "init", "-b", "main")
 	gitCmd(t, originRepo, "config", "user.email", "test@example.com")
 	gitCmd(t, originRepo, "config", "user.name", "Tester")
 	if err := os.WriteFile(filepath.Join(originRepo, "internal_foo.go"), []byte("package foo\n"), 0o644); err != nil {
@@ -325,6 +455,7 @@ func TestIntentStep_Integration_UsesPipelineWorkDirForGitState(t *testing.T) {
 	gitCmd(t, t.TempDir(), "clone", originRepo, pipelineWorkDir)
 	gitCmd(t, pipelineWorkDir, "config", "user.email", "test@example.com")
 	gitCmd(t, pipelineWorkDir, "config", "user.name", "Tester")
+	gitCmd(t, pipelineWorkDir, "checkout", "-b", "feature")
 	if err := os.WriteFile(filepath.Join(pipelineWorkDir, "internal_foo.go"), []byte("package foo\nfunc Bar() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -355,17 +486,15 @@ func TestIntentStep_Integration_UsesPipelineWorkDirForGitState(t *testing.T) {
 
 // After a force push, Run.BaseSHA is the prior remote tip of the branch, which
 // may be unreachable in the worktree (rewritten away or never fetched). The
-// step must fall back to merge-base against the default branch instead of
+// step must fall back to merge-base against the frozen pipeline base instead of
 // trusting the orphaned SHA, otherwise `git diff <orphaned>..<head>` fails
 // with "Invalid revision range" and intent silently skips.
 func TestIntentStep_Integration_ForcePushedOrphanedBaseSHA(t *testing.T) {
 	repoDir, fakeHome, _, _ := initIntentRepo(t)
 	withFakeHome(t, fakeHome)
 
-	// Branch off main and add a feature commit that touches internal_foo.go.
-	// initIntentRepo's main HEAD already contains func Bar(), so vary the
-	// content here to produce a real diff between feature and main.
-	gitCmd(t, repoDir, "checkout", "-b", "feature")
+	// Add another feature commit that touches internal_foo.go. Vary the
+	// existing feature content to preserve a real diff from main.
 	if err := os.WriteFile(filepath.Join(repoDir, "internal_foo.go"), []byte("package foo\nfunc Bar() { /* feature */ }\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

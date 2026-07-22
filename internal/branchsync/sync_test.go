@@ -789,6 +789,12 @@ func configureIdentity(t *testing.T, dir string) {
 
 func mustRun(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	for i, arg := range args {
+		if arg == "clone" {
+			args = append(append(append([]string(nil), args[:i+1]...), "--no-hardlinks"), args[i+1:]...)
+			break
+		}
+	}
 	out, err := gitpkg.Run(context.Background(), dir, args...)
 	if err != nil {
 		t.Fatalf("git %s: %v", strings.Join(args, " "), err)

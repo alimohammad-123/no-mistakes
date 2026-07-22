@@ -1,0 +1,379 @@
+// Package repoidentity derives a credential-free, canonical repository identity
+// from Git remote URLs. The identity is suitable for exact local authorization
+// checks, not for network access.
+package repoidentity
+
+import (
+	"fmt"
+	"net"
+	"net/url"
+	"strconv"
+	"strings"
+	"unicode"
+)
+
+const (
+	envelopePrefix    = "repoid://"
+	sshRelativePrefix = "repoid+ssh-rel://"
+	sshAbsolutePrefix = "repoid+ssh-abs://"
+)
+
+// Canonical returns a versioned repository identity for a raw HTTP(S), SSH URL,
+// user-qualified scp-style SSH remote, or an already-canonical identity.
+func Canonical(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", fmt.Errorf("repository identity is empty")
+	}
+	if strings.HasPrefix(value, envelopePrefix) || strings.HasPrefix(value, sshRelativePrefix) || strings.HasPrefix(value, sshAbsolutePrefix) {
+		return canonicalEnvelope(value)
+	}
+	if strings.Contains(value, "://") {
+		return canonicalURL(value)
+	}
+	return canonicalSCP(value)
+}
+
+func canonicalEnvelope(value string) (string, error) {
+	if hasEscapedUserinfo(value) {
+		return "", fmt.Errorf("repository identity envelope is invalid")
+	}
+	u, err := url.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("parse repository identity: %w", err)
+	}
+	if u.Opaque != "" || u.Host == "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", fmt.Errorf("repository identity envelope is invalid")
+	}
+	if u.RawPath != "" || strings.Contains(u.EscapedPath(), "%") {
+		return "", fmt.Errorf("repository identity path must not use percent escapes")
+	}
+	authority, err := canonicalAuthority(u.Host, "")
+	if err != nil {
+		return "", err
+	}
+	github := githubAuthority(authority)
+	repoPath, err := canonicalPath(strings.TrimPrefix(u.Path, "/"), false, github)
+	if err != nil {
+		return "", err
+	}
+	prefix := envelopePrefix
+	user := ""
+	switch u.Scheme {
+	case "repoid":
+		if u.User != nil {
+			return "", fmt.Errorf("repository identity envelope is invalid")
+		}
+	case "repoid+ssh-rel":
+		prefix = sshRelativePrefix
+		user, err = canonicalSSHUser(u.User)
+	case "repoid+ssh-abs":
+		prefix = sshAbsolutePrefix
+		user, err = canonicalSSHUser(u.User)
+	default:
+		return "", fmt.Errorf("repository identity envelope is invalid")
+	}
+	if err != nil || github && prefix != envelopePrefix {
+		return "", fmt.Errorf("repository identity envelope is invalid")
+	}
+	identity := prefix
+	if user != "" {
+		identity += user + "@"
+	}
+	identity += authority + "/" + repoPath
+	if identity != value {
+		return "", fmt.Errorf("repository identity envelope is not canonical")
+	}
+	return identity, nil
+}
+
+func canonicalURL(value string) (string, error) {
+	if hasEscapedUserinfo(value) {
+		return "", fmt.Errorf("repository URL has invalid user information")
+	}
+	u, err := url.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("parse repository URL: %w", err)
+	}
+	if u.Opaque != "" || u.Host == "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", fmt.Errorf("repository URL must name one unambiguous remote")
+	}
+	if u.RawPath != "" || strings.Contains(u.EscapedPath(), "%") {
+		return "", fmt.Errorf("repository path must not use percent escapes")
+	}
+	defaultPort := ""
+	ssh := false
+	sshUser := ""
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		defaultPort = "443"
+		if u.User != nil {
+			return "", fmt.Errorf("repository URL must not contain credentials")
+		}
+	case "http":
+		defaultPort = "80"
+		if u.User != nil {
+			return "", fmt.Errorf("repository URL must not contain credentials")
+		}
+	case "ssh":
+		ssh = true
+		defaultPort = "22"
+	default:
+		return "", fmt.Errorf("repository URL scheme %q is not supported", u.Scheme)
+	}
+	if ssh && u.User != nil {
+		sshUser, err = canonicalSSHUser(u.User)
+		if err != nil {
+			return "", err
+		}
+	}
+	authority, err := canonicalAuthority(u.Host, defaultPort)
+	if err != nil {
+		return "", err
+	}
+	github := githubAuthority(authority)
+	repoPath, err := canonicalPath(strings.TrimPrefix(u.Path, "/"), true, github)
+	if err != nil {
+		return "", err
+	}
+	if !ssh || github {
+		return envelopePrefix + authority + "/" + repoPath, nil
+	}
+	if sshUser == "" {
+		return "", fmt.Errorf("repository SSH URL requires an explicit user")
+	}
+	return sshAbsolutePrefix + sshUser + "@" + authority + "/" + repoPath, nil
+}
+
+func canonicalSCP(value string) (string, error) {
+	if strings.Count(value, "@") != 1 {
+		return "", fmt.Errorf("repository remote must be an explicit URL or user-qualified SCP remote")
+	}
+	at := strings.IndexByte(value, '@')
+	if at <= 0 || at == len(value)-1 {
+		return "", fmt.Errorf("repository SSH authority is invalid")
+	}
+	authorityStart := at + 1
+	separator := -1
+	if value[authorityStart] == '[' {
+		close := strings.IndexByte(value[authorityStart:], ']')
+		if close < 0 {
+			return "", fmt.Errorf("repository SSH authority is invalid")
+		}
+		separator = authorityStart + close + 1
+		if separator >= len(value) || value[separator] != ':' {
+			return "", fmt.Errorf("repository SSH authority is invalid")
+		}
+	} else if offset := strings.IndexByte(value[authorityStart:], ':'); offset >= 0 {
+		separator = authorityStart + offset
+	}
+	if separator < 0 || separator == len(value)-1 {
+		return "", fmt.Errorf("repository SSH authority is invalid")
+	}
+	user := value[:at]
+	if err := validateSSHUsername(user); err != nil {
+		return "", err
+	}
+	authority, err := canonicalAuthority(value[authorityStart:separator], "")
+	if err != nil {
+		return "", err
+	}
+	repoPath := value[separator+1:]
+	github := githubAuthority(authority)
+	repoPath, err = canonicalPath(repoPath, true, github)
+	if err != nil {
+		return "", err
+	}
+	if github {
+		return envelopePrefix + authority + "/" + repoPath, nil
+	}
+	return sshRelativePrefix + user + "@" + authority + "/" + repoPath, nil
+}
+
+func canonicalSSHUser(info *url.Userinfo) (string, error) {
+	if info == nil {
+		return "", fmt.Errorf("repository SSH URL requires an explicit user")
+	}
+	if _, hasPassword := info.Password(); hasPassword || strings.Contains(info.String(), "%") {
+		return "", fmt.Errorf("repository SSH URL has invalid user information")
+	}
+	user := info.Username()
+	if err := validateSSHUsername(user); err != nil {
+		return "", err
+	}
+	return user, nil
+}
+
+func validateSSHUsername(user string) error {
+	if user == "" {
+		return fmt.Errorf("repository SSH URL has invalid user information")
+	}
+	for _, char := range user {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '.' || char == '_' || char == '-' {
+			continue
+		}
+		return fmt.Errorf("repository SSH URL has invalid user information")
+	}
+	return nil
+}
+
+func hasEscapedUserinfo(value string) bool {
+	scheme := strings.Index(value, "://")
+	if scheme < 0 {
+		return false
+	}
+	authority := value[scheme+3:]
+	if end := strings.IndexAny(authority, "/?#"); end >= 0 {
+		authority = authority[:end]
+	}
+	at := strings.LastIndexByte(authority, '@')
+	return at >= 0 && strings.Contains(authority[:at], "%")
+}
+
+func canonicalPath(repoPath string, stripTransportSuffix, lowercase bool) (string, error) {
+	if repoPath == "" || strings.HasPrefix(repoPath, "/") || strings.HasSuffix(repoPath, "/") || strings.Contains(repoPath, "//") || strings.ContainsAny(repoPath, `\%?#@`) {
+		return "", fmt.Errorf("repository path is not canonical")
+	}
+	if lowercase {
+		repoPath = strings.ToLower(repoPath)
+	}
+	if stripTransportSuffix {
+		repoPath = strings.TrimSuffix(repoPath, ".git")
+	}
+	parts := strings.Split(repoPath, "/")
+	if len(parts) < 2 {
+		return "", fmt.Errorf("repository path must include namespace and name")
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." || strings.IndexFunc(part, unicode.IsSpace) >= 0 {
+			return "", fmt.Errorf("repository path is not canonical")
+		}
+	}
+	return repoPath, nil
+}
+
+func githubAuthority(authority string) bool {
+	host := authority
+	if strings.HasPrefix(authority, "[") {
+		close := strings.IndexByte(authority, ']')
+		if close >= 0 {
+			host = authority[1:close]
+		}
+	} else if strings.Contains(authority, ":") {
+		if parsed, _, err := net.SplitHostPort(authority); err == nil {
+			host = parsed
+		}
+	}
+	return host == "github.com"
+}
+
+func canonicalAuthority(authority, defaultPort string) (string, error) {
+	if authority == "" || strings.ContainsAny(authority, `/\@?#`) || strings.IndexFunc(authority, unicode.IsSpace) >= 0 {
+		return "", fmt.Errorf("repository host is not canonical")
+	}
+
+	hostname := authority
+	port := ""
+	if strings.HasPrefix(authority, "[") {
+		var err error
+		hostname, port, err = splitBracketedAuthority(authority)
+		if err != nil {
+			return "", err
+		}
+		if ip := net.ParseIP(hostname); ip == nil || !strings.Contains(hostname, ":") {
+			return "", fmt.Errorf("repository bracketed host must be IPv6")
+		}
+	} else if strings.Contains(authority, ":") {
+		var err error
+		hostname, port, err = net.SplitHostPort(authority)
+		if err != nil || port == "" {
+			return "", fmt.Errorf("repository host/port is not canonical")
+		}
+	}
+
+	hostname, err := canonicalHostname(hostname)
+	if err != nil {
+		return "", err
+	}
+	if port != "" {
+		if !isDecimal(port) || len(port) > 1 && port[0] == '0' {
+			return "", fmt.Errorf("repository port is not canonical")
+		}
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return "", fmt.Errorf("repository port is invalid")
+		}
+		if defaultPort != "" && port == defaultPort {
+			port = ""
+		}
+	}
+
+	if strings.Contains(hostname, ":") {
+		if port == "" {
+			return "[" + hostname + "]", nil
+		}
+		return net.JoinHostPort(hostname, port), nil
+	}
+	if port != "" {
+		return net.JoinHostPort(hostname, port), nil
+	}
+	return hostname, nil
+}
+
+func splitBracketedAuthority(authority string) (string, string, error) {
+	close := strings.IndexByte(authority, ']')
+	if close < 0 {
+		return "", "", fmt.Errorf("repository host is not canonical")
+	}
+	host := authority[1:close]
+	rest := authority[close+1:]
+	if rest == "" {
+		return host, "", nil
+	}
+	if !strings.HasPrefix(rest, ":") || len(rest) == 1 {
+		return "", "", fmt.Errorf("repository host/port is not canonical")
+	}
+	return host, rest[1:], nil
+}
+
+func canonicalHostname(host string) (string, error) {
+	if host == "" || host == "." || host == ".." {
+		return "", fmt.Errorf("repository host is not canonical")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return strings.ToLower(ip.String()), nil
+	}
+	if strings.IndexFunc(host, func(r rune) bool { return r != '.' && (r < '0' || r > '9') }) < 0 {
+		return "", fmt.Errorf("repository host is not canonical")
+	}
+	if strings.HasSuffix(host, "..") {
+		return "", fmt.Errorf("repository host is not canonical")
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if len(host) > 253 {
+		return "", fmt.Errorf("repository host is not canonical")
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("repository host is not canonical")
+		}
+		for _, r := range label {
+			if r > unicode.MaxASCII || r != '-' && (r < '0' || r > '9') && (r < 'a' || r > 'z') {
+				return "", fmt.Errorf("repository host is not canonical")
+			}
+		}
+	}
+	return host, nil
+}
+
+func isDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}

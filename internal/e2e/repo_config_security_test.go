@@ -14,10 +14,10 @@ import (
 
 // TestRepoConfigCommandsFromDefaultBranch proves the supply-chain RCE fix
 // (audit finding #1): the code-executing fields commands.* are loaded from the
-// trusted default-branch copy of .no-mistakes.yaml, never from a contributor's
+// trusted pipeline-base copy of .no-mistakes.yaml, never from a contributor's
 // pushed SHA. A feature branch ships a malicious lint command that writes a
 // marker file; under the secure default the marker must never appear, while an
-// explicit allow_repo_commands opt-in must run it — so the assertion is known
+// explicit allow_repo_commands opt-in must run it, so the assertion is known
 // to be meaningful rather than testing a no-op.
 func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 	t.Run("blocked_by_default", func(t *testing.T) {
@@ -40,7 +40,7 @@ func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 		}
 
 		// Sanity: the lint step ran (it delegated to the agent because the
-		// trusted default branch has no lint command) and reached a terminal
+		// trusted pipeline base has no lint command) and reached a terminal
 		// status, so the absence of the marker is a real result rather than a
 		// pipeline that never got to lint.
 		lintStep, ok := findStep(run.Steps, types.StepLint)
@@ -77,10 +77,10 @@ func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 
 	t.Run("pushed_branch_cannot_self_enable", func(t *testing.T) {
 		// Hard requirement of the per-repo move: allow_repo_commands is read
-		// ONLY from the trusted default-branch copy, never the pushed SHA. A
+		// ONLY from the trusted pipeline-base copy, never the pushed SHA. A
 		// contributor who sets allow_repo_commands: true on their feature
-		// branch alongside a hostile command MUST NOT self-enable — the
-		// trusted default branch says false, so the command is dropped.
+		// branch alongside a hostile command MUST NOT self-enable. The
+		// trusted pipeline base says false, so the command is dropped.
 		optOut := false
 		h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t), AllowRepoCommands: &optOut})
 
@@ -93,7 +93,7 @@ func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 		h.CommitChange(branch, branch+".txt", "change to gate\n", "add "+branch+" change")
 		// The contributor tries to flip the opt-in on AND ship a hostile
 		// command in the same pushed copy. Both must be ignored: the trusted
-		// default-branch copy controls the switch.
+		// pipeline-base copy controls the switch.
 		selfEnableConfig := fmt.Sprintf("ignore_patterns:\n  - 'vendor/**'\nallow_repo_commands: true\ncommands:\n  lint: \"echo pwned > %s\"\n", markerPath)
 		h.CommitChange(branch, ".no-mistakes.yaml", selfEnableConfig, "self-enable + malicious lint")
 		h.PushToGate(branch)
@@ -112,7 +112,7 @@ func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 // pushMaliciousRepoConfig creates a feature branch carrying a hostile
 // .no-mistakes.yaml whose lint command writes a marker file, pushes it through
 // the gate, and returns the marker path the test should assert on. The
-// default-branch .no-mistakes.yaml (written by the harness) carries no
+// pipeline-base .no-mistakes.yaml (written by the harness) carries no
 // commands, so it is the trusted source and yields empty commands under the
 // secure default.
 func pushMaliciousRepoConfig(t *testing.T, h *Harness, branch string) string {

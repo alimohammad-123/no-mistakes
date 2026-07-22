@@ -505,6 +505,49 @@ func TestRerunParamsIncludeSkipSteps(t *testing.T) {
 	}
 }
 
+func TestPreflightGuardRejectsConfiguredPipelineBase(t *testing.T) {
+	env := &axiEnv{repo: &db.Repo{DefaultBranch: "main", BaseBranch: "staging"}}
+	guard := preflightGuard(context.Background(), env, "staging")
+	if guard == nil {
+		t.Fatal("expected configured pipeline base to be rejected")
+	}
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	if err := guard(cmd); err == nil {
+		t.Fatal("expected refusal error")
+	}
+	if !strings.Contains(out.String(), "git fetch origin 'staging' && git switch -c <branch> 'origin/staging'") {
+		t.Fatalf("output = %q, want fetched pipeline base guidance", out.String())
+	}
+}
+
+func TestFeatureBranchStartCommandUsesConfiguredPipelineBase(t *testing.T) {
+	posix, err := featureBranchStartCommandForOS("linux", "main", "staging")
+	if err != nil {
+		t.Fatalf("POSIX featureBranchStartCommand: %v", err)
+	}
+	if posix != "git fetch origin 'staging' && git switch -c <branch> 'origin/staging'" {
+		t.Fatalf("POSIX featureBranchStartCommand = %q", posix)
+	}
+	windows, err := featureBranchStartCommandForOS("windows", "main", "staging")
+	if err != nil {
+		t.Fatalf("Windows featureBranchStartCommand: %v", err)
+	}
+	if windows != `git fetch origin "staging" && git switch -c <branch> "origin/staging"` {
+		t.Fatalf("Windows featureBranchStartCommand = %q", windows)
+	}
+	for _, unsafeBase := range []string{"staging branch", "staging;echo", "staging$HOME", "staging%PATH%", "staging`date`"} {
+		if got, err := featureBranchStartCommandForOS("windows", "main", unsafeBase); err == nil || got != "" {
+			t.Fatalf("featureBranchStartCommandForOS(%q) = %q, %v; want rejection", unsafeBase, got, err)
+		}
+	}
+	if got, err := featureBranchStartCommandForOS("windows", "main", "main"); err != nil || got != "git switch -c <branch>" {
+		t.Fatalf("default featureBranchStartCommand = %q, %v", got, err)
+	}
+}
+
 func TestPreflightGuardReportsWorkingTreeCheckError(t *testing.T) {
 	t.Chdir(t.TempDir())
 

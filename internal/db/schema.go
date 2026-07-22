@@ -7,7 +7,15 @@ CREATE TABLE IF NOT EXISTS repos (
     upstream_url   TEXT NOT NULL,
     fork_url       TEXT,
     default_branch TEXT NOT NULL DEFAULT 'main',
+    base_branch    TEXT,
     created_at     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bootstrap_test_retirements (
+    repository  TEXT NOT NULL,
+    base_branch TEXT NOT NULL,
+    retired_at  INTEGER NOT NULL,
+    PRIMARY KEY (repository, base_branch)
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -16,8 +24,13 @@ CREATE TABLE IF NOT EXISTS runs (
     branch               TEXT NOT NULL,
     head_sha                TEXT NOT NULL,
     base_sha                TEXT NOT NULL,
-    submitted_head_sha      TEXT,
-    status                  TEXT NOT NULL DEFAULT 'pending',
+    base_branch                 TEXT,
+    bootstrap_test_repository   TEXT,
+    bootstrap_test_base_branch  TEXT,
+    bootstrap_test_command      TEXT,
+    bootstrap_test_policy_sha256 TEXT,
+    submitted_head_sha          TEXT,
+    status                      TEXT NOT NULL DEFAULT 'pending',
     pr_url                  TEXT,
     pr_state                TEXT,
     pr_state_observed_at    INTEGER,
@@ -136,6 +149,18 @@ CREATE TABLE IF NOT EXISTS intent_cache (
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
+	// The repo value is an explicit future-run override. The run value is a
+	// frozen effective-base snapshot; historical rows remain NULL and preserve
+	// pre-feature behavior by falling back only to repos.default_branch.
+	`ALTER TABLE repos ADD COLUMN base_branch TEXT`,
+	`ALTER TABLE runs ADD COLUMN base_branch TEXT`,
+	// A bootstrap Test authorization is all-null for ordinary/historical runs
+	// and all-present for an exact first-policy adoption. Recovery rejects any
+	// partial row rather than inferring missing authorization.
+	`ALTER TABLE runs ADD COLUMN bootstrap_test_repository TEXT`,
+	`ALTER TABLE runs ADD COLUMN bootstrap_test_base_branch TEXT`,
+	`ALTER TABLE runs ADD COLUMN bootstrap_test_command TEXT`,
+	`ALTER TABLE runs ADD COLUMN bootstrap_test_policy_sha256 TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN fix_summary TEXT`,

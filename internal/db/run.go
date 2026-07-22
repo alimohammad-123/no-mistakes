@@ -2,32 +2,45 @@ package db
 
 import (
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/repoidentity"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // Run represents a pipeline run.
 type Run struct {
-	ID                    string
-	RepoID                string
-	Branch                string
-	HeadSHA               string
-	BaseSHA               string
-	SubmittedHeadSHA      *string
-	Status                types.RunStatus
-	PRURL                 *string
-	PRState               *string
-	PRStateObservedAt     *int64
-	CIReadyAt             *int64
-	LastPushedSHA         *string
-	PushTargetKind        *string
-	PushTargetFingerprint *string
-	PushRef               *string
-	LastPushedAt          *int64
-	PushGeneration        *int64
-	PushActive            bool
+	ID      string
+	RepoID  string
+	Branch  string
+	HeadSHA string
+	BaseSHA string
+	// BaseBranch freezes the effective pipeline integration and trusted-config
+	// branch for this run. Empty is reserved for migrated historical rows.
+	BaseBranch string
+	// Bootstrap Test authorization fields are either all nil or all present.
+	// They freeze the exact user-owned first-policy authorization before any
+	// pipeline step executes so recovery never replaces it with mutable global
+	// bootstrap values.
+	BootstrapTestRepository   *string
+	BootstrapTestBaseBranch   *string
+	BootstrapTestCommand      *string
+	BootstrapTestPolicySHA256 *string
+	SubmittedHeadSHA          *string
+	Status                    types.RunStatus
+	PRURL                     *string
+	PRState                   *string
+	PRStateObservedAt         *int64
+	CIReadyAt                 *int64
+	LastPushedSHA             *string
+	PushTargetKind            *string
+	PushTargetFingerprint     *string
+	PushRef                   *string
+	LastPushedAt              *int64
+	PushGeneration            *int64
+	PushActive                bool
 	// CustodyReturnedAt is non-nil once a guarded branch-sync recovery
 	// explicitly ended this run's ownership of an unpublished pipeline head
 	// (terminal run whose head was never successfully pushed, or moved after
@@ -54,13 +67,15 @@ type Run struct {
 	UpdatedAt       int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, submitted_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(base_branch, ''), bootstrap_test_repository, bootstrap_test_base_branch, bootstrap_test_command, bootstrap_test_policy_sha256, submitted_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
 }, r *Run) error {
 	return row.Scan(
-		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.SubmittedHeadSHA, &r.Status,
+		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.BaseBranch,
+		&r.BootstrapTestRepository, &r.BootstrapTestBaseBranch, &r.BootstrapTestCommand, &r.BootstrapTestPolicySHA256,
+		&r.SubmittedHeadSHA, &r.Status,
 		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt,
 		&r.LastPushedSHA, &r.PushTargetKind, &r.PushTargetFingerprint, &r.PushRef,
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive,
@@ -70,8 +85,88 @@ func scanRun(row interface {
 	)
 }
 
-// InsertRun creates a new run record.
+// BootstrapTestAuthorization is the immutable authorization snapshot for one
+// first-policy Test command.
+type BootstrapTestAuthorization struct {
+	Repository   string
+	BaseBranch   string
+	Command      string
+	PolicySHA256 string
+}
+
+// FrozenBootstrapTestAuthorization returns nil for an ordinary run and rejects
+// partial or malformed snapshots. Recovery must never fill missing fields from
+// mutable configuration.
+func (r *Run) FrozenBootstrapTestAuthorization() (*BootstrapTestAuthorization, error) {
+	if r == nil {
+		return nil, nil
+	}
+	fields := []*string{r.BootstrapTestRepository, r.BootstrapTestBaseBranch, r.BootstrapTestCommand, r.BootstrapTestPolicySHA256}
+	present := 0
+	for _, field := range fields {
+		if field != nil {
+			present++
+		}
+	}
+	if present == 0 {
+		return nil, nil
+	}
+	if present != len(fields) {
+		return nil, fmt.Errorf("run has incomplete bootstrap Test authorization")
+	}
+	auth := &BootstrapTestAuthorization{
+		Repository:   *r.BootstrapTestRepository,
+		BaseBranch:   *r.BootstrapTestBaseBranch,
+		Command:      *r.BootstrapTestCommand,
+		PolicySHA256: *r.BootstrapTestPolicySHA256,
+	}
+	identity, err := repoidentity.Canonical(auth.Repository)
+	if err != nil || identity != auth.Repository ||
+		strings.TrimSpace(auth.BaseBranch) != auth.BaseBranch || auth.BaseBranch == "" || auth.BaseBranch != r.BaseBranch ||
+		strings.TrimSpace(auth.Command) != auth.Command || auth.Command == "" {
+		return nil, fmt.Errorf("run has invalid bootstrap Test authorization")
+	}
+	if len(auth.PolicySHA256) != 64 || strings.ToLower(auth.PolicySHA256) != auth.PolicySHA256 {
+		return nil, fmt.Errorf("run has invalid bootstrap Test policy digest")
+	}
+	if decoded, err := hex.DecodeString(auth.PolicySHA256); err != nil || len(decoded) != 32 {
+		return nil, fmt.Errorf("run has invalid bootstrap Test policy digest")
+	}
+	return auth, nil
+}
+
+// EffectiveBaseBranch returns this run's frozen pipeline base. Historical rows
+// without a snapshot fall back only to the repository's recorded remote
+// default, never to a newer repo base override.
+func (r *Run) EffectiveBaseBranch(repo *Repo) string {
+	if r != nil {
+		if base := strings.TrimSpace(r.BaseBranch); base != "" {
+			return base
+		}
+	}
+	if repo == nil {
+		return ""
+	}
+	return strings.TrimSpace(repo.DefaultBranch)
+}
+
+// InsertRun creates a compatibility run record without a base snapshot. New
+// production runs must use InsertRunWithBaseBranch.
 func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
+	return d.insertRun(repoID, branch, headSHA, baseSHA, "")
+}
+
+// InsertRunWithBaseBranch creates a run with an immutable effective-base
+// snapshot used by execution and crash recovery.
+func (d *DB) InsertRunWithBaseBranch(repoID, branch, headSHA, baseSHA, baseBranch string) (*Run, error) {
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		return nil, fmt.Errorf("insert run: base branch must not be empty")
+	}
+	return d.insertRun(repoID, branch, headSHA, baseSHA, baseBranch)
+}
+
+func (d *DB) insertRun(repoID, branch, headSHA, baseSHA, baseBranch string) (*Run, error) {
 	ts := now()
 	r := &Run{
 		ID:               newID(),
@@ -79,14 +174,15 @@ func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
 		Branch:           branch,
 		HeadSHA:          headSHA,
 		BaseSHA:          baseSHA,
+		BaseBranch:       baseBranch,
 		SubmittedHeadSHA: &headSHA,
 		Status:           types.RunPending,
 		CreatedAt:        ts,
 		UpdatedAt:        ts,
 	}
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, status, pr_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'none', ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.Status, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, base_branch, submitted_head_sha, status, pr_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, nullableString(r.BaseBranch), headSHA, r.Status, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
@@ -195,6 +291,48 @@ func (d *DB) GetActiveRuns() ([]*Run, error) {
 		runs = append(runs, r)
 	}
 	return runs, rows.Err()
+}
+
+// SetRunBootstrapTestAuthorization atomically freezes a complete bootstrap
+// authorization. The all-null guard makes the snapshot write-once, the base
+// comparison prevents cross-run stamping, and the retirement predicate
+// linearizes admission against permanent repository/base retirement.
+func (d *DB) SetRunBootstrapTestAuthorization(id string, auth BootstrapTestAuthorization) error {
+	repository, baseBranch, command, digest := auth.Repository, auth.BaseBranch, auth.Command, auth.PolicySHA256
+	candidate := &Run{
+		BaseBranch:                baseBranch,
+		BootstrapTestRepository:   &repository,
+		BootstrapTestBaseBranch:   &baseBranch,
+		BootstrapTestCommand:      &command,
+		BootstrapTestPolicySHA256: &digest,
+	}
+	if _, err := candidate.FrozenBootstrapTestAuthorization(); err != nil {
+		return err
+	}
+	result, err := d.sql.Exec(
+		`UPDATE runs SET bootstrap_test_repository = ?, bootstrap_test_base_branch = ?, bootstrap_test_command = ?, bootstrap_test_policy_sha256 = ?, updated_at = ?
+		 WHERE id = ? AND base_branch = ? AND bootstrap_test_repository IS NULL AND bootstrap_test_base_branch IS NULL AND bootstrap_test_command IS NULL AND bootstrap_test_policy_sha256 IS NULL
+		 AND NOT EXISTS (SELECT 1 FROM bootstrap_test_retirements WHERE repository = ? AND base_branch = ?)`,
+		auth.Repository, auth.BaseBranch, auth.Command, auth.PolicySHA256, now(), id, auth.BaseBranch, auth.Repository, auth.BaseBranch,
+	)
+	if err != nil {
+		return fmt.Errorf("set run bootstrap Test authorization: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set run bootstrap Test authorization: %w", err)
+	}
+	if count != 1 {
+		retired, retiredErr := d.IsBootstrapTestRetired(auth.Repository, auth.BaseBranch)
+		if retiredErr != nil {
+			return fmt.Errorf("set run bootstrap Test authorization: %w", retiredErr)
+		}
+		if retired {
+			return fmt.Errorf("set run bootstrap Test authorization: %w for repository %q and pipeline base %q", ErrBootstrapTestRetired, auth.Repository, auth.BaseBranch)
+		}
+		return fmt.Errorf("set run bootstrap Test authorization: run is missing, mismatched, or already frozen")
+	}
+	return nil
 }
 
 // UpdateRunStatus updates a run's status and updated_at timestamp.
