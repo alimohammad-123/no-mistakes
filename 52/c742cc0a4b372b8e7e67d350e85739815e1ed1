@@ -1,0 +1,34 @@
+internal/pipeline/executor_approval_test.go
+  s_1a66855028e2e6::t_04b630ce45ca87 128,182
+internal/sourceprovenance/source_ref_test.go
+  s_1a66855028e2e6::t_18e0d075c640cb 136-142
+internal/git/git_test.go
+  s_1a66855028e2e6::t_18e0d075c640cb 442-467
+internal/pipeline/executor_logging_test.go
+  s_1a66855028e2e6::t_04b630ce45ca87 179
+internal/git/git.go
+  s_1a66855028e2e6::t_04b630ce45ca87 18-31,51-53,57,395-396
+internal/pipeline/helpers_test.go
+  s_1a66855028e2e6::t_04b630ce45ca87 247-261,272-281
+  s_1a66855028e2e6::t_36d7cf05b7d7f6 282
+internal/pipeline/executor_perf_test.go
+  s_1a66855028e2e6::t_04b630ce45ca87 61
+internal/pipeline/steps/test_test.go
+  s_1a66855028e2e6::t_3609ebdd11af61 48-71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "52c742cc0a4b372b8e7e67d350e85739815e1ed1",
+  "prompts": {},
+  "sessions": {
+    "s_1a66855028e2e6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f89a2-9a66-77a2-ace8-215650fed425",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
