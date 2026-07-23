@@ -294,18 +294,7 @@ func (e *Executor) initializeRunScopes(runID string) {
 }
 
 func (e *Executor) configuredTestRequired() bool {
-	if e.config == nil || e.config.Commands.Test == "" {
-		return false
-	}
-	// Reduced step factories are used by deterministic daemon embeddings that
-	// never publish. The final-head invariant activates only when this executor
-	// actually contains a delivery boundary; production always does.
-	for _, step := range e.steps {
-		if isDeliveryStep(step.Name()) {
-			return true
-		}
-	}
-	return false
+	return e.config != nil && e.config.Commands.Test != ""
 }
 
 func isDeliveryStep(name types.StepName) bool {
@@ -1113,7 +1102,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
-			if stepName == types.StepCI && e.configuredTestRequired() && errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+			if e.configuredTestRequired() && errors.Is(context.Cause(ctx), ErrDaemonShutdown) &&
+				(run.ValidationTargetSHA != nil || stepName == types.StepCI) {
 				return false, fmt.Errorf("%w: %s", ErrValidationRunInterrupted, stepName)
 			}
 			durationMS := executionMS + roundDuration
@@ -1623,6 +1613,13 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
 	if errors.Is(err, ErrParkedRunInterrupted) || errors.Is(err, ErrValidationRunInterrupted) {
 		return err
+	}
+	if e.configuredTestRequired() && run.ValidationTargetSHA != nil {
+		for _, ctx := range ctxs {
+			if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+				return fmt.Errorf("%w: %v", ErrValidationRunInterrupted, err)
+			}
+		}
 	}
 	errMsg := err.Error()
 	for _, ctx := range ctxs {

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,6 +133,31 @@ func TestExecutor_LintFixCommitInvalidatesConfiguredTest(t *testing.T) {
 	}
 }
 
+func TestExecutor_ReducedPipelineReplaysConfiguredTestAtFinalHead(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := initExecutorGitRepo(t, database, run)
+	testStep := &proofRecordingTestStep{}
+	document := &headMutatingStep{name: types.StepDocument, mutateFirst: true}
+	lint := &headMutatingStep{name: types.StepLint}
+	cfg := &config.Config{}
+	cfg.Commands.Test = "configured-test-command"
+	exec := NewExecutor(database, p, cfg, nil, []Step{testStep, document, lint}, nil)
+
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if testStep.calls != 2 || document.calls != 2 || lint.calls != 2 {
+		t.Fatalf("calls = test %d document %d lint %d, want 2/2/2", testStep.calls, document.calls, lint.calls)
+	}
+	persisted, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != types.RunCompleted || persisted.TestHeadSHA == nil || *persisted.TestHeadSHA != persisted.HeadSHA {
+		t.Fatalf("reduced pipeline proof = status %s proof %v head %s", persisted.Status, persisted.TestHeadSHA, persisted.HeadSHA)
+	}
+}
+
 func TestExecutor_HeadValidationReplayIsBounded(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := initExecutorGitRepo(t, database, run)
@@ -156,6 +182,97 @@ func TestExecutor_HeadValidationReplayIsBounded(t *testing.T) {
 	}
 	if persisted.Status != types.RunFailed {
 		t.Fatalf("run status = %s, want failed", persisted.Status)
+	}
+}
+
+func TestExecutor_DaemonShutdownDuringValidationReplayResumesIdempotently(t *testing.T) {
+	for _, interruptedStep := range []types.StepName{types.StepTest, types.StepDocument, types.StepLint} {
+		t.Run(string(interruptedStep), func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			workDir := initExecutorGitRepo(t, database, run)
+			ctx, cancel := context.WithCancelCause(context.Background())
+			calls := map[types.StepName]int{}
+			step := func(name types.StepName) Step {
+				return &adaptiveCallStep{name: name, fn: func(sctx *StepContext) (*StepOutcome, error) {
+					calls[name]++
+					if name == interruptedStep && calls[name] == 2 {
+						cancel(ErrDaemonShutdown)
+						return nil, sctx.Ctx.Err()
+					}
+					outcome := &StepOutcome{}
+					if name == types.StepTest {
+						outcome.TestedHeadSHA = sctx.Run.HeadSHA
+					}
+					return outcome, nil
+				}}
+			}
+			document := &headMutatingStep{name: types.StepDocument, mutateFirst: true}
+			if interruptedStep == types.StepDocument {
+				document = nil
+			}
+			steps := []Step{
+				step(types.StepTest),
+				step(types.StepDocument),
+				step(types.StepLint),
+				newPassStep(types.StepPush),
+				newPassStep(types.StepPR),
+				newPassStep(types.StepCI),
+			}
+			if document != nil {
+				steps[1] = document
+			} else {
+				steps[1] = &adaptiveCallStep{name: types.StepDocument, fn: func(sctx *StepContext) (*StepOutcome, error) {
+					calls[types.StepDocument]++
+					if calls[types.StepDocument] == 1 {
+						mutator := &headMutatingStep{name: types.StepDocument, mutateEvery: true}
+						return mutator.Execute(sctx)
+					}
+					if calls[types.StepDocument] == 2 {
+						cancel(ErrDaemonShutdown)
+						return nil, sctx.Ctx.Err()
+					}
+					return &StepOutcome{}, nil
+				}}
+			}
+			if interruptedStep != types.StepDocument {
+				steps[1] = &adaptiveCallStep{name: types.StepDocument, fn: func(sctx *StepContext) (*StepOutcome, error) {
+					calls[types.StepDocument]++
+					if calls[types.StepDocument] == 1 {
+						mutator := &headMutatingStep{name: types.StepDocument, mutateEvery: true}
+						return mutator.Execute(sctx)
+					}
+					return &StepOutcome{}, nil
+				}}
+			}
+			cfg := &config.Config{}
+			cfg.Commands.Test = "configured-test-command"
+			exec := NewExecutor(database, p, cfg, nil, steps, nil)
+
+			err := exec.Execute(ctx, run, repo, workDir)
+			if !errors.Is(err, ErrValidationRunInterrupted) {
+				t.Fatalf("Execute() error = %v, want validation interruption", err)
+			}
+			interrupted, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if interrupted.Status != types.RunRunning || interrupted.ValidationTargetSHA == nil || interrupted.ValidationReplayCount != 1 {
+				t.Fatalf("interrupted run = status %s target %v count %d", interrupted.Status, interrupted.ValidationTargetSHA, interrupted.ValidationReplayCount)
+			}
+
+			resume := NewExecutor(database, p, cfg, nil, steps, nil)
+			if err := resume.ResumeHeadValidation(context.Background(), interrupted, repo, workDir); err != nil {
+				t.Fatalf("ResumeHeadValidation() error = %v", err)
+			}
+			completed, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if completed.Status != types.RunCompleted || completed.ValidationReplayCount != 1 ||
+				completed.TestHeadSHA == nil || *completed.TestHeadSHA != completed.HeadSHA {
+				t.Fatalf("resumed run = status %s count %d proof %v head %s", completed.Status, completed.ValidationReplayCount, completed.TestHeadSHA, completed.HeadSHA)
+			}
+		})
 	}
 }
 
