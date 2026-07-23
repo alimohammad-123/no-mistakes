@@ -124,6 +124,56 @@ func TestCIStep_CommitForValidationDoesNotPublishConfiguredTestStaleHead(t *test
 	}
 }
 
+func TestCIStep_CommitAndPushRefusesStolenCustodyBeforeRemoteMutation(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "init.txt"), []byte("init"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "initial")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "feature")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "ci-fix.txt"), []byte("fixed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	pushed, err := (&CIStep{}).commitAndPush(sctx)
+	if err == nil || pushed {
+		t.Fatalf("stolen custody result = pushed %v error %v", pushed, err)
+	}
+	if remote := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); remote != headSHA {
+		t.Fatalf("remote changed without custody: got %s want %s", remote, headSHA)
+	}
+	persisted, getErr := sctx.DB.GetRun(sctx.Run.ID)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if persisted.HeadSHA != headSHA {
+		t.Fatalf("durable head changed without custody: got %s want %s", persisted.HeadSHA, headSHA)
+	}
+}
+
 func TestCIStep_CommitAndPushTargetsForkWhenConfigured(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()

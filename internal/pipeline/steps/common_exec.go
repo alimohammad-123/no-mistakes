@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -269,12 +270,30 @@ func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdSt
 		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
 	}
 	shellenv.ConfigureShellCommand(cmd)
+	var cancellationApplied atomic.Bool
+	cancelCommand := cmd.Cancel
+	cmd.Cancel = func() error {
+		err := cancelCommand()
+		if err == nil {
+			cancellationApplied.Store(true)
+		}
+		return err
+	}
 	cmd.Dir = dir
 	if len(env) > 0 {
 		cmd.Env = mergeEnv(env)
 	}
 	out, err := shellenv.CombinedOutputShellCommand(cmd)
+	return classifyShellCommandResult(ctx, cmdStr, out, err, cancellationApplied.Load())
+}
+
+func classifyShellCommandResult(ctx context.Context, cmdStr string, out []byte, err error, cancellationApplied bool) (string, int, error) {
 	if err != nil {
+		if cancellationApplied {
+			if cause := context.Cause(ctx); cause != nil {
+				return string(out), -1, fmt.Errorf("run command %q: %w", cmdStr, cause)
+			}
+		}
 		if ee, ok := err.(*exec.ExitError); ok {
 			return string(out), ee.ExitCode(), nil
 		}

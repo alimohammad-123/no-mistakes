@@ -3,8 +3,10 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -339,6 +341,27 @@ func TestRunShellCommand(t *testing.T) {
 		}
 		if code != 42 {
 			t.Errorf("exit code = %d, want 42", code)
+		}
+	})
+
+	t.Run("shutdown cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(pipeline.ErrDaemonShutdown)
+		err := &exec.ExitError{}
+		_, code, gotErr := classifyShellCommandResult(ctx, "blocked", nil, err, true)
+		if code != -1 || !errors.Is(gotErr, pipeline.ErrDaemonShutdown) {
+			t.Fatalf("shutdown result = code %d error %v", code, gotErr)
+		}
+	})
+
+	t.Run("independent nonzero racing shutdown", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(pipeline.ErrDaemonShutdown)
+		cmd := exec.Command("sh", "-c", "exit 42")
+		err := cmd.Run()
+		_, code, gotErr := classifyShellCommandResult(ctx, "exit 42", nil, err, false)
+		if gotErr != nil || code != 42 {
+			t.Fatalf("independent result = code %d error %v", code, gotErr)
 		}
 	})
 }

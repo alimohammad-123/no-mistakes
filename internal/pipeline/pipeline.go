@@ -92,10 +92,21 @@ func (sctx *StepContext) BindSourceRef() (string, error) {
 // candidateSHA is an idempotent database-write retry; any third value is a
 // superseding push and is left untouched.
 func (sctx *StepContext) AdvanceHeadSHA(candidateSHA string) error {
+	return sctx.advanceHeadSHA(candidateSHA, db.HeadAdvancePipeline)
+}
+
+func (sctx *StepContext) AdvanceHeadSHAWithPushCustody(candidateSHA string) error {
+	return sctx.advanceHeadSHA(candidateSHA, db.HeadAdvancePush)
+}
+
+func (sctx *StepContext) advanceHeadSHA(candidateSHA string, phase db.HeadAdvancePhase) error {
 	if sctx == nil || sctx.Run == nil || sctx.DB == nil {
 		return fmt.Errorf("pipeline source-ref context is missing")
 	}
 	previousSHA := sctx.Run.HeadSHA
+	if err := sctx.DB.ValidateRunHeadAdvance(sctx.Run.ID, previousSHA, phase); err != nil {
+		return err
+	}
 	ref, err := sctx.Run.FrozenSourceRef()
 	if err != nil {
 		return err
@@ -105,7 +116,7 @@ func (sctx *StepContext) AdvanceHeadSHA(candidateSHA string) error {
 	}
 	requireValidation := sctx.Config != nil && sctx.Config.Commands.Test != "" &&
 		sctx.Run.TestHeadSHA != nil && *sctx.Run.TestHeadSHA != candidateSHA
-	replayCount, err := sctx.DB.AdvanceRunHeadSHA(sctx.Run.ID, previousSHA, candidateSHA, requireValidation)
+	replayCount, err := sctx.DB.AdvanceRunHeadSHA(sctx.Run.ID, previousSHA, candidateSHA, requireValidation, phase)
 	if err != nil {
 		return err
 	}
@@ -120,6 +131,23 @@ func (sctx *StepContext) AdvanceHeadSHA(candidateSHA string) error {
 		}
 	}
 	return nil
+}
+
+func (sctx *StepContext) AcquirePushCustody() (func(), error) {
+	if sctx == nil || sctx.Run == nil || sctx.DB == nil {
+		return nil, fmt.Errorf("pipeline push custody context is missing")
+	}
+	if sctx.Run.PushActive {
+		return func() {}, nil
+	}
+	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+		return nil, err
+	}
+	sctx.Run.PushActive = true
+	return func() {
+		_ = sctx.DB.SetRunPushActive(sctx.Run.ID, false)
+		sctx.Run.PushActive = false
+	}, nil
 }
 
 // ValidateDeliveryCandidate refuses remote delivery unless the canonical

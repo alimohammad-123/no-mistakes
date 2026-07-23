@@ -162,11 +162,11 @@ func TestAdvanceRunHeadSHAPersistsReplayObligationIdempotently(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	count, err := d.AdvanceRunHeadSHA(run.ID, "head-1", "head-2", true)
+	count, err := d.AdvanceRunHeadSHA(run.ID, "head-1", "head-2", true, HeadAdvancePipeline)
 	if err != nil || count != 1 {
 		t.Fatalf("advance run head = count %d, err %v", count, err)
 	}
-	count, err = d.AdvanceRunHeadSHA(run.ID, "head-2", "head-2", true)
+	count, err = d.AdvanceRunHeadSHA(run.ID, "head-2", "head-2", true, HeadAdvancePipeline)
 	if err != nil || count != 1 {
 		t.Fatalf("idempotent advance = count %d, err %v", count, err)
 	}
@@ -177,5 +177,26 @@ func TestAdvanceRunHeadSHAPersistsReplayObligationIdempotently(t *testing.T) {
 	if got.HeadSHA != "head-2" || got.ValidationTargetSHA == nil || *got.ValidationTargetSHA != "head-2" ||
 		got.ValidationReplayCount != 1 || got.CIReadyAt != nil {
 		t.Fatalf("advanced replay state = %#v", got)
+	}
+}
+
+func TestAdvanceRunHeadSHARequiresMatchingPushCustody(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/test-push-advance", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.AdvanceRunHeadSHA(run.ID, "head-1", "head-2", false, HeadAdvancePush); err == nil {
+		t.Fatal("push-phase advance succeeded without push custody")
+	}
+	if err := d.SetRunPushActive(run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.AdvanceRunHeadSHA(run.ID, "head-1", "head-2", false, HeadAdvancePipeline); err == nil {
+		t.Fatal("pipeline-phase advance stole push custody")
+	}
+	if _, err := d.AdvanceRunHeadSHA(run.ID, "head-1", "head-2", false, HeadAdvancePush); err != nil {
+		t.Fatalf("push-phase advance with custody: %v", err)
 	}
 }

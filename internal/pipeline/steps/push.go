@@ -21,10 +21,11 @@ func (s *PushStep) Name() types.StepName { return types.StepPush }
 
 func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
-	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+	releaseCustody, err := sctx.AcquirePushCustody()
+	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
+	defer releaseCustody()
 
 	// Run format command if configured (before committing, so changes are formatted)
 	if fmtCmd := sctx.Config.Commands.Format; fmtCmd != "" {
@@ -77,7 +78,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		// Push owns final local formatting/evidence commits. Advance the durable
 		// candidate and source ref before any network operation, then yield to the
 		// executor when that new head lacks configured-Test proof.
-		if err := sctx.AdvanceHeadSHA(headBeingPushed); err != nil {
+		if err := sctx.AdvanceHeadSHAWithPushCustody(headBeingPushed); err != nil {
 			return nil, fmt.Errorf("advance source ref after finalizing push candidate: %w", err)
 		}
 	}
@@ -137,7 +138,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, fmt.Errorf("resolve HEAD after push: %w", err)
 	}
 	if headSHA != sctx.Run.HeadSHA {
-		if err := sctx.AdvanceHeadSHA(headSHA); err != nil {
+		if err := sctx.AdvanceHeadSHAWithPushCustody(headSHA); err != nil {
 			return nil, fmt.Errorf("advance source ref after push: %w", err)
 		}
 	}

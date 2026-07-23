@@ -454,6 +454,13 @@ type PushBinding struct {
 	Ref               string
 }
 
+type HeadAdvancePhase string
+
+const (
+	HeadAdvancePipeline HeadAdvancePhase = "pipeline"
+	HeadAdvancePush     HeadAdvancePhase = "push"
+)
+
 // UpdateRunPushBinding advances a run's successful-push provenance and
 // increments its generation. It is called for both a completed push and a
 // freshly verified already-up-to-date push.
@@ -485,9 +492,28 @@ func (d *DB) SetRunCustodyReturned(id string) error {
 // SetRunPushActive marks whether a pipeline phase currently owns a possible
 // branch-head update. Sync refuses while this marker is set.
 func (d *DB) SetRunPushActive(id string, active bool) error {
-	_, err := d.sql.Exec(`UPDATE runs SET push_active = ?, updated_at = ? WHERE id = ?`, active, now(), id)
+	var (
+		result sql.Result
+		err    error
+	)
+	if active {
+		result, err = d.sql.Exec(
+			`UPDATE runs SET push_active = 1, updated_at = ?
+			 WHERE id = ? AND status = ? AND COALESCE(push_active, 0) = 0 AND custody_returned_at IS NULL`,
+			now(), id, types.RunRunning,
+		)
+	} else {
+		result, err = d.sql.Exec(`UPDATE runs SET push_active = 0, updated_at = ? WHERE id = ? AND COALESCE(push_active, 0) = 1`, now(), id)
+	}
 	if err != nil {
 		return fmt.Errorf("set run push active: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set run push active: %w", err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("set run push active: run is unavailable or custody state changed")
 	}
 	return nil
 }
@@ -660,9 +686,47 @@ func (d *DB) CompleteHeadValidation(id, headSHA string) error {
 	return nil
 }
 
-func (d *DB) AdvanceRunHeadSHA(id, previousSHA, candidateSHA string, requireValidation bool) (int, error) {
+func headAdvancePushActive(phase HeadAdvancePhase) (bool, error) {
+	switch phase {
+	case HeadAdvancePipeline:
+		return false, nil
+	case HeadAdvancePush:
+		return true, nil
+	default:
+		return false, fmt.Errorf("unknown head advance phase %q", phase)
+	}
+}
+
+func (d *DB) ValidateRunHeadAdvance(id, previousSHA string, phase HeadAdvancePhase) error {
+	expectedPushActive, err := headAdvancePushActive(phase)
+	if err != nil {
+		return err
+	}
+	var status types.RunStatus
+	var headSHA string
+	var custodyReturnedAt *int64
+	var pushActive bool
+	if err := d.sql.QueryRow(
+		`SELECT status, head_sha, custody_returned_at, COALESCE(push_active, 0) FROM runs WHERE id = ?`, id,
+	).Scan(&status, &headSHA, &custodyReturnedAt, &pushActive); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("validate run head advance: run is missing")
+		}
+		return fmt.Errorf("validate run head advance: %w", err)
+	}
+	if status != types.RunRunning || custodyReturnedAt != nil || pushActive != expectedPushActive || headSHA != previousSHA {
+		return fmt.Errorf("validate run head advance: run head, custody, or phase changed")
+	}
+	return nil
+}
+
+func (d *DB) AdvanceRunHeadSHA(id, previousSHA, candidateSHA string, requireValidation bool, phase HeadAdvancePhase) (int, error) {
 	if strings.TrimSpace(previousSHA) == "" || strings.TrimSpace(candidateSHA) == "" {
 		return 0, fmt.Errorf("advance run head sha: previous and candidate SHAs are required")
+	}
+	expectedPushActive, err := headAdvancePushActive(phase)
+	if err != nil {
+		return 0, fmt.Errorf("advance run head sha: %w", err)
 	}
 	tx, err := d.sql.Begin()
 	if err != nil {
@@ -685,7 +749,7 @@ func (d *DB) AdvanceRunHeadSHA(id, previousSHA, candidateSHA string, requireVali
 		}
 		return 0, fmt.Errorf("advance run head sha: read run: %w", err)
 	}
-	if status != types.RunRunning || custodyReturnedAt != nil || pushActive {
+	if status != types.RunRunning || custodyReturnedAt != nil || pushActive != expectedPushActive {
 		return replayCount, fmt.Errorf("advance run head sha: run is not an active pipeline-owned candidate")
 	}
 	if headSHA != previousSHA && headSHA != candidateSHA {
@@ -709,9 +773,9 @@ func (d *DB) AdvanceRunHeadSHA(id, previousSHA, candidateSHA string, requireVali
 		     ci_ready_at = CASE WHEN ? THEN NULL ELSE ci_ready_at END, updated_at = ?
 		 WHERE id = ? AND status = ? AND head_sha = ? AND COALESCE(validation_replay_count, 0) = ?
 		   AND ((validation_target_sha IS NULL AND ? IS NULL) OR validation_target_sha = ?)
-		   AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = 0`,
+		   AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = ?`,
 		candidateSHA, targetValue, nextReplayCount, requireValidation, now(),
-		id, types.RunRunning, headSHA, replayCount, targetSHA, targetSHA,
+		id, types.RunRunning, headSHA, replayCount, targetSHA, targetSHA, expectedPushActive,
 	)
 	if err != nil {
 		return replayCount, fmt.Errorf("advance run head sha: update: %w", err)
