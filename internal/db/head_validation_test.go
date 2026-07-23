@@ -200,3 +200,86 @@ func TestAdvanceRunHeadSHARequiresMatchingPushCustody(t *testing.T) {
 		t.Fatalf("push-phase advance with custody: %v", err)
 	}
 }
+
+func TestRunHeadTransitionPersistsBeforeFinalizationAndIsIdempotent(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/test-head-transition", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RecordSuccessfulTestHead(run.ID, "head-1"); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transition, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, HeadAdvancePipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, HeadAdvancePipeline)
+	if err != nil {
+		t.Fatalf("repeat begin: %v", err)
+	}
+	if !sameRunHeadTransition(transition, retry) {
+		t.Fatalf("repeat begin changed transition: %#v != %#v", transition, retry)
+	}
+	before, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.HeadSHA != "head-1" || before.ValidationTargetSHA != nil ||
+		before.HeadAdvanceGeneration != transition.OwnershipGeneration {
+		t.Fatalf("pre-finalization run state = %#v", before)
+	}
+
+	count, err := d.FinalizeRunHeadAdvance(transition, false)
+	if err != nil || count != 1 {
+		t.Fatalf("finalize = count %d, err %v", count, err)
+	}
+	count, err = d.FinalizeRunHeadAdvance(transition, false)
+	if err != nil || count != 1 {
+		t.Fatalf("repeat finalize = count %d, err %v", count, err)
+	}
+	if pending, err := d.GetRunHeadTransition(run.ID); err != nil || pending != nil {
+		t.Fatalf("transition after finalize = %#v, err %v", pending, err)
+	}
+}
+
+func TestFinalizeRunHeadAdvanceRejectsCorruptDurableIntent(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/test-corrupt-head-transition", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, HeadAdvancePipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(
+		`UPDATE run_head_transitions SET candidate_sha = 'corrupt-head' WHERE run_id = ?`, run.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.FinalizeRunHeadAdvance(transition, false); err == nil {
+		t.Fatal("finalized a corrupt durable transition")
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HeadSHA != "head-1" || got.ValidationTargetSHA != nil {
+		t.Fatalf("corrupt transition changed run proof state: %#v", got)
+	}
+	if pending, err := d.GetRunHeadTransition(run.ID); err != nil || pending == nil {
+		t.Fatalf("corrupt transition was cleared: %#v, err %v", pending, err)
+	}
+}

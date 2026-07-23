@@ -223,10 +223,6 @@ func (m *RunManager) prepareRecoveredHeadValidationRun(ctx context.Context, run 
 	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("worktree is missing")
 	}
-	headSHA, err := git.HeadSHA(ctx, workDir)
-	if err != nil || headSHA != run.HeadSHA {
-		return nil, fmt.Errorf("worktree head does not match run head")
-	}
 	status, err := git.Run(ctx, workDir, "status", "--porcelain")
 	if err != nil || strings.TrimSpace(status) != "" {
 		return nil, fmt.Errorf("worktree is not clean for head-validation recovery")
@@ -238,6 +234,13 @@ func (m *RunManager) prepareRecoveredHeadValidationRun(ctx context.Context, run 
 	}
 	if !samePath(resolveGitPath(workDir, commonDir), gateDir) {
 		return nil, fmt.Errorf("worktree does not belong to its gate repository")
+	}
+	if _, err := pipeline.RecoverRunHeadTransition(ctx, m.db, run, workDir); err != nil {
+		return nil, err
+	}
+	headSHA, err := git.HeadSHA(ctx, workDir)
+	if err != nil || headSHA != run.HeadSHA {
+		return nil, fmt.Errorf("worktree head does not match run head")
 	}
 	if err := sourceprovenance.VerifyCandidateBinding(ctx, workDir, sourceRef, run.HeadSHA); err != nil {
 		return nil, fmt.Errorf("worktree source ref does not match run head: %w", err)

@@ -10,6 +10,8 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 type sourceRefCaptureAgent struct {
@@ -170,6 +172,153 @@ func TestAdvanceHeadSHARefusesSupersedingRefWithoutRewind(t *testing.T) {
 	}
 	if persisted.HeadSHA != first {
 		t.Fatalf("durable run head = %s, want unchanged %s", persisted.HeadSHA, first)
+	}
+}
+
+func TestRecoverRunHeadTransitionFinalizesExactMovedRefOnce(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "user.name", "test"}, {"config", "user.email", "test@example.com"}} {
+		gitOutput(t, dir, args...)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "candidate"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOutput(t, dir, "add", "candidate")
+	gitOutput(t, dir, "commit", "-m", "first")
+	first := gitOutput(t, dir, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(dir, "candidate"), []byte("candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOutput(t, dir, "add", "candidate")
+	gitOutput(t, dir, "commit", "-m", "candidate")
+	candidate := gitOutput(t, dir, "rev-parse", "HEAD")
+	gitOutput(t, dir, "checkout", "--detach", candidate)
+	gitOutput(t, dir, "update-ref", "refs/heads/fm/feature", first)
+
+	database, err := db.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepo(dir, "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "fm/feature", first, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.RecordSuccessfulTestHead(run.ID, first); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := database.BeginRunHeadAdvance(
+		run.ID, ref, first, candidate, true, db.HeadAdvancePipeline,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceprovenance.AdvanceCandidate(context.Background(), dir, ref, candidate, first); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadAdvanceGeneration != transition.OwnershipGeneration {
+		t.Fatalf("run generation = %d, want %d", run.HeadAdvanceGeneration, transition.OwnershipGeneration)
+	}
+
+	recovered, err := RecoverRunHeadTransition(context.Background(), database, run, dir)
+	if err != nil || !recovered {
+		t.Fatalf("recover moved-ref boundary = %v, err %v", recovered, err)
+	}
+	recovered, err = RecoverRunHeadTransition(context.Background(), database, run, dir)
+	if err != nil || recovered {
+		t.Fatalf("repeat recovery = %v, err %v", recovered, err)
+	}
+	got, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HeadSHA != candidate || got.ValidationTargetSHA == nil || *got.ValidationTargetSHA != candidate ||
+		got.ValidationReplayCount != 1 {
+		t.Fatalf("recovered run state = %#v", got)
+	}
+	if gotRef := gitOutput(t, dir, "rev-parse", ref); gotRef != candidate {
+		t.Fatalf("source ref = %s, want %s", gotRef, candidate)
+	}
+}
+
+func TestRecoverRunHeadTransitionNeverRewindsSupersedingRef(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "user.name", "test"}, {"config", "user.email", "test@example.com"}} {
+		gitOutput(t, dir, args...)
+	}
+	writeCandidate := func(content, message string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "candidate"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitOutput(t, dir, "add", "candidate")
+		gitOutput(t, dir, "commit", "-m", message)
+		return gitOutput(t, dir, "rev-parse", "HEAD")
+	}
+	first := writeCandidate("first\n", "first")
+	candidate := writeCandidate("candidate\n", "candidate")
+	superseding := writeCandidate("superseding\n", "superseding")
+	gitOutput(t, dir, "checkout", "--detach", candidate)
+	gitOutput(t, dir, "update-ref", "refs/heads/fm/feature", superseding)
+
+	database, err := db.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepo(dir, "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "fm/feature", first, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BeginRunHeadAdvance(run.ID, ref, first, candidate, true, db.HeadAdvancePipeline); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if recovered, err := RecoverRunHeadTransition(context.Background(), database, run, dir); err == nil || recovered {
+		t.Fatalf("superseding ref recovery = %v, err %v", recovered, err)
+	}
+	if gotRef := gitOutput(t, dir, "rev-parse", ref); gotRef != superseding {
+		t.Fatalf("recovery rewound source ref to %s, want %s", gotRef, superseding)
+	}
+	got, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HeadSHA != first || got.ValidationTargetSHA != nil {
+		t.Fatalf("superseding recovery claimed proof state: %#v", got)
+	}
+	if pending, err := database.GetRunHeadTransition(run.ID); err != nil || pending == nil {
+		t.Fatalf("superseding recovery cleared transition: %#v, err %v", pending, err)
 	}
 }
 

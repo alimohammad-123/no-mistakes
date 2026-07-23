@@ -49,6 +49,7 @@ type Run struct {
 	// ValidationReplayCount persists the bounded final-head convergence budget
 	// so a crash or daemon upgrade cannot reset an otherwise non-converging run.
 	ValidationReplayCount int
+	HeadAdvanceGeneration int64
 	LastPushedSHA         *string
 	PushTargetKind        *string
 	PushTargetFingerprint *string
@@ -82,7 +83,7 @@ type Run struct {
 	UpdatedAt       int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(base_branch, ''), source_ref, bootstrap_test_repository, bootstrap_test_base_branch, bootstrap_test_command, bootstrap_test_policy_sha256, submitted_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, test_head_sha, validation_target_sha, COALESCE(validation_replay_count, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(base_branch, ''), source_ref, bootstrap_test_repository, bootstrap_test_base_branch, bootstrap_test_command, bootstrap_test_policy_sha256, submitted_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, test_head_sha, validation_target_sha, COALESCE(validation_replay_count, 0), COALESCE(head_advance_generation, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -91,7 +92,7 @@ func scanRun(row interface {
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.BaseBranch, &r.SourceRef,
 		&r.BootstrapTestRepository, &r.BootstrapTestBaseBranch, &r.BootstrapTestCommand, &r.BootstrapTestPolicySHA256,
 		&r.SubmittedHeadSHA, &r.Status,
-		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt, &r.TestHeadSHA, &r.ValidationTargetSHA, &r.ValidationReplayCount,
+		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt, &r.TestHeadSHA, &r.ValidationTargetSHA, &r.ValidationReplayCount, &r.HeadAdvanceGeneration,
 		&r.LastPushedSHA, &r.PushTargetKind, &r.PushTargetFingerprint, &r.PushRef,
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive,
 		&r.CustodyReturnedAt, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
@@ -718,6 +719,249 @@ func (d *DB) ValidateRunHeadAdvance(id, previousSHA string, phase HeadAdvancePha
 		return fmt.Errorf("validate run head advance: run head, custody, or phase changed")
 	}
 	return nil
+}
+
+type RunHeadTransition struct {
+	RunID               string
+	SourceRef           string
+	PreviousSHA         string
+	CandidateSHA        string
+	RequireValidation   bool
+	Phase               HeadAdvancePhase
+	ExpectedPushActive  bool
+	PriorTargetSHA      *string
+	NextTargetSHA       *string
+	PriorReplayCount    int
+	NextReplayCount     int
+	OwnershipGeneration int64
+}
+
+func scanRunHeadTransition(row interface {
+	Scan(...any) error
+}, transition *RunHeadTransition) error {
+	return row.Scan(
+		&transition.RunID, &transition.SourceRef, &transition.PreviousSHA, &transition.CandidateSHA,
+		&transition.RequireValidation, &transition.Phase, &transition.ExpectedPushActive,
+		&transition.PriorTargetSHA, &transition.NextTargetSHA,
+		&transition.PriorReplayCount, &transition.NextReplayCount, &transition.OwnershipGeneration,
+	)
+}
+
+const runHeadTransitionColumns = `run_id, source_ref, previous_sha, candidate_sha, require_validation, phase, expected_push_active, prior_target_sha, next_target_sha, prior_replay_count, next_replay_count, ownership_generation`
+
+func (d *DB) GetRunHeadTransition(runID string) (*RunHeadTransition, error) {
+	transition := &RunHeadTransition{}
+	err := scanRunHeadTransition(d.sql.QueryRow(
+		`SELECT `+runHeadTransitionColumns+` FROM run_head_transitions WHERE run_id = ?`, runID,
+	), transition)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get run head transition: %w", err)
+	}
+	return transition, nil
+}
+
+func sameNullableString(left, right *string) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
+func sameRunHeadTransition(left, right *RunHeadTransition) bool {
+	return left != nil && right != nil &&
+		left.RunID == right.RunID &&
+		left.SourceRef == right.SourceRef &&
+		left.PreviousSHA == right.PreviousSHA &&
+		left.CandidateSHA == right.CandidateSHA &&
+		left.RequireValidation == right.RequireValidation &&
+		left.Phase == right.Phase &&
+		left.ExpectedPushActive == right.ExpectedPushActive &&
+		sameNullableString(left.PriorTargetSHA, right.PriorTargetSHA) &&
+		sameNullableString(left.NextTargetSHA, right.NextTargetSHA) &&
+		left.PriorReplayCount == right.PriorReplayCount &&
+		left.NextReplayCount == right.NextReplayCount &&
+		left.OwnershipGeneration == right.OwnershipGeneration
+}
+
+func (d *DB) BeginRunHeadAdvance(id, sourceRef, previousSHA, candidateSHA string, requireValidation bool, phase HeadAdvancePhase) (*RunHeadTransition, error) {
+	if strings.TrimSpace(sourceRef) == "" || strings.TrimSpace(previousSHA) == "" || strings.TrimSpace(candidateSHA) == "" {
+		return nil, fmt.Errorf("begin run head advance: source ref, previous SHA, and candidate SHA are required")
+	}
+	expectedPushActive, err := headAdvancePushActive(phase)
+	if err != nil {
+		return nil, fmt.Errorf("begin run head advance: %w", err)
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin run head advance: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var status types.RunStatus
+	var headSHA string
+	var targetSHA *string
+	var replayCount int
+	var generation int64
+	var custodyReturnedAt *int64
+	var pushActive bool
+	if err := tx.QueryRow(
+		`SELECT status, head_sha, validation_target_sha, COALESCE(validation_replay_count, 0),
+		        COALESCE(head_advance_generation, 0), custody_returned_at, COALESCE(push_active, 0)
+		 FROM runs WHERE id = ?`, id,
+	).Scan(&status, &headSHA, &targetSHA, &replayCount, &generation, &custodyReturnedAt, &pushActive); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("begin run head advance: run is missing")
+		}
+		return nil, fmt.Errorf("begin run head advance: read run: %w", err)
+	}
+	if status != types.RunRunning || custodyReturnedAt != nil || pushActive != expectedPushActive || headSHA != previousSHA {
+		return nil, fmt.Errorf("begin run head advance: run head, custody, or phase changed")
+	}
+
+	nextReplayCount := replayCount
+	nextTargetSHA := targetSHA
+	if requireValidation && (targetSHA == nil || *targetSHA != candidateSHA) {
+		nextReplayCount++
+		target := candidateSHA
+		nextTargetSHA = &target
+	}
+	transition := &RunHeadTransition{
+		RunID:               id,
+		SourceRef:           sourceRef,
+		PreviousSHA:         previousSHA,
+		CandidateSHA:        candidateSHA,
+		RequireValidation:   requireValidation,
+		Phase:               phase,
+		ExpectedPushActive:  expectedPushActive,
+		PriorTargetSHA:      targetSHA,
+		NextTargetSHA:       nextTargetSHA,
+		PriorReplayCount:    replayCount,
+		NextReplayCount:     nextReplayCount,
+		OwnershipGeneration: generation + 1,
+	}
+
+	existing := &RunHeadTransition{}
+	err = scanRunHeadTransition(tx.QueryRow(
+		`SELECT `+runHeadTransitionColumns+` FROM run_head_transitions WHERE run_id = ?`, id,
+	), existing)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("begin run head advance: read transition: %w", err)
+	}
+	if err == nil {
+		transition.OwnershipGeneration = existing.OwnershipGeneration
+		if sameRunHeadTransition(existing, transition) && generation == existing.OwnershipGeneration {
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("begin run head advance: commit retry: %w", err)
+			}
+			return existing, nil
+		}
+		return nil, fmt.Errorf("begin run head advance: conflicting durable transition")
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO run_head_transitions
+		 (run_id, source_ref, previous_sha, candidate_sha, require_validation, phase, expected_push_active,
+		  prior_target_sha, next_target_sha, prior_replay_count, next_replay_count, ownership_generation, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, sourceRef, previousSHA, candidateSHA, requireValidation, phase, expectedPushActive,
+		targetSHA, nextTargetSHA, replayCount, nextReplayCount, transition.OwnershipGeneration, now(),
+	); err != nil {
+		return nil, fmt.Errorf("begin run head advance: persist transition: %w", err)
+	}
+	result, err := tx.Exec(
+		`UPDATE runs SET head_advance_generation = ?, updated_at = ?
+		 WHERE id = ? AND status = ? AND head_sha = ? AND COALESCE(head_advance_generation, 0) = ?
+		   AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = ?`,
+		transition.OwnershipGeneration, now(), id, types.RunRunning, previousSHA, generation, expectedPushActive,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("begin run head advance: claim generation: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		if err != nil {
+			return nil, fmt.Errorf("begin run head advance: claim generation: %w", err)
+		}
+		return nil, fmt.Errorf("begin run head advance: run changed concurrently")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("begin run head advance: commit: %w", err)
+	}
+	return transition, nil
+}
+
+func (d *DB) FinalizeRunHeadAdvance(transition *RunHeadTransition, recovering bool) (int, error) {
+	if transition == nil {
+		return 0, fmt.Errorf("finalize run head advance: transition is nil")
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("finalize run head advance: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	persisted := &RunHeadTransition{}
+	err = scanRunHeadTransition(tx.QueryRow(
+		`SELECT `+runHeadTransitionColumns+` FROM run_head_transitions WHERE run_id = ?`, transition.RunID,
+	), persisted)
+	if err == sql.ErrNoRows {
+		var headSHA string
+		var targetSHA *string
+		var replayCount int
+		var generation int64
+		if err := tx.QueryRow(
+			`SELECT head_sha, validation_target_sha, COALESCE(validation_replay_count, 0), COALESCE(head_advance_generation, 0)
+			 FROM runs WHERE id = ?`, transition.RunID,
+		).Scan(&headSHA, &targetSHA, &replayCount, &generation); err != nil {
+			return 0, fmt.Errorf("finalize run head advance: read finalized run: %w", err)
+		}
+		if headSHA == transition.CandidateSHA && sameNullableString(targetSHA, transition.NextTargetSHA) &&
+			replayCount == transition.NextReplayCount && generation == transition.OwnershipGeneration {
+			return replayCount, nil
+		}
+		return replayCount, fmt.Errorf("finalize run head advance: durable transition is missing")
+	}
+	if err != nil {
+		return 0, fmt.Errorf("finalize run head advance: read transition: %w", err)
+	}
+	if !sameRunHeadTransition(persisted, transition) {
+		return 0, fmt.Errorf("finalize run head advance: durable transition is corrupt or changed")
+	}
+
+	clearPushActive := recovering && transition.ExpectedPushActive
+	result, err := tx.Exec(
+		`UPDATE runs
+		 SET head_sha = ?, validation_target_sha = ?, validation_replay_count = ?,
+		     ci_ready_at = CASE WHEN ? THEN NULL ELSE ci_ready_at END,
+		     push_active = CASE WHEN ? THEN 0 ELSE push_active END, updated_at = ?
+		 WHERE id = ? AND status = ? AND head_sha = ? AND COALESCE(validation_replay_count, 0) = ?
+		   AND ((validation_target_sha IS NULL AND ? IS NULL) OR validation_target_sha = ?)
+		   AND COALESCE(head_advance_generation, 0) = ?
+		   AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = ?`,
+		transition.CandidateSHA, transition.NextTargetSHA, transition.NextReplayCount,
+		transition.RequireValidation, clearPushActive, now(),
+		transition.RunID, types.RunRunning, transition.PreviousSHA, transition.PriorReplayCount,
+		transition.PriorTargetSHA, transition.PriorTargetSHA, transition.OwnershipGeneration,
+		transition.ExpectedPushActive,
+	)
+	if err != nil {
+		return transition.PriorReplayCount, fmt.Errorf("finalize run head advance: update: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		if err != nil {
+			return transition.PriorReplayCount, fmt.Errorf("finalize run head advance: update: %w", err)
+		}
+		return transition.PriorReplayCount, fmt.Errorf("finalize run head advance: run changed concurrently")
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM run_head_transitions WHERE run_id = ? AND ownership_generation = ?`,
+		transition.RunID, transition.OwnershipGeneration,
+	); err != nil {
+		return transition.PriorReplayCount, fmt.Errorf("finalize run head advance: clear transition: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return transition.PriorReplayCount, fmt.Errorf("finalize run head advance: commit: %w", err)
+	}
+	return transition.NextReplayCount, nil
 }
 
 func (d *DB) AdvanceRunHeadSHA(id, previousSHA, candidateSHA string, requireValidation bool, phase HeadAdvancePhase) (int, error) {

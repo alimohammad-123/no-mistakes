@@ -7,6 +7,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -104,19 +105,22 @@ func (sctx *StepContext) advanceHeadSHA(candidateSHA string, phase db.HeadAdvanc
 		return fmt.Errorf("pipeline source-ref context is missing")
 	}
 	previousSHA := sctx.Run.HeadSHA
-	if err := sctx.DB.ValidateRunHeadAdvance(sctx.Run.ID, previousSHA, phase); err != nil {
+	ref, err := sctx.Run.FrozenSourceRef()
+	if err != nil {
 		return err
 	}
-	ref, err := sctx.Run.FrozenSourceRef()
+	requireValidation := sctx.Config != nil && sctx.Config.Commands.Test != "" &&
+		sctx.Run.TestHeadSHA != nil && *sctx.Run.TestHeadSHA != candidateSHA
+	transition, err := sctx.DB.BeginRunHeadAdvance(
+		sctx.Run.ID, ref, previousSHA, candidateSHA, requireValidation, phase,
+	)
 	if err != nil {
 		return err
 	}
 	if err := sourceprovenance.AdvanceCandidate(sctx.Ctx, sctx.WorkDir, ref, candidateSHA, previousSHA); err != nil {
 		return err
 	}
-	requireValidation := sctx.Config != nil && sctx.Config.Commands.Test != "" &&
-		sctx.Run.TestHeadSHA != nil && *sctx.Run.TestHeadSHA != candidateSHA
-	replayCount, err := sctx.DB.AdvanceRunHeadSHA(sctx.Run.ID, previousSHA, candidateSHA, requireValidation, phase)
+	replayCount, err := sctx.DB.FinalizeRunHeadAdvance(transition, false)
 	if err != nil {
 		return err
 	}
@@ -131,6 +135,49 @@ func (sctx *StepContext) advanceHeadSHA(candidateSHA string, phase db.HeadAdvanc
 		}
 	}
 	return nil
+}
+
+func RecoverRunHeadTransition(ctx context.Context, database *db.DB, run *db.Run, workDir string) (bool, error) {
+	if database == nil || run == nil {
+		return false, fmt.Errorf("recover run head transition: context is missing")
+	}
+	transition, err := database.GetRunHeadTransition(run.ID)
+	if err != nil || transition == nil {
+		return false, err
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		return false, err
+	}
+	if transition.SourceRef != ref || transition.PreviousSHA != run.HeadSHA ||
+		transition.OwnershipGeneration != run.HeadAdvanceGeneration || !transition.RequireValidation {
+		return false, fmt.Errorf("recover run head transition: durable transition does not match active run")
+	}
+	headSHA, err := git.HeadSHA(ctx, workDir)
+	if err != nil {
+		return false, fmt.Errorf("recover run head transition: read worktree head: %w", err)
+	}
+	if headSHA != transition.CandidateSHA {
+		return false, fmt.Errorf("recover run head transition: worktree head does not match candidate")
+	}
+	if err := sourceprovenance.AdvanceCandidate(
+		ctx, workDir, transition.SourceRef, transition.CandidateSHA, transition.PreviousSHA,
+	); err != nil {
+		return false, fmt.Errorf("recover run head transition: %w", err)
+	}
+	replayCount, err := database.FinalizeRunHeadAdvance(transition, true)
+	if err != nil {
+		return false, err
+	}
+	run.HeadSHA = transition.CandidateSHA
+	run.ValidationTargetSHA = transition.NextTargetSHA
+	run.ValidationReplayCount = replayCount
+	run.HeadAdvanceGeneration = transition.OwnershipGeneration
+	run.CIReadyAt = nil
+	if transition.ExpectedPushActive {
+		run.PushActive = false
+	}
+	return true, nil
 }
 
 func (sctx *StepContext) AcquirePushCustody() (func(), error) {
