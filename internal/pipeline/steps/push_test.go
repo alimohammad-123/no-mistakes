@@ -200,6 +200,164 @@ func TestPushStep_AllowsExactBoundaryDeliveryWithoutLocalMutation(t *testing.T) 
 	}
 }
 
+func TestPushStep_ClassifiesInRepoEvidenceBeforeMutationPreflight(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(t *testing.T, dir, evidenceDir string)
+		wantOK bool
+	}{
+		{
+			name:   "clean",
+			mutate: func(*testing.T, string, string) {},
+			wantOK: true,
+		},
+		{
+			name: "modified",
+			mutate: func(t *testing.T, _, evidenceDir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(evidenceDir, "proof.txt"), []byte("modified"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "deleted",
+			mutate: func(t *testing.T, _, evidenceDir string) {
+				t.Helper()
+				if err := os.Remove(filepath.Join(evidenceDir, "proof.txt")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "untracked",
+			mutate: func(t *testing.T, _, evidenceDir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(evidenceDir, "new.txt"), []byte("new"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "staged",
+			mutate: func(t *testing.T, dir, evidenceDir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(evidenceDir, "proof.txt"), []byte("staged"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, dir, "add", filepath.Join("evidence", "feature", "proof.txt"))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, baseSHA, headSHA, evidenceDir := setupCommittedEvidenceRepo(t)
+			sctx := newTestContextWithDBRecords(
+				t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"},
+			)
+			sctx.Run.Branch = "feature"
+			sctx.Config.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: "evidence"}
+			completeHeadValidationAtCapacity(t, sctx, headSHA)
+			tt.mutate(t, dir, evidenceDir)
+
+			err := (&PushStep{}).stageInRepoEvidence(sctx)
+			if tt.wantOK {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if status := gitStatusPorcelain(t, dir); status != "" {
+					t.Fatalf("clean evidence changed index: %q", status)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "did not converge") {
+				t.Fatalf("stageInRepoEvidence() error = %v, want replay exhaustion", err)
+			}
+		})
+	}
+}
+
+func TestPushStep_AllowsBoundaryDeliveryWithCleanInRepoEvidence(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir, baseSHA, headSHA, _ := setupCommittedEvidenceRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	sctx := newTestContextWithDBRecords(
+		t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"},
+	)
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "feature"
+	sctx.Config.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: "evidence"}
+	completeHeadValidationAtCapacity(t, sctx, headSHA)
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != headSHA {
+		t.Fatalf("remote HEAD = %s, want %s", got, headSHA)
+	}
+}
+
+func TestPushStep_BoundaryEvidenceRaceFallsBackToWholeWorktreePreflight(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir, baseSHA, headSHA, evidenceDir := setupCommittedEvidenceRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	sctx := newTestContextWithDBRecords(
+		t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"},
+	)
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "feature"
+	sctx.Config.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: "evidence"}
+	completeHeadValidationAtCapacity(t, sctx, headSHA)
+
+	step := &PushStep{
+		afterEvidenceClassification: func(pending bool) {
+			if pending {
+				t.Fatal("clean evidence classified as pending")
+			}
+			if err := os.WriteFile(filepath.Join(evidenceDir, "proof.txt"), []byte("raced"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	if _, err := step.Execute(sctx); err == nil || !strings.Contains(err.Error(), "did not converge") {
+		t.Fatalf("Execute() error = %v, want replay exhaustion", err)
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != headSHA {
+		t.Fatalf("remote HEAD = %s, want %s", got, headSHA)
+	}
+}
+
+func TestPushStep_UnrelatedIndexChangeDoesNotReclassifyCleanEvidence(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA, _ := setupCommittedEvidenceRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "unrelated.txt"), []byte("staged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "unrelated.txt")
+
+	sctx := newTestContextWithDBRecords(
+		t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"},
+	)
+	sctx.Run.Branch = "feature"
+	sctx.Config.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: "evidence"}
+	completeHeadValidationAtCapacity(t, sctx, headSHA)
+
+	if err := (&PushStep{}).stageInRepoEvidence(sctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPushStep_RefusesSupersededSourceRefAtUnchangedTestedHead(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
@@ -395,9 +553,10 @@ func TestPushStep_DoesNotForceAddIgnoredEvidenceDirectory(t *testing.T) {
 	}
 
 	ag := &mockAgent{name: "test"}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "true"})
 	sctx.Run.Branch = "feature"
 	sctx.Config.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: "evidence"}
+	completeHeadValidationAtCapacity(t, sctx, headSHA)
 
 	step := &PushStep{}
 	if err := step.stageInRepoEvidence(sctx); err != nil {
@@ -406,4 +565,20 @@ func TestPushStep_DoesNotForceAddIgnoredEvidenceDirectory(t *testing.T) {
 	if status := gitStatusPorcelain(t, dir); status != "" {
 		t.Fatalf("ignored evidence directory was staged: %q", status)
 	}
+}
+
+func setupCommittedEvidenceRepo(t *testing.T) (dir, baseSHA, headSHA, evidenceDir string) {
+	t.Helper()
+	dir, baseSHA, _ = setupGitRepo(t)
+	evidenceDir = filepath.Join(dir, "evidence", "feature")
+	if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(evidenceDir, "proof.txt"), []byte("proof"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "evidence")
+	gitCmd(t, dir, "commit", "-m", "add evidence")
+	headSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+	return dir, baseSHA, headSHA, evidenceDir
 }

@@ -1,8 +1,8 @@
 package steps
 
 import (
+	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -15,7 +15,9 @@ import (
 )
 
 // PushStep force-pushes the worktree state to the configured push remote.
-type PushStep struct{}
+type PushStep struct {
+	afterEvidenceClassification func(bool)
+}
 
 func (s *PushStep) Name() types.StepName { return types.StepPush }
 
@@ -162,32 +164,44 @@ func (s *PushStep) stageInRepoEvidence(sctx *pipeline.StepContext) error {
 	if gitIgnoresPath(ctx, sctx.WorkDir, location.Dir) {
 		return nil
 	}
-	if !dirHasFiles(location.Dir) {
+	rel, err := filepath.Rel(sctx.WorkDir, location.Dir)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return nil
+	}
+	rel = filepath.ToSlash(rel)
+	pending, err := inRepoEvidenceMutationPending(ctx, sctx.WorkDir, rel)
+	if err != nil {
+		return err
+	}
+	if s.afterEvidenceClassification != nil {
+		s.afterEvidenceClassification(pending)
+	}
+	if !pending {
 		return nil
 	}
 	if err := sctx.PreflightHeadMutation(); err != nil {
 		return err
 	}
-	rel, err := filepath.Rel(sctx.WorkDir, location.Dir)
-	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return nil
-	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "add", "-f", "--", filepath.ToSlash(rel)); err != nil {
+	if _, err := git.Run(ctx, sctx.WorkDir, "add", "-f", "--", rel); err != nil {
 		return fmt.Errorf("stage test evidence: %w", err)
 	}
 	return nil
 }
 
-func dirHasFiles(dir string) bool {
-	found := false
-	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || found {
-			return nil
+func inRepoEvidenceMutationPending(ctx context.Context, workDir, rel string) (bool, error) {
+	commands := [][]string{
+		{"diff", "--name-only", "--", rel},
+		{"diff", "--cached", "--name-only", "--", rel},
+		{"ls-files", "--others", "--", rel},
+	}
+	for _, args := range commands {
+		output, err := git.Run(ctx, workDir, args...)
+		if err != nil {
+			return false, fmt.Errorf("classify test evidence: %w", err)
 		}
-		if !d.IsDir() {
-			found = true
+		if strings.TrimSpace(output) != "" {
+			return true, nil
 		}
-		return nil
-	})
-	return found
+	}
+	return false, nil
 }
