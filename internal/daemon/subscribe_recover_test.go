@@ -417,6 +417,9 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := gitpkg.Run(context.Background(), worktree, "update-ref", "refs/heads/fm/resume/source-ref", run.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
 	step, err := d.InsertStepResult(run.ID, types.StepTest)
 	if err != nil {
 		t.Fatal(err)
@@ -547,7 +550,7 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 			}
 			defer d.Close()
 			repo, headSHA := setupTestGitRepo(t, p, d, "reconcile-parked-ci-"+strings.ToLower(state))
-			run, err := d.InsertRun(repo.ID, "feature", headSHA, headSHA)
+			run, err := d.InsertRun(repo.ID, "feature/ci", headSHA, headSHA)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -561,6 +564,9 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 			run.PRURL = &prURL
 			worktree := p.WorktreeDir(repo.ID, run.ID)
 			if err := gitpkg.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, headSHA); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := gitpkg.Run(context.Background(), worktree, "update-ref", "refs/heads/feature/ci", headSHA); err != nil {
 				t.Fatal(err)
 			}
 			step, err := d.InsertStepResult(run.ID, types.StepCI)

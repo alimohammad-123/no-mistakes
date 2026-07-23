@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -114,7 +116,8 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil || run.Branch == "" {
 		return nil, fmt.Errorf("run is not a parked running run")
 	}
-	if _, err := m.db.EnsureActiveRunSourceRef(run); err != nil {
+	sourceRef, err := m.db.EnsureActiveRunSourceRef(run)
+	if err != nil {
 		return nil, err
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
@@ -140,7 +143,9 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if !samePath(resolveGitPath(workDir, commonDir), gateDir) {
 		return nil, fmt.Errorf("worktree does not belong to its gate repository")
 	}
-
+	if err := sourceprovenance.VerifyCandidateBinding(ctx, workDir, sourceRef, run.HeadSHA); err != nil {
+		return nil, fmt.Errorf("worktree source ref does not match run head: %w", err)
+	}
 	execSteps := m.steps()
 	if err := pipeline.ValidateRecoveredRun(m.db, run, execSteps); err != nil {
 		return nil, err
@@ -331,22 +336,26 @@ func (m *RunManager) resumeRecoveredRuns(plans []recoveredRunPlan) {
 }
 
 func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
-	if m.shuttingDown.Load() {
-		_ = plan.agent.Close()
-		return
-	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
 	done := make(chan struct{})
 	m.mu.Lock()
+	if m.shuttingDown.Load() {
+		m.mu.Unlock()
+		cancel(pipeline.ErrDaemonShutdown)
+		_ = plan.agent.Close()
+		return
+	}
+	// Admission, publication, and WaitGroup accounting are one lifecycle
+	// transaction with Shutdown's cancellation snapshot.
+	m.wg.Add(1)
 	m.executors[plan.run.ID] = executor
 	m.cancels[plan.run.ID] = cancel
 	m.dones[plan.run.ID] = done
 	m.mu.Unlock()
-
-	m.wg.Add(1)
 	go func() {
 		startedAt := time.Now()
+		preserveWorktree := false
 		defer m.wg.Done()
 		defer close(done)
 		defer func() {
@@ -361,8 +370,10 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			cancel(nil)
 			_ = plan.agent.Close()
 			m.closeSubscribers(plan.run.ID)
-			if err := git.WorktreeRemove(context.Background(), plan.gateDir, plan.workDir); err != nil {
-				slog.Warn("failed to remove recovered worktree", "path", plan.workDir, "error", err)
+			if !preserveWorktree {
+				if err := git.WorktreeRemove(context.Background(), plan.gateDir, plan.workDir); err != nil {
+					slog.Warn("failed to remove recovered worktree", "path", plan.workDir, "error", err)
+				}
 			}
 			m.mu.Lock()
 			delete(m.executors, plan.run.ID)
@@ -372,6 +383,11 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		}()
 
 		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
+			if errors.Is(err, pipeline.ErrParkedRunInterrupted) {
+				preserveWorktree = true
+				slog.Info("preserved parked run during daemon shutdown", "run_id", plan.run.ID)
+				return
+			}
 			if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
 				plan.run.Status = types.RunFailed
@@ -894,9 +910,18 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
 	executor.SetSkippedSteps(skipSteps)
 
-	// Track executor.
+	// Track executor. Admission, publication, and WaitGroup accounting are
+	// atomic with Shutdown's cancellation snapshot.
 	done := make(chan struct{})
 	m.mu.Lock()
+	if m.shuttingDown.Load() {
+		m.mu.Unlock()
+		cancel(pipeline.ErrDaemonShutdown)
+		_ = ag.Close()
+		_ = m.db.UpdateRunErrorStatus(run.ID, "daemon is shutting down", types.RunFailed)
+		return "", fmt.Errorf("daemon is shutting down")
+	}
+	m.wg.Add(1)
 	m.executors[run.ID] = executor
 	m.cancels[run.ID] = cancel
 	m.dones[run.ID] = done
@@ -906,9 +931,9 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	bgOwnsWorktree = true
 
 	// Launch pipeline in background.
-	m.wg.Add(1)
 	go func() {
 		startedAt := time.Now()
+		preserveWorktree := false
 		defer m.wg.Done()
 		defer close(done)
 		defer func() {
@@ -940,9 +965,12 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			ag.Close()
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
-			// Clean up worktree.
-			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
-				slog.Warn("failed to remove worktree", "path", wtDir, "error", rmErr)
+			// Clean up terminal worktrees. A durably parked gate interrupted by
+			// daemon shutdown remains available to startup recovery.
+			if !preserveWorktree {
+				if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
+					slog.Warn("failed to remove worktree", "path", wtDir, "error", rmErr)
+				}
 			}
 			// Remove tracking.
 			m.mu.Lock()
@@ -953,6 +981,11 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		}()
 
 		if err := executor.Execute(runCtx, run, repo, wtDir); err != nil {
+			if errors.Is(err, pipeline.ErrParkedRunInterrupted) {
+				preserveWorktree = true
+				slog.Info("preserved parked run during daemon shutdown", "run_id", run.ID)
+				return
+			}
 			fields := telemetry.Fields{
 				"action":      "finished",
 				"trigger":     trigger,
@@ -1058,7 +1091,7 @@ func (m *RunManager) Shutdown() {
 	m.mu.Unlock()
 
 	for id, cancel := range cancels {
-		cancel(fmt.Errorf("daemon shutting down"))
+		cancel(pipeline.ErrDaemonShutdown)
 		slog.Info("cancelled run on shutdown", "run_id", id)
 	}
 

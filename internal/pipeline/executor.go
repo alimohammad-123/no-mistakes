@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -30,6 +31,14 @@ type EventFunc func(ipc.Event)
 const (
 	defaultGateReconcileInterval = 2 * time.Minute
 	defaultGateReconcileTimeout  = 30 * time.Second
+)
+
+var (
+	// ErrDaemonShutdown is the typed cancellation cause used by the daemon.
+	ErrDaemonShutdown = errors.New(db.LegacyDaemonShutdownError)
+	// ErrParkedRunInterrupted reports that shutdown reached a fully durable gate.
+	// Callers must preserve its run row and worktree for ordinary crash recovery.
+	ErrParkedRunInterrupted = errors.New("daemon shutdown interrupted a parked approval gate")
 )
 
 type approvalResponse struct {
@@ -248,6 +257,11 @@ func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
 	return err
 }
 
+func (e *Executor) hasDurableParkedGate(runID string) bool {
+	run, err := e.db.GetRun(runID)
+	return err == nil && run != nil && ValidateRecoveredRun(e.db, run, e.steps) == nil
+}
+
 // Resume restores a run that was durably parked at an approval gate when the
 // daemon stopped. It only accepts a fully recorded gate and otherwise returns
 // an error so startup recovery can fail the run rather than guessing.
@@ -322,6 +336,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	)
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, false)
+	if err != nil && errors.Is(err, ErrDaemonShutdown) && e.hasDurableParkedGate(run.ID) {
+		return fmt.Errorf("%w: %s", ErrParkedRunInterrupted, gate.step.Name())
+	}
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
 	}
@@ -834,6 +851,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, diffText, "", &executionMS)
 
 		response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, true)
+		if err != nil && errors.Is(err, ErrDaemonShutdown) && e.hasDurableParkedGate(run.ID) {
+			return false, fmt.Errorf("%w: %s", ErrParkedRunInterrupted, stepName)
+		}
 		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 			slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
 		}
@@ -1159,6 +1179,9 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 // It accepts an optional context; if the context was cancelled with a cause,
 // the cause message is used as the run's error (more informative than "context canceled").
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
+	if errors.Is(err, ErrParkedRunInterrupted) {
+		return err
+	}
 	errMsg := err.Error()
 	for _, ctx := range ctxs {
 		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {

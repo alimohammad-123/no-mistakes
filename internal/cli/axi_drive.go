@@ -129,15 +129,30 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 
 	runID := activeRunID(env, branch, headSHA)
 	if runID == "" {
+		// Intent is mandatory when starting a run and when claiming the bounded
+		// legacy interrupted-gate compatibility path. An ordinary active
+		// reattach above still needs no repeated intent.
+		if strings.TrimSpace(intent) == "" {
+			return emitError(cmd, 2, "--intent is required to start or recover a run",
+				`Pass the same authoritative goal: no-mistakes axi run --intent "the user's goal"`)
+		}
+		var recovered ipc.RecoverInterruptedRunResult
+		if err := env.client.Call(ipc.MethodRecoverInterruptedRun, &ipc.RecoverInterruptedRunParams{
+			RepoID: env.repo.ID, Branch: branch, LocalHead: headSHA, Intent: intent,
+		}, &recovered); err != nil {
+			return emitError(cmd, 1, err.Error(),
+				"The failed run was left unchanged. Inspect `no-mistakes axi status` and correct only the reported recovery mismatch")
+		}
+		if recovered.Matched {
+			if recovered.RunID == "" {
+				return emitError(cmd, 1, "interrupted run recovery matched without a run id")
+			}
+			runID = recovered.RunID
+		}
+	}
+	if runID == "" {
 		if err := configErrorForFreshAxiRun(env, runID); err != nil {
 			return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
-		}
-		// Intent is mandatory when starting a run: the agent driving this knows
-		// the change's intent, so we take it directly instead of inferring it
-		// from transcripts. Reattaching to an in-flight run does not need it.
-		if strings.TrimSpace(intent) == "" {
-			return emitError(cmd, 2, "--intent is required to start a run",
-				`Pass what the user set out to accomplish: no-mistakes axi run --intent "the user's goal"`)
 		}
 		// Starting a fresh run: apply the same pre-flight the human wizard
 		// enforces, but as structured errors the agent acts on rather than

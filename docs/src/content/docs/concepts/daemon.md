@@ -114,6 +114,45 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Enables Git push-option support on existing gate repos so per-push options like `no-mistakes.skip=...` keep working after upgrades
 - Clears any parked-awaiting-agent marker so a recovered failed run is not shown as still waiting for `axi respond`
 
+### Interrupted approval compatibility
+
+Older daemons could turn a run that was waiting for approval into a failed run
+with the exact error `daemon shutting down`. The upgraded runtime has one
+bounded compatibility path for that legacy state. From the unchanged submitted
+branch, run the ordinary command again with the same authoritative intent:
+
+```sh
+no-mistakes axi run --intent "<the same goal supplied to the interrupted run>"
+```
+
+AXI restores the same run ID and returns its preserved approval gate. Continue
+with `no-mistakes axi respond` as usual. It does not create a replacement run,
+rerun Review or Test, return custody, move the operator branch, push, or
+otherwise mutate a remote. It may fetch the frozen pipeline base to reload
+trusted repository policy. The pipeline-local `refs/heads/<branch>` ref is
+derived from the durable branch identity and bound to the recorded pipeline
+head before execution can continue.
+
+Recovery is allowed only for the exact legacy shutdown error with one preserved
+failed gate, a nonempty matching findings round, completed earlier steps, and
+pristine pending later steps. The run must be the newest run for the repository
+and branch, have the same submitted head and authoritative intent, have no push,
+pull request, CI, or custody-return provenance, and retain a clean registered
+pipeline worktree whose recorded head is available in the local gate. Missing or
+dirty worktrees, head or branch mismatches, malformed or empty findings,
+ambiguous step history, genuine command failures, and any external-delivery
+provenance are refused without changing the failed run.
+
+Trusted repository policy is reloaded from the run's frozen pipeline base before
+the restore transaction. Existing reviewer and fixer session metadata must
+still match the configured provider. The transaction clears only the legacy
+shutdown errors, restores the interrupted step to `awaiting_approval` or
+`fix_review`, freezes a missing canonical source ref, and starts a new parked
+time interval. Completed steps, findings, rounds, execution timing, sessions,
+and pipeline commits remain in place. A later daemon restart uses the ordinary
+parked-run crash recovery path, so reattaching again returns the same gate
+without duplicate rounds, agent turns, or fix commits.
+
 ## Logging
 
 Daemon logs go to `~/.no-mistakes/logs/daemon.log`. The setup wizard captures managed agent-server output in `~/.no-mistakes/logs/wizard-agent.log`. Each pipeline step also writes to its own log at `~/.no-mistakes/logs/<runID>/<step>.log`, and fatal step errors are appended there so the step log includes the failure reason even when the detail comes from command stderr. `daemon stop`, `daemon restart`, and `update` invocations are logged separately to `~/.no-mistakes/logs/cli.log` with the caller's PID, parent PID, and parent command line.

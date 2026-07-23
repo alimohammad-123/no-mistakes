@@ -9,17 +9,18 @@ import (
 
 // JSON-RPC 2.0 method names.
 const (
-	MethodPushReceived   = "push_received"
-	MethodGetRun         = "get_run"
-	MethodGetRuns        = "get_runs"
-	MethodGetRunsForHead = "get_runs_for_head"
-	MethodGetActiveRun   = "get_active_run"
-	MethodRerun          = "rerun"
-	MethodSubscribe      = "subscribe"
-	MethodRespond        = "respond"
-	MethodCancelRun      = "cancel_run"
-	MethodHealth         = "health"
-	MethodShutdown       = "shutdown"
+	MethodPushReceived          = "push_received"
+	MethodGetRun                = "get_run"
+	MethodGetRuns               = "get_runs"
+	MethodGetRunsForHead        = "get_runs_for_head"
+	MethodGetActiveRun          = "get_active_run"
+	MethodRecoverInterruptedRun = "recover_interrupted_run"
+	MethodRerun                 = "rerun"
+	MethodSubscribe             = "subscribe"
+	MethodRespond               = "respond"
+	MethodCancelRun             = "cancel_run"
+	MethodHealth                = "health"
+	MethodShutdown              = "shutdown"
 )
 
 // JSON-RPC 2.0 error codes.
@@ -99,6 +100,16 @@ type GetActiveRunParams struct {
 	Branch string `json:"branch,omitempty"`
 }
 
+// RecoverInterruptedRunParams requests bounded compatibility recovery for the
+// latest failed run on an exact repository branch. LocalHead and Intent bind
+// the request to the ordinary branch-matched AXI invocation.
+type RecoverInterruptedRunParams struct {
+	RepoID    string `json:"repo_id"`
+	Branch    string `json:"branch"`
+	LocalHead string `json:"local_head"`
+	Intent    string `json:"intent"`
+}
+
 // RerunParams requests a new run for the latest gate head on a branch.
 // Intent, when set, is stamped onto the new run like PushReceivedParams.Intent.
 type RerunParams struct {
@@ -160,6 +171,13 @@ type GetRunsResult struct {
 // GetActiveRunResult wraps the active run (nil if none).
 type GetActiveRunResult struct {
 	Run *RunInfo `json:"run,omitempty"`
+}
+
+// RecoverInterruptedRunResult reports whether a legacy signature matched and,
+// when safely restored or already active, the same durable run ID.
+type RecoverInterruptedRunResult struct {
+	RunID   string `json:"run_id,omitempty"`
+	Matched bool   `json:"matched"`
 }
 
 // RerunResult confirms a rerun was created.
