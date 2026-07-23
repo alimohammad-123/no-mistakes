@@ -19,9 +19,6 @@ func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.BaseBranch())
 	lintCmd := sctx.Config.Commands.Lint
-	if err := sctx.PreflightHeadMutation(); err != nil {
-		return nil, err
-	}
 
 	if lintCmd == "" {
 		// The combined document+lint housekeeping pass already performed the
@@ -33,6 +30,9 @@ func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 			if stash, ok := sctx.Shared.TakeHousekeepingLint(); ok {
 				return lintOutcomeFromHousekeeping(sctx, stash)
 			}
+		}
+		if err := sctx.PreflightHeadMutation(); err != nil {
+			return nil, err
 		}
 		sctx.Log("no lint command configured, asking agent to lint and fix...")
 		reassessHistory := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)

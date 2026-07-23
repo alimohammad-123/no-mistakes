@@ -284,9 +284,12 @@ func (sctx *StepContext) ValidateDeliveryCandidate() error {
 	if _, err := sctx.BindSourceRef(); err != nil {
 		return fmt.Errorf("verify delivery source ref: %w", err)
 	}
-	if sctx.Config != nil && sctx.Config.Commands.Test != "" &&
-		(sctx.Run.TestHeadSHA == nil || *sctx.Run.TestHeadSHA != sctx.Run.HeadSHA) {
-		return fmt.Errorf("configured Test proof is missing or stale for delivery head %s", sctx.Run.HeadSHA)
+	if sctx.Config != nil && sctx.Config.Commands.Test != "" {
+		if err := sctx.DB.CheckHeadValidationDeliveryEligibility(
+			sctx.Run.ID, sctx.Run.HeadSHA, maxHeadValidationReplays,
+		); err != nil {
+			return err
+		}
 	}
 	return nil
 }

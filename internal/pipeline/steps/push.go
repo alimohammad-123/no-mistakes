@@ -21,9 +21,6 @@ func (s *PushStep) Name() types.StepName { return types.StepPush }
 
 func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
-	if err := sctx.PreflightHeadMutation(); err != nil {
-		return nil, err
-	}
 	releaseCustody, err := sctx.AcquirePushCustody()
 	if err != nil {
 		return nil, err
@@ -32,6 +29,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 
 	// Run format command if configured (before committing, so changes are formatted)
 	if fmtCmd := sctx.Config.Commands.Format; fmtCmd != "" {
+		if err := sctx.PreflightHeadMutation(); err != nil {
+			return nil, err
+		}
 		sctx.Log(fmt.Sprintf("running formatter: %s", fmtCmd))
 		output, exitCode, err := runStepShellCommand(sctx, fmtCmd)
 		if err != nil {
@@ -47,6 +47,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	status, _ := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
 	if strings.TrimSpace(status) != "" {
+		if err := sctx.PreflightHeadMutation(); err != nil {
+			return nil, err
+		}
 		sctx.Log("committing agent changes...")
 		if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
 			return nil, fmt.Errorf("stage agent changes: %w", err)
@@ -161,6 +164,9 @@ func (s *PushStep) stageInRepoEvidence(sctx *pipeline.StepContext) error {
 	}
 	if !dirHasFiles(location.Dir) {
 		return nil
+	}
+	if err := sctx.PreflightHeadMutation(); err != nil {
+		return err
 	}
 	rel, err := filepath.Rel(sctx.WorkDir, location.Dir)
 	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {

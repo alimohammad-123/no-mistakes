@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+var ErrHeadValidationMutationExhausted = errors.New("head validation mutation capacity exhausted")
 
 // Run represents a pipeline run.
 type Run struct {
@@ -696,10 +699,12 @@ func (d *DB) CheckHeadValidationMutationCapacity(id string, maxReplays int) erro
 	var targetSHA *string
 	var replayCount int
 	var custodyReturnedAt *int64
+	var pendingTransition bool
 	if err := d.sql.QueryRow(
-		`SELECT status, head_sha, validation_target_sha, COALESCE(validation_replay_count, 0), custody_returned_at
+		`SELECT status, head_sha, validation_target_sha, COALESCE(validation_replay_count, 0),
+		        custody_returned_at, EXISTS(SELECT 1 FROM run_head_transitions WHERE run_id = runs.id)
 		 FROM runs WHERE id = ?`, id,
-	).Scan(&status, &headSHA, &targetSHA, &replayCount, &custodyReturnedAt); err != nil {
+	).Scan(&status, &headSHA, &targetSHA, &replayCount, &custodyReturnedAt, &pendingTransition); err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("check head validation mutation capacity: run is missing")
 		}
@@ -708,17 +713,57 @@ func (d *DB) CheckHeadValidationMutationCapacity(id string, maxReplays int) erro
 	if status != types.RunRunning || custodyReturnedAt != nil {
 		return fmt.Errorf("check head validation mutation capacity: run is outside active pipeline custody")
 	}
+	if pendingTransition {
+		return fmt.Errorf("check head validation mutation capacity: a head transition is already pending")
+	}
 	if replayCount < 0 {
 		return fmt.Errorf("check head validation mutation capacity: replay state is inconsistent")
 	}
 	if replayCount >= maxReplays {
-		return fmt.Errorf("final-head validation did not converge after %d replay attempts", maxReplays)
+		return fmt.Errorf("%w: final-head validation did not converge after %d replay attempts", ErrHeadValidationMutationExhausted, maxReplays)
 	}
 	if targetSHA == nil {
 		return nil
 	}
 	if *targetSHA != headSHA {
 		return fmt.Errorf("check head validation mutation capacity: replay state is inconsistent")
+	}
+	return nil
+}
+
+func (d *DB) CheckHeadValidationDeliveryEligibility(id, headSHA string, maxReplays int) error {
+	if strings.TrimSpace(headSHA) == "" || maxReplays <= 0 {
+		return fmt.Errorf("check head validation delivery eligibility: head and replay bound are required")
+	}
+	var status types.RunStatus
+	var durableHeadSHA string
+	var testHeadSHA *string
+	var targetSHA *string
+	var replayCount int
+	var custodyReturnedAt *int64
+	var pendingTransition bool
+	if err := d.sql.QueryRow(
+		`SELECT status, head_sha, test_head_sha, validation_target_sha,
+		        COALESCE(validation_replay_count, 0), custody_returned_at,
+		        EXISTS(SELECT 1 FROM run_head_transitions WHERE run_id = runs.id)
+		 FROM runs WHERE id = ?`, id,
+	).Scan(
+		&status, &durableHeadSHA, &testHeadSHA, &targetSHA,
+		&replayCount, &custodyReturnedAt, &pendingTransition,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("check head validation delivery eligibility: run is missing")
+		}
+		return fmt.Errorf("check head validation delivery eligibility: %w", err)
+	}
+	if status != types.RunRunning || custodyReturnedAt != nil || durableHeadSHA != headSHA {
+		return fmt.Errorf("check head validation delivery eligibility: run is outside exact active pipeline custody")
+	}
+	if replayCount < 0 || replayCount > maxReplays {
+		return fmt.Errorf("check head validation delivery eligibility: replay state is outside bounded policy")
+	}
+	if testHeadSHA == nil || *testHeadSHA != headSHA || targetSHA != nil || pendingTransition {
+		return fmt.Errorf("configured Test proof is missing, stale, or still active for delivery head %s", headSHA)
 	}
 	return nil
 }
@@ -1037,6 +1082,7 @@ func (d *DB) FinalizeRunHeadAdvance(transition *RunHeadTransition, recovering bo
 	}
 	exhausted := transition.RequireValidation && transition.NextReplayCount > maxReplays
 	exhaustionError := fmt.Sprintf("final-head validation did not converge after %d replay attempts", maxReplays)
+	clearPushActive := transition.ExpectedPushActive && (recovering || exhausted)
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return 0, fmt.Errorf("finalize run head advance: begin: %w", err)
@@ -1054,16 +1100,18 @@ func (d *DB) FinalizeRunHeadAdvance(transition *RunHeadTransition, recovering bo
 		var generation int64
 		var status types.RunStatus
 		var runError *string
+		var pushActive bool
 		if err := tx.QueryRow(
 			`SELECT head_sha, validation_target_sha, COALESCE(validation_replay_count, 0),
-			        COALESCE(head_advance_generation, 0), status, error
+			        COALESCE(head_advance_generation, 0), status, error, COALESCE(push_active, 0)
 			 FROM runs WHERE id = ?`, transition.RunID,
-		).Scan(&headSHA, &targetSHA, &replayCount, &generation, &status, &runError); err != nil {
+		).Scan(&headSHA, &targetSHA, &replayCount, &generation, &status, &runError, &pushActive); err != nil {
 			return 0, fmt.Errorf("finalize run head advance: read finalized run: %w", err)
 		}
 		if headSHA == transition.CandidateSHA && sameNullableString(targetSHA, transition.NextTargetSHA) &&
 			replayCount == transition.NextReplayCount && generation == transition.OwnershipGeneration &&
-			(!exhausted || (status == types.RunFailed && runError != nil && *runError == exhaustionError)) {
+			(!exhausted || (status == types.RunFailed && runError != nil && *runError == exhaustionError)) &&
+			(!clearPushActive || !pushActive) {
 			return replayCount, nil
 		}
 		return replayCount, fmt.Errorf("finalize run head advance: durable transition is missing")
@@ -1075,7 +1123,6 @@ func (d *DB) FinalizeRunHeadAdvance(transition *RunHeadTransition, recovering bo
 		return 0, fmt.Errorf("finalize run head advance: durable transition is corrupt or changed")
 	}
 
-	clearPushActive := recovering && transition.ExpectedPushActive
 	result, err := tx.Exec(
 		`UPDATE runs
 		 SET head_sha = ?, validation_target_sha = ?, validation_replay_count = ?,

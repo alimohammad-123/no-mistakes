@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -492,12 +493,150 @@ func TestCheckHeadValidationMutationCapacityUsesExactBoundary(t *testing.T) {
 	if err := d.CheckHeadValidationMutationCapacity(run.ID, 3); err == nil {
 		t.Fatal("capacity check allowed mutation at replay boundary")
 	}
+	if err := d.CheckHeadValidationDeliveryEligibility(run.ID, "head-1", 3); err == nil {
+		t.Fatal("delivery eligibility accepted an active boundary replay")
+	}
+	if err := d.RecordSuccessfulTestHead(run.ID, "head-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteHeadValidation(run.ID, "head-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CheckHeadValidationDeliveryEligibility(run.ID, "head-1", 3); err != nil {
+		t.Fatalf("exact boundary delivery eligibility: %v", err)
+	}
+	if err := d.CheckHeadValidationMutationCapacity(run.ID, 3); err == nil {
+		t.Fatal("capacity check allowed mutation after exact boundary proof")
+	}
 	got, err := d.GetRun(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.HeadSHA != "head-1" || got.ValidationReplayCount != 3 {
 		t.Fatalf("capacity preflight mutated run: %#v", got)
+	}
+}
+
+func TestHeadValidationPreflightsRejectPendingTransition(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/test-pending-transition", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RecordSuccessfulTestHead(run.ID, "head-1"); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.BeginRunHeadAdvance(
+		run.ID, ref, "head-1", "head-2", true, 3, HeadAdvancePipeline,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CheckHeadValidationMutationCapacity(run.ID, 3); err == nil {
+		t.Fatal("mutation preflight accepted a pending transition")
+	}
+	if err := d.CheckHeadValidationDeliveryEligibility(run.ID, "head-1", 3); err == nil {
+		t.Fatal("delivery eligibility accepted a pending transition")
+	}
+}
+
+func TestFinalizeExhaustedPushTransitionClearsExactCustodyGeneration(t *testing.T) {
+	for _, recovering := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recovering_%t", recovering), func(t *testing.T) {
+			d := openTestDB(t)
+			repo, _ := d.InsertRepo("/home/user/test-push-exhaustion", "git@github.com:user/project.git", "main")
+			run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+			if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.sql.Exec(
+				`UPDATE runs
+				 SET test_head_sha = head_sha, validation_target_sha = NULL,
+				     validation_replay_count = 3, push_active = 1
+				 WHERE id = ?`,
+				run.ID,
+			); err != nil {
+				t.Fatal(err)
+			}
+			ref, err := run.FrozenSourceRef()
+			if err != nil {
+				t.Fatal(err)
+			}
+			transition, err := d.BeginRunHeadAdvance(
+				run.ID, ref, "head-1", "head-2", true, 3, HeadAdvancePush,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recovering {
+				if _, err := d.FinalizeRecoveredRunHeadAdvance(transition, 3); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := d.FinalizeRunHeadAdvance(transition, false, 3); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if count, err := d.FinalizeRunHeadAdvance(transition, recovering, 3); err != nil || count != 4 {
+				t.Fatalf("exhausted push retry = count %d, err %v", count, err)
+			}
+			got, err := d.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != types.RunFailed || got.PushActive || got.HeadSHA != "head-2" ||
+				got.ValidationReplayCount != 4 {
+				t.Fatalf("exhausted push state = %#v", got)
+			}
+		})
+	}
+}
+
+func TestFinalizeExhaustedPushTransitionDoesNotClearNewerGeneration(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/test-push-exhaustion-race", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(
+		`UPDATE runs
+		 SET test_head_sha = head_sha, validation_target_sha = NULL,
+		     validation_replay_count = 3, push_active = 1
+		 WHERE id = ?`,
+		run.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := d.BeginRunHeadAdvance(
+		run.ID, ref, "head-1", "head-2", true, 3, HeadAdvancePush,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(
+		`UPDATE runs SET head_advance_generation = ? WHERE id = ?`,
+		transition.OwnershipGeneration+1, run.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.FinalizeRunHeadAdvance(transition, false, 3); err == nil {
+		t.Fatal("finalized exhausted transition across newer ownership generation")
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunRunning || !got.PushActive || got.HeadSHA != "head-1" {
+		t.Fatalf("newer generation custody changed: %#v", got)
 	}
 }
 

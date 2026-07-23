@@ -45,20 +45,24 @@ func TestPRStep_GhNotAvailable(t *testing.T) {
 	}
 }
 
-func TestPRStep_RefusesExhaustedReplayWithoutChangingIdentity(t *testing.T) {
+func TestPRStep_AllowsExactBoundaryDeliveryWithStableIdentity(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
+	const prURL = "https://github.com/test/repo/pull/23"
+	env, logFile := fakeGH(t, prURL)
 	sctx := newTestContextWithDBRecords(
 		t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"},
 	)
-	const prURL = "https://github.com/test/repo/pull/23"
+	sctx.Env = env
+	storedPRURL := prURL
+	sctx.Run.PRURL = &storedPRURL
 	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, prURL); err != nil {
 		t.Fatal(err)
 	}
-	exhaustHeadValidationCapacity(t, sctx, headSHA)
+	completeHeadValidationAtCapacity(t, sctx, headSHA)
 
-	if _, err := (&PRStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), "did not converge") {
-		t.Fatalf("Execute() error = %v, want replay exhaustion", err)
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
 	}
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
@@ -66,6 +70,13 @@ func TestPRStep_RefusesExhaustedReplayWithoutChangingIdentity(t *testing.T) {
 	}
 	if run.PRURL == nil || *run.PRURL != prURL {
 		t.Fatalf("PR identity changed: %#v", run.PRURL)
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "pr edit") {
+		t.Fatalf("existing PR was not updated: %s", logData)
 	}
 }
 

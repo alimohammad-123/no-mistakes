@@ -104,7 +104,7 @@ func TestCIStep_CommitForValidationDoesNotPublishConfiguredTestStaleHead(t *test
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, testedHead, config.Commands{Test: "true"})
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Run.Branch = "feature"
-	sctx.Run.TestHeadSHA = &testedHead
+	recordSuccessfulTestProof(t, sctx, testedHead)
 	changed, err := (&CIStep{}).commitForValidation(sctx)
 	if err != nil {
 		t.Fatal(err)

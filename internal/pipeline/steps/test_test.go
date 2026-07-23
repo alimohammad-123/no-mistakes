@@ -48,6 +48,28 @@ func TestTestStep_ConfiguredCommandSeesAuthoritativeSourceRef(t *testing.T) {
 	}
 }
 
+func TestTestStep_ExactBoundaryProofSkipsMutationCapableEvidenceAgent(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(
+		t, ag, dir, baseSHA, headSHA, config.Commands{Test: "true"},
+	)
+	sctx.UserIntent = "prove the exact final candidate"
+	exhaustHeadValidationCapacity(t, sctx, headSHA)
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.TestedHeadSHA != headSHA {
+		t.Fatalf("tested head = %q, want %q", outcome.TestedHeadSHA, headSHA)
+	}
+	if len(ag.calls) != 0 {
+		t.Fatalf("evidence agent calls = %d, want 0", len(ag.calls))
+	}
+}
+
 func TestTestStep_EmptyChildPathKeepsInfrastructureGitAndChildPathIsEmpty(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell assertion")

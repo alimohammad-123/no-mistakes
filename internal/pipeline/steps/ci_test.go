@@ -117,6 +117,24 @@ func TestCIStep_UsesStepEnvForCLIStartupChecks(t *testing.T) {
 	}
 }
 
+func TestCIStep_AllowsExactBoundaryProofToReachNonMutatingDelivery(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(
+		t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"},
+	)
+	sctx.Repo.UpstreamURL = "https://example.com/owner/repo"
+	completeHeadValidationAtCapacity(t, sctx, headSHA)
+
+	outcome, err := (&CIStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.Skipped {
+		t.Fatalf("CI outcome = %#v, want provider skip after eligibility", outcome)
+	}
+}
+
 func TestCIStep_InvalidPRURLReturnsError(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -510,7 +528,7 @@ func TestCIMonitorReadinessRefusesSupersededSourceRef(t *testing.T) {
 	gitCmd(t, dir, "update-ref", "refs/heads/feature", supersedingHead)
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, testedHead, config.Commands{Test: "true"})
-	sctx.Run.TestHeadSHA = &testedHead
+	recordSuccessfulTestProof(t, sctx, testedHead)
 	var logs []string
 	sctx.Log = func(message string) { logs = append(logs, message) }
 

@@ -103,7 +103,7 @@ func TestPushStep_FormattingCommitYieldsBeforePublishingStaleTestHead(t *testing
 	})
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Run.Branch = "feature"
-	sctx.Run.TestHeadSHA = &testedHead
+	recordSuccessfulTestProof(t, sctx, testedHead)
 
 	outcome, err := (&PushStep{}).Execute(sctx)
 	if err != nil {
@@ -146,7 +146,7 @@ func TestPushStep_RefusesExhaustedReplayBeforeLocalOrRemoteMutation(t *testing.T
 	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, prURL); err != nil {
 		t.Fatal(err)
 	}
-	exhaustHeadValidationCapacity(t, sctx, headSHA)
+	completeHeadValidationAtCapacity(t, sctx, headSHA)
 
 	if _, err := (&PushStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), "did not converge") {
 		t.Fatalf("Execute() error = %v, want replay exhaustion", err)
@@ -166,6 +166,37 @@ func TestPushStep_RefusesExhaustedReplayBeforeLocalOrRemoteMutation(t *testing.T
 	}
 	if run.PRURL == nil || *run.PRURL != prURL || run.PushActive {
 		t.Fatalf("PR or push identity changed: %#v", run)
+	}
+}
+
+func TestPushStep_AllowsExactBoundaryDeliveryWithoutLocalMutation(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	sctx := newTestContextWithDBRecords(
+		t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"},
+	)
+	sctx.Repo.UpstreamURL = upstream
+	completeHeadValidationAtCapacity(t, sctx, headSHA)
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != headSHA {
+		t.Fatalf("remote HEAD = %s, want %s", got, headSHA)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.LastPushedSHA == nil || *run.LastPushedSHA != headSHA || run.PushActive {
+		t.Fatalf("exact boundary push state = %#v", run)
 	}
 }
 
@@ -190,7 +221,7 @@ func TestPushStep_RefusesSupersededSourceRefAtUnchangedTestedHead(t *testing.T) 
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, testedHead, config.Commands{Test: "true"})
 	sctx.Repo.UpstreamURL = upstream
-	sctx.Run.TestHeadSHA = &testedHead
+	recordSuccessfulTestProof(t, sctx, testedHead)
 
 	_, err := (&PushStep{}).Execute(sctx)
 	if err == nil || !strings.Contains(err.Error(), "source ref") {

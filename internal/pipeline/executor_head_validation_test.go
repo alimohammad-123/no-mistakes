@@ -38,13 +38,14 @@ type headMutatingStep struct {
 	calls       int
 	mutateEvery bool
 	mutateFirst bool
+	mutateUntil int
 }
 
 func (s *headMutatingStep) Name() types.StepName { return s.name }
 
 func (s *headMutatingStep) Execute(sctx *StepContext) (*StepOutcome, error) {
 	s.calls++
-	if s.mutateEvery || (s.mutateFirst && s.calls == 1) {
+	if s.mutateEvery || (s.mutateFirst && s.calls == 1) || (s.mutateUntil > 0 && s.calls <= s.mutateUntil) {
 		path := filepath.Join(sctx.WorkDir, fmt.Sprintf("head-mutation-%s-%d", s.name, s.calls))
 		if err := os.WriteFile(path, []byte(s.name), 0o644); err != nil {
 			return nil, err
@@ -296,6 +297,36 @@ func TestExecutor_HeadValidationReplayIsBounded(t *testing.T) {
 	}
 	if persisted.Status != types.RunFailed {
 		t.Fatalf("run status = %s, want failed", persisted.Status)
+	}
+}
+
+func TestExecutor_ExactReplayBoundaryCanDeliverProvenCandidate(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := initExecutorGitRepo(t, database, run)
+	testStep := &proofRecordingTestStep{}
+	document := &headMutatingStep{name: types.StepDocument, mutateUntil: 3}
+	lint := newPassStep(types.StepLint)
+	push := newPassStep(types.StepPush)
+	cfg := &config.Config{}
+	cfg.Commands.Test = "configured-test-command"
+	exec := NewExecutor(database, p, cfg, nil, []Step{testStep, document, lint, push}, nil)
+
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatal(err)
+	}
+	if testStep.calls != 4 || document.calls != 4 || lint.callCount() != 4 || push.callCount() != 1 {
+		t.Fatalf(
+			"boundary calls = Test %d Document %d Lint %d Push %d",
+			testStep.calls, document.calls, lint.callCount(), push.callCount(),
+		)
+	}
+	got, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunCompleted || got.ValidationReplayCount != 3 ||
+		got.ValidationTargetSHA != nil || got.TestHeadSHA == nil || *got.TestHeadSHA != got.HeadSHA {
+		t.Fatalf("exact boundary run = %#v", got)
 	}
 }
 

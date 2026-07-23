@@ -432,6 +432,30 @@ func exhaustHeadValidationCapacity(t *testing.T, sctx *pipeline.StepContext, fin
 	}
 }
 
+func completeHeadValidationAtCapacity(t *testing.T, sctx *pipeline.StepContext, headSHA string) {
+	t.Helper()
+	exhaustHeadValidationCapacity(t, sctx, headSHA)
+	if err := sctx.DB.RecordSuccessfulTestHead(sctx.Run.ID, headSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.CompleteHeadValidation(sctx.Run.ID, headSHA); err != nil {
+		t.Fatal(err)
+	}
+	proved := headSHA
+	sctx.Run.TestHeadSHA = &proved
+	sctx.Run.ValidationTargetSHA = nil
+	sctx.Run.ValidationReplayCount = 3
+}
+
+func recordSuccessfulTestProof(t *testing.T, sctx *pipeline.StepContext, headSHA string) {
+	t.Helper()
+	if err := sctx.DB.RecordSuccessfulTestHead(sctx.Run.ID, headSHA); err != nil {
+		t.Fatal(err)
+	}
+	proved := headSHA
+	sctx.Run.TestHeadSHA = &proved
+}
+
 // fakeCIGH creates a fake gh binary that responds to CI-related
 // commands (pr view --json state, pr checks --json, pr view --json comments).
 func fakeCIGH(t *testing.T, state, checksJSON string) []string {

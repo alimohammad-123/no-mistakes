@@ -3,12 +3,14 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -141,9 +143,15 @@ Previous test findings to address:
 	if useEvidenceAgent {
 		if testCmd != "" {
 			if err := sctx.PreflightHeadMutation(); err != nil {
-				return nil, err
+				if !errors.Is(err, db.ErrHeadValidationMutationExhausted) {
+					return nil, err
+				}
+				useEvidenceAgent = false
+				sctx.Log("configured Test passed at the replay boundary; skipping mutation-capable evidence collection")
 			}
 		}
+	}
+	if useEvidenceAgent {
 		evidenceLocation := resolveTestEvidenceLocation(sctx.WorkDir, sctx.Run.Branch, sctx.Run.ID, sctx.Config.Test.Evidence)
 		evidenceDir := evidenceLocation.Dir
 		if evidenceLocation.StoreInRepo && gitIgnoresPath(ctx, sctx.WorkDir, evidenceDir) {
