@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -87,12 +88,24 @@ func (m *RunManager) handleRecoverInterruptedGateLocked(ctx context.Context, rep
 	for i, step := range execSteps {
 		expected[i] = step.Name()
 	}
-	if _, err := m.db.InspectLegacyInterruptedGate(run.ID, repoID, branch, run.HeadSHA, localHead, strings.TrimSpace(intent), canonicalRef, expected); err != nil {
-		return refuse("%v", err)
-	}
-	workDir, gateDir, err := m.validateInterruptedPipelineCopy(ctx, repo, run)
+	inspected, err := m.db.InspectLegacyInterruptedGate(run.ID, repoID, branch, run.HeadSHA, localHead, strings.TrimSpace(intent), canonicalRef, expected)
 	if err != nil {
 		return refuse("%v", err)
+	}
+	workDir, gateDir, reconstruction, err := m.ensureInterruptedPipelineCopy(ctx, repo, run, inspected)
+	if err != nil {
+		return refuse("%v", err)
+	}
+	refusePreClaim := func(reason string, args ...any) (string, bool, error) {
+		primary := fmt.Errorf(reason, args...)
+		if reconstruction != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if cleanupErr := reconstruction.rollback(cleanupCtx); cleanupErr != nil {
+				return refuse("%v; reconstruction rollback failed: %v", primary, cleanupErr)
+			}
+		}
+		return refuse("%v", primary)
 	}
 
 	preparedRun := *run
@@ -103,11 +116,11 @@ func (m *RunManager) handleRecoverInterruptedGateLocked(ctx context.Context, rep
 	preparedRun.AwaitingAgentSince = &parked
 	cfg, err := m.loadRecoveredConfig(ctx, &preparedRun, repo, workDir)
 	if err != nil {
-		return refuse("trusted recovery configuration is unavailable: %v", err)
+		return refusePreClaim("trusted recovery configuration is unavailable: %v", err)
 	}
 	ag, err := newPipelineAgent(ctx, cfg, exec.LookPath)
 	if err != nil {
-		return refuse("pipeline agent is unavailable: %v", err)
+		return refusePreClaim("pipeline agent is unavailable: %v", err)
 	}
 	closeAgent := true
 	defer func() {
@@ -117,38 +130,70 @@ func (m *RunManager) handleRecoverInterruptedGateLocked(ctx context.Context, rep
 	}()
 	if cfg.SessionReuse {
 		if err := validateRecoveredSessionProviders(m.db, run.ID, ag); err != nil {
-			return refuse("stored agent sessions are incompatible: %v", err)
+			return refusePreClaim("stored agent sessions are incompatible: %v", err)
 		}
 	}
 
-	// Repeat mutable Git checks immediately before the database claim. Git refs
-	// and SQLite cannot share one transaction, so recovery also verifies them
-	// again after binding and before executor registration.
+	// Repeat mutable Git, database, process-owner, and external-delivery checks
+	// immediately before the database claim. Git/remote state and SQLite cannot
+	// share one transaction, so every ambiguity still fails closed.
 	if _, _, err := m.validateInterruptedPipelineCopy(ctx, repo, run); err != nil {
-		return refuse("pipeline copy changed before claim: %v", err)
+		return refusePreClaim("pipeline copy changed before claim: %v", err)
 	}
-	restored, err := m.db.RestoreLegacyInterruptedGate(run.ID, repoID, branch, run.HeadSHA, localHead, strings.TrimSpace(intent), canonicalRef, expected)
+	if reconstruction != nil {
+		if err := m.validateInterruptedReconstructionMutableState(ctx, repo, run, workDir, gateDir, false); err != nil {
+			return refusePreClaim("state changed before claim: %v", err)
+		}
+		if _, err := m.validateInterruptedReconstructionGit(ctx, run, workDir, gateDir, true); err != nil {
+			return refusePreClaim("Git state changed before claim: %v", err)
+		}
+		if err := reconstruction.finishPreparation(ctx); err != nil {
+			return refusePreClaim("reconstructed identity changed before claim: %v", err)
+		}
+	}
+	reinspected, err := m.db.InspectLegacyInterruptedGate(run.ID, repoID, branch, run.HeadSHA, localHead, strings.TrimSpace(intent), canonicalRef, expected)
+	if err != nil || reinspected.EvidenceToken != inspected.EvidenceToken {
+		if err == nil {
+			err = fmt.Errorf("durable evidence changed before claim")
+		}
+		return refusePreClaim("%v", err)
+	}
+	if reconstruction != nil {
+		if err := sourceprovenance.BindCandidateIfUnchanged(ctx, workDir, canonicalRef, run.HeadSHA, run.HeadSHA); err != nil {
+			return refusePreClaim("pre-claim source-ref binding failed: %v", err)
+		}
+	}
+	restored, err := m.db.RestoreLegacyInterruptedGate(run.ID, repoID, branch, run.HeadSHA, localHead, strings.TrimSpace(intent), canonicalRef, inspected.EvidenceToken, expected)
 	if err != nil {
-		return refuse("%v", err)
+		return refusePreClaim("%v", err)
 	}
-	if err := sourceprovenance.BindCandidateIfUnchanged(ctx, workDir, canonicalRef, restored.Run.HeadSHA, restored.Run.HeadSHA); err != nil {
-		cleanupErr := m.failClaimedInterruptedRecovery(restored, fmt.Sprintf("source-ref binding failed: %v", err))
-		return refusePostClaim("post-claim source-ref binding failed", cleanupErr)
+	failPostClaim := func(reason, detail string) (string, bool, error) {
+		cleanupErr := m.failClaimedInterruptedRecovery(restored, detail)
+		if cleanupErr == nil && reconstruction != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cleanupErr = reconstruction.rollback(cleanupCtx)
+		}
+		return refusePostClaim(reason, cleanupErr)
+	}
+	if reconstruction != nil {
+		if err := interruptedReconstructionPoint("database-claimed"); err != nil {
+			return failPostClaim("post-claim reconstruction checkpoint failed", err.Error())
+		}
+	} else if err := sourceprovenance.BindCandidateIfUnchanged(ctx, workDir, canonicalRef, restored.Run.HeadSHA, restored.Run.HeadSHA); err != nil {
+		return failPostClaim("post-claim source-ref binding failed", fmt.Sprintf("source-ref binding failed: %v", err))
 	}
 	if err := sourceprovenance.VerifyCandidateBinding(ctx, workDir, canonicalRef, restored.Run.HeadSHA); err != nil {
-		cleanupErr := m.failClaimedInterruptedRecovery(restored, fmt.Sprintf("source-ref verification failed: %v", err))
-		return refusePostClaim("post-claim source-ref verification failed", cleanupErr)
+		return failPostClaim("post-claim source-ref verification failed", fmt.Sprintf("source-ref verification failed: %v", err))
 	}
 	if _, _, err := m.validateInterruptedPipelineCopy(ctx, repo, restored.Run); err != nil {
-		cleanupErr := m.failClaimedInterruptedRecovery(restored, fmt.Sprintf("pipeline copy changed after claim: %v", err))
-		return refusePostClaim("post-claim pipeline copy verification failed", cleanupErr)
+		return failPostClaim("post-claim pipeline copy verification failed", fmt.Sprintf("pipeline copy changed after claim: %v", err))
 	}
 	if err := pipeline.ValidateRecoveredRun(m.db, restored.Run, execSteps); err != nil {
-		cleanupErr := m.failClaimedInterruptedRecovery(restored, fmt.Sprintf("restored gate validation failed: %v", err))
-		return refusePostClaim("post-claim gate validation failed", cleanupErr)
+		return failPostClaim("post-claim gate validation failed", fmt.Sprintf("restored gate validation failed: %v", err))
 	}
 
-	plan := recoveredRunPlan{run: restored.Run, repo: repo, workDir: workDir, gateDir: gateDir, cfg: cfg, agent: ag, steps: execSteps}
+	plan := recoveredRunPlan{run: restored.Run, repo: repo, workDir: workDir, gateDir: gateDir, cfg: cfg, agent: ag, steps: execSteps, reconstruction: reconstruction}
 	closeAgent = false
 	m.resumeRecoveredRun(plan)
 	return restored.Run.ID, true, nil

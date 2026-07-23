@@ -2,6 +2,7 @@ package db
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -87,6 +88,18 @@ func seedLegacyInterruptedGate(t *testing.T, d *DB) (*Run, *StepResult, string) 
 
 func stringPtr(value string) *string { return &value }
 
+func inspectLegacyEvidenceToken(t *testing.T, d *DB, run *Run, intent string) string {
+	t.Helper()
+	inspected, err := d.InspectLegacyInterruptedGate(run.ID, run.RepoID, run.Branch, run.HeadSHA, *run.SubmittedHeadSHA, intent, "refs/heads/fm/arena-no-mistakes-beta", types.AllSteps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspected.EvidenceToken == "" {
+		t.Fatal("inspection returned an empty evidence token")
+	}
+	return inspected.EvidenceToken
+}
+
 func TestRestoreLegacyInterruptedGateRestoresExactTransaction(t *testing.T) {
 	d := openTestDB(t)
 	run, interrupted, intent := seedLegacyInterruptedGate(t, d)
@@ -94,16 +107,26 @@ func TestRestoreLegacyInterruptedGateRestoresExactTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := d.UpsertRunAgentSession(run.ID, "reviewer", "codex", "session-preserved"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertAgentInvocation(AgentInvocation{RunID: run.ID, StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "codex", SessionMode: InvocationModeStarted, StartedAt: 1, CompletedAt: 2, DurationMS: 1, ExitStatus: "ok"}); err != nil {
+		t.Fatal(err)
+	}
 	before, err := d.GetStepResult(interrupted.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	stepsBefore, _ := d.GetStepsByRun(run.ID)
+	sessionsBefore, _ := d.GetRunAgentSessions(run.ID)
+	invocationsBefore, _ := d.GetAgentInvocationsByRun(run.ID)
 	roundsBefore, err := d.GetRoundsByStep(interrupted.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	restored, err := d.RestoreLegacyInterruptedGate(run.ID, run.RepoID, run.Branch, run.HeadSHA, *run.SubmittedHeadSHA, intent, "refs/heads/fm/arena-no-mistakes-beta", types.AllSteps())
+	evidenceToken := inspectLegacyEvidenceToken(t, d, run, intent)
+	restored, err := d.RestoreLegacyInterruptedGate(run.ID, run.RepoID, run.Branch, run.HeadSHA, *run.SubmittedHeadSHA, intent, "refs/heads/fm/arena-no-mistakes-beta", evidenceToken, types.AllSteps())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,6 +152,20 @@ func TestRestoreLegacyInterruptedGateRestoresExactTransaction(t *testing.T) {
 	if len(roundsAfter) != 1 || roundsAfter[0].ID != roundsBefore[0].ID || *roundsAfter[0].FindingsJSON != *roundsBefore[0].FindingsJSON {
 		t.Fatalf("rounds changed: before=%#v after=%#v", roundsBefore, roundsAfter)
 	}
+	stepsAfter, _ := d.GetStepsByRun(run.ID)
+	for i := range stepsBefore {
+		if stepsBefore[i].ID == interrupted.ID {
+			continue
+		}
+		if !reflect.DeepEqual(stepsBefore[i], stepsAfter[i]) {
+			t.Fatalf("non-gate step changed: before=%#v after=%#v", stepsBefore[i], stepsAfter[i])
+		}
+	}
+	sessionsAfter, _ := d.GetRunAgentSessions(run.ID)
+	invocationsAfter, _ := d.GetAgentInvocationsByRun(run.ID)
+	if !reflect.DeepEqual(sessionsBefore, sessionsAfter) || !reflect.DeepEqual(invocationsBefore, invocationsAfter) {
+		t.Fatal("restore changed preserved session or invocation rows")
+	}
 	runs, err := d.GetRunsByRepo(run.RepoID)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +174,7 @@ func TestRestoreLegacyInterruptedGateRestoresExactTransaction(t *testing.T) {
 		t.Fatalf("run count = %d, want 1", len(runs))
 	}
 
-	if _, err := d.RestoreLegacyInterruptedGate(run.ID, run.RepoID, run.Branch, run.HeadSHA, *run.SubmittedHeadSHA, intent, "refs/heads/fm/arena-no-mistakes-beta", types.AllSteps()); err == nil {
+	if _, err := d.RestoreLegacyInterruptedGate(run.ID, run.RepoID, run.Branch, run.HeadSHA, *run.SubmittedHeadSHA, intent, "refs/heads/fm/arena-no-mistakes-beta", evidenceToken, types.AllSteps()); err == nil {
 		t.Fatal("second restore should be refused without changing the active run")
 	}
 	still, _ := d.GetRun(run.ID)
@@ -149,7 +186,8 @@ func TestRestoreLegacyInterruptedGateRestoresExactTransaction(t *testing.T) {
 func TestFailClaimedInterruptedGateClearsParkedMarkerAtomically(t *testing.T) {
 	d := openTestDB(t)
 	run, interrupted, intent := seedLegacyInterruptedGate(t, d)
-	restored, err := d.RestoreLegacyInterruptedGate(run.ID, run.RepoID, run.Branch, run.HeadSHA, *run.SubmittedHeadSHA, intent, "refs/heads/fm/arena-no-mistakes-beta", types.AllSteps())
+	evidenceToken := inspectLegacyEvidenceToken(t, d, run, intent)
+	restored, err := d.RestoreLegacyInterruptedGate(run.ID, run.RepoID, run.Branch, run.HeadSHA, *run.SubmittedHeadSHA, intent, "refs/heads/fm/arena-no-mistakes-beta", evidenceToken, types.AllSteps())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,12 +210,119 @@ func TestRestoreLegacyInterruptedGateRestoresFixReviewFromLatestRound(t *testing
 	if _, err := d.sql.Exec(`UPDATE step_rounds SET trigger_type = 'auto_fix' WHERE step_result_id = ?`, interrupted.ID); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := d.RestoreLegacyInterruptedGate(run.ID, run.RepoID, run.Branch, run.HeadSHA, *run.SubmittedHeadSHA, intent, "refs/heads/fm/arena-no-mistakes-beta", types.AllSteps())
+	evidenceToken := inspectLegacyEvidenceToken(t, d, run, intent)
+	restored, err := d.RestoreLegacyInterruptedGate(run.ID, run.RepoID, run.Branch, run.HeadSHA, *run.SubmittedHeadSHA, intent, "refs/heads/fm/arena-no-mistakes-beta", evidenceToken, types.AllSteps())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if restored.Step.Status != types.StepStatusFixReview {
 		t.Fatalf("restored status = %s, want fix_review", restored.Step.Status)
+	}
+}
+
+func TestInterruptedGateEvidenceTokenCoversPreservedRows(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*testing.T, *DB, *Run, *StepResult)
+	}{
+		{
+			name: "completed step timing",
+			mutate: func(t *testing.T, d *DB, run *Run, _ *StepResult) {
+				if _, err := d.sql.Exec(`UPDATE step_results SET duration_ms = duration_ms + 1 WHERE run_id = ? AND step_name = 'review'`, run.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "run parked timing",
+			mutate: func(t *testing.T, d *DB, run *Run, _ *StepResult) {
+				if _, err := d.sql.Exec(`UPDATE runs SET parked_ms = parked_ms + 1 WHERE id = ?`, run.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "gate and latest round findings",
+			mutate: func(t *testing.T, d *DB, _ *Run, step *StepResult) {
+				changed := `{"findings":[{"id":"changed","severity":"error","description":"changed","action":"auto-fix"}]}`
+				if _, err := d.sql.Exec(`UPDATE step_results SET findings_json = ? WHERE id = ?`, changed, step.ID); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := d.sql.Exec(`UPDATE step_rounds SET findings_json = ? WHERE step_result_id = ?`, changed, step.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "round timing",
+			mutate: func(t *testing.T, d *DB, _ *Run, step *StepResult) {
+				if _, err := d.sql.Exec(`UPDATE step_rounds SET duration_ms = duration_ms + 1 WHERE step_result_id = ?`, step.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "session identity",
+			mutate: func(t *testing.T, d *DB, run *Run, _ *StepResult) {
+				if _, err := d.sql.Exec(`UPDATE run_agent_sessions SET session_id = 'changed' WHERE run_id = ?`, run.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "invocation timing",
+			mutate: func(t *testing.T, d *DB, run *Run, _ *StepResult) {
+				if _, err := d.sql.Exec(`UPDATE agent_invocations SET duration_ms = duration_ms + 1 WHERE run_id = ?`, run.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "repository policy",
+			mutate: func(t *testing.T, d *DB, run *Run, _ *StepResult) {
+				if _, err := d.sql.Exec(`UPDATE repos SET base_branch = 'other' WHERE id = ?`, run.RepoID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "repository path",
+			mutate: func(t *testing.T, d *DB, run *Run, _ *StepResult) {
+				if _, err := d.sql.Exec(`UPDATE repos SET working_path = working_path || '-moved' WHERE id = ?`, run.RepoID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := openTestDB(t)
+			run, interrupted, intent := seedLegacyInterruptedGate(t, d)
+			if err := d.UpsertRunAgentSession(run.ID, "reviewer", "codex", "session-original"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.InsertAgentInvocation(AgentInvocation{
+				RunID: run.ID, StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "codex",
+				SessionMode: InvocationModeStarted, StartedAt: 1, CompletedAt: 2, DurationMS: 1, ExitStatus: "ok",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			evidenceToken := inspectLegacyEvidenceToken(t, d, run, intent)
+			second := inspectLegacyEvidenceToken(t, d, run, intent)
+			if second != evidenceToken {
+				t.Fatalf("stable evidence tokens differ: %s != %s", evidenceToken, second)
+			}
+			tc.mutate(t, d, run, interrupted)
+			before, _ := d.GetRun(run.ID)
+			beforeStep, _ := d.GetStepResult(interrupted.ID)
+			if _, err := d.RestoreLegacyInterruptedGate(run.ID, run.RepoID, run.Branch, run.HeadSHA, *run.SubmittedHeadSHA, intent, "refs/heads/fm/arena-no-mistakes-beta", evidenceToken, types.AllSteps()); err == nil || !strings.Contains(err.Error(), "durable evidence changed") {
+				t.Fatalf("restore error = %v, want durable evidence refusal", err)
+			}
+			after, _ := d.GetRun(run.ID)
+			afterStep, _ := d.GetStepResult(interrupted.ID)
+			if !reflect.DeepEqual(after, before) || !reflect.DeepEqual(afterStep, beforeStep) {
+				t.Fatalf("evidence refusal mutated state: before=%#v/%#v after=%#v/%#v", before, beforeStep, after, afterStep)
+			}
+		})
 	}
 }
 
@@ -216,6 +361,12 @@ func TestRestoreLegacyInterruptedGateRefusesAmbiguousShapes(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{name: "live step agent", mutate: func(t *testing.T, d *DB, _ *Run, step *StepResult) {
+			_, err := d.sql.Exec(`UPDATE step_results SET agent_pid = 123 WHERE id = ?`, step.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}},
 		{name: "missing round", mutate: func(t *testing.T, d *DB, _ *Run, step *StepResult) {
 			_, err := d.sql.Exec(`DELETE FROM step_rounds WHERE step_result_id = ?`, step.ID)
 			if err != nil {
@@ -230,6 +381,18 @@ func TestRestoreLegacyInterruptedGateRefusesAmbiguousShapes(t *testing.T) {
 		}},
 		{name: "pushed", mutate: func(t *testing.T, d *DB, run *Run, _ *StepResult) {
 			_, err := d.sql.Exec(`UPDATE runs SET last_pushed_sha = head_sha WHERE id = ?`, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "active push", mutate: func(t *testing.T, d *DB, run *Run, _ *StepResult) {
+			_, err := d.sql.Exec(`UPDATE runs SET push_active = 1 WHERE id = ?`, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "nonnull zero push generation", mutate: func(t *testing.T, d *DB, run *Run, _ *StepResult) {
+			_, err := d.sql.Exec(`UPDATE runs SET push_generation = 0 WHERE id = ?`, run.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -311,10 +474,11 @@ func TestRestoreLegacyInterruptedGateRefusesAmbiguousShapes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := openTestDB(t)
 			run, interrupted, intent := seedLegacyInterruptedGate(t, d)
+			evidenceToken := inspectLegacyEvidenceToken(t, d, run, intent)
 			tc.mutate(t, d, run, interrupted)
 			before, _ := d.GetRun(run.ID)
 			beforeStep, _ := d.GetStepResult(interrupted.ID)
-			if _, err := d.RestoreLegacyInterruptedGate(run.ID, run.RepoID, run.Branch, run.HeadSHA, *run.SubmittedHeadSHA, intent, "refs/heads/fm/arena-no-mistakes-beta", types.AllSteps()); err == nil {
+			if _, err := d.RestoreLegacyInterruptedGate(run.ID, run.RepoID, run.Branch, run.HeadSHA, *run.SubmittedHeadSHA, intent, "refs/heads/fm/arena-no-mistakes-beta", evidenceToken, types.AllSteps()); err == nil {
 				t.Fatal("ambiguous legacy shape was restored")
 			}
 			after, _ := d.GetRun(run.ID)

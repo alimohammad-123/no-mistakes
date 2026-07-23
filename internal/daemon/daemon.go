@@ -268,9 +268,12 @@ func writeDaemonPIDFile(path string, record daemonPIDFile) error {
 func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	reapOrphanedServers(p)
 	migrateGateConfigs(context.Background(), p)
+	mgr.reconcileInterruptedWorktreeJournal(context.Background())
 
-	plans := mgr.recoverableParkedRuns(context.Background())
-	preserved := make(map[string]struct{}, len(plans))
+	plans, preserved := mgr.recoverableParkedRuns(context.Background())
+	if preserved == nil {
+		preserved = make(map[string]struct{}, len(plans))
+	}
 	for _, plan := range plans {
 		preserved[plan.run.ID] = struct{}{}
 	}
@@ -323,6 +326,12 @@ func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths) {
 			}
 			runID := runEntry.Name()
 			wtPath := filepath.Join(repoPath, runID)
+			if repoEntry.Name() == arenaMissingWorktreeRepoID && runID == arenaMissingWorktreeRunID {
+				if _, journalErr := os.Lstat(p.InterruptedWorktreeRecoveryDir(repoEntry.Name(), runID)); journalErr == nil || !os.IsNotExist(journalErr) {
+					slog.Info("skipping worktree cleanup", "path", wtPath, "reason", "interrupted-worktree journal requires explicit reconciliation")
+					continue
+				}
+			}
 			if skip, reason := skipWorktreeCleanup(d, runID); skip {
 				slog.Info("skipping worktree cleanup", "path", wtPath, "reason", reason)
 				continue

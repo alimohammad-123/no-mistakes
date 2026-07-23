@@ -733,11 +733,17 @@ func buildBinaries(t *testing.T) (nmBin, fakeBin string) {
 		}
 		for _, target := range []struct {
 			out, pkg string
+			tags     string
 		}{
-			{nm, "./cmd/no-mistakes"},
-			{fake, "./cmd/fakeagent"},
+			{nm, "./cmd/no-mistakes", "e2e"},
+			{fake, "./cmd/fakeagent", ""},
 		} {
-			cmd := exec.Command("go", "build", "-o", target.out, target.pkg)
+			args := []string{"build"}
+			if target.tags != "" {
+				args = append(args, "-tags", target.tags)
+			}
+			args = append(args, "-o", target.out, target.pkg)
+			cmd := exec.Command("go", args...)
 			cmd.Dir = repoRoot
 			out, err := cmd.CombinedOutput()
 			if err != nil {

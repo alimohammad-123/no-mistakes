@@ -77,22 +77,24 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 }
 
 type recoveredRunPlan struct {
-	run     *db.Run
-	repo    *db.Repo
-	workDir string
-	gateDir string
-	cfg     *config.Config
-	agent   agent.Agent
-	steps   []pipeline.Step
+	run            *db.Run
+	repo           *db.Repo
+	workDir        string
+	gateDir        string
+	cfg            *config.Config
+	agent          agent.Agent
+	steps          []pipeline.Step
+	reconstruction *interruptedWorktreeReconstruction
 }
 
-func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
+func (m *RunManager) recoverableParkedRuns(ctx context.Context) ([]recoveredRunPlan, map[string]struct{}) {
 	runs, err := m.db.GetActiveRuns()
 	if err != nil {
 		slog.Error("failed to list active runs for recovery", "error", err)
-		return nil
+		return nil, nil
 	}
 	plans := make([]recoveredRunPlan, 0, len(runs))
+	preservedAmbiguous := make(map[string]struct{})
 	branchCounts := make(map[string]int, len(runs))
 	for _, run := range runs {
 		branchCounts[run.RepoID+"\x00"+run.Branch]++
@@ -100,16 +102,30 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 	for _, run := range runs {
 		if branchCounts[run.RepoID+"\x00"+run.Branch] != 1 {
 			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", "conflicting active run for branch")
+			if m.mustPreserveInterruptedJournalArtifact(run) {
+				preservedAmbiguous[run.ID] = struct{}{}
+			}
 			continue
 		}
 		plan, err := m.prepareRecoveredRun(ctx, run)
 		if err != nil {
 			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", err)
+			if m.mustPreserveInterruptedJournalArtifact(run) {
+				preservedAmbiguous[run.ID] = struct{}{}
+			}
 			continue
 		}
 		plans = append(plans, *plan)
 	}
-	return plans
+	return plans, preservedAmbiguous
+}
+
+func (m *RunManager) mustPreserveInterruptedJournalArtifact(run *db.Run) bool {
+	if run == nil || run.ID != arenaMissingWorktreeRunID || run.RepoID != arenaMissingWorktreeRepoID || run.Status != types.RunRunning || run.AwaitingAgentSince == nil {
+		return false
+	}
+	_, err := os.Lstat(m.paths.InterruptedWorktreeRecoveryDir(run.RepoID, run.ID))
+	return err == nil || !os.IsNotExist(err)
 }
 
 func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*recoveredRunPlan, error) {
@@ -164,14 +180,20 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 			return nil, err
 		}
 	}
+	reconstruction, err := m.loadClaimedInterruptedWorktreeJournal(repo, run, workDir, gateDir)
+	if err != nil {
+		_ = ag.Close()
+		return nil, err
+	}
 	return &recoveredRunPlan{
-		run:     run,
-		repo:    repo,
-		workDir: workDir,
-		gateDir: gateDir,
-		cfg:     cfg,
-		agent:   ag,
-		steps:   execSteps,
+		run:            run,
+		repo:           repo,
+		workDir:        workDir,
+		gateDir:        gateDir,
+		cfg:            cfg,
+		agent:          ag,
+		steps:          execSteps,
+		reconstruction: reconstruction,
 	}, nil
 }
 
@@ -353,6 +375,12 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	m.cancels[plan.run.ID] = cancel
 	m.dones[plan.run.ID] = done
 	m.mu.Unlock()
+	if plan.reconstruction != nil {
+		if err := interruptedReconstructionPoint("executor-admitted"); err != nil {
+			panic(err)
+		}
+		plan.reconstruction.markAdmitted()
+	}
 	go func() {
 		startedAt := time.Now()
 		preserveWorktree := false

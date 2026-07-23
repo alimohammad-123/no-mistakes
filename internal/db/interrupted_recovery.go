@@ -1,8 +1,12 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -15,8 +19,9 @@ const LegacyDaemonShutdownError = "daemon shutting down"
 // InterruptedGateRestore is the exact run and gate transaction restored from a
 // legacy graceful-shutdown footprint.
 type InterruptedGateRestore struct {
-	Run  *Run
-	Step *StepResult
+	Run           *Run
+	Step          *StepResult
+	EvidenceToken string
 }
 
 // InspectLegacyInterruptedGate validates the complete legacy database footprint
@@ -40,7 +45,11 @@ func (d *DB) InspectLegacyInterruptedGate(runID, repoID, branch, headSHA, submit
 	gateCopy.Status = gateStatus
 	gateCopy.Error = nil
 	gateCopy.CompletedAt = nil
-	return &InterruptedGateRestore{Run: run, Step: &gateCopy}, nil
+	evidenceToken, err := legacyInterruptedEvidenceTokenTx(tx, run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("inspect interrupted gate: durable evidence: %w", err)
+	}
+	return &InterruptedGateRestore{Run: run, Step: &gateCopy, EvidenceToken: evidenceToken}, nil
 }
 
 // RestoreLegacyInterruptedGate is the sole database owner of the compatibility
@@ -48,8 +57,8 @@ func (d *DB) InspectLegacyInterruptedGate(runID, repoID, branch, headSHA, submit
 // run. The caller must independently verify repository and worktree state
 // before invoking it. Every mutable database invariant is re-read and checked
 // in this transaction, and any mismatch leaves the run untouched.
-func (d *DB) RestoreLegacyInterruptedGate(runID, repoID, branch, headSHA, submittedHead, intent, sourceRef string, expected []types.StepName) (*InterruptedGateRestore, error) {
-	if runID == "" || repoID == "" || branch == "" || headSHA == "" || submittedHead == "" || intent == "" || sourceRef == "" || len(expected) == 0 {
+func (d *DB) RestoreLegacyInterruptedGate(runID, repoID, branch, headSHA, submittedHead, intent, sourceRef, evidenceToken string, expected []types.StepName) (*InterruptedGateRestore, error) {
+	if runID == "" || repoID == "" || branch == "" || headSHA == "" || submittedHead == "" || intent == "" || sourceRef == "" || evidenceToken == "" || len(expected) == 0 {
 		return nil, fmt.Errorf("restore interrupted gate: incomplete recovery identity")
 	}
 
@@ -62,6 +71,13 @@ func (d *DB) RestoreLegacyInterruptedGate(runID, repoID, branch, headSHA, submit
 	run, gate, gateStatus, err := inspectLegacyInterruptedGateTx(tx, runID, repoID, branch, headSHA, submittedHead, intent, sourceRef, expected)
 	if err != nil {
 		return nil, fmt.Errorf("restore interrupted gate: %w", err)
+	}
+	currentEvidenceToken, err := legacyInterruptedEvidenceTokenTx(tx, run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("restore interrupted gate: durable evidence: %w", err)
+	}
+	if currentEvidenceToken != evidenceToken {
+		return nil, fmt.Errorf("restore interrupted gate: durable evidence changed before claim")
 	}
 
 	ts := now()
@@ -112,7 +128,121 @@ func (d *DB) RestoreLegacyInterruptedGate(runID, repoID, branch, headSHA, submit
 	activity := "status: " + string(gateStatus)
 	restoredStep.LastActivity = &activity
 	restoredStep.AgentPID = nil
-	return &InterruptedGateRestore{Run: &restoredRun, Step: &restoredStep}, nil
+	return &InterruptedGateRestore{Run: &restoredRun, Step: &restoredStep, EvidenceToken: evidenceToken}, nil
+}
+
+// legacyInterruptedEvidenceTokenTx hashes every durable repository, run, step,
+// round, session, and invocation value that recovery promises to preserve. The
+// token is computed from raw SQLite values, including NULL distinctions, with
+// explicit ordering and length framing so it is stable and unambiguous.
+func legacyInterruptedEvidenceTokenTx(tx *sql.Tx, runID string) (string, error) {
+	h := sha256.New()
+	queries := []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{
+			name: "repo",
+			query: `SELECT id, working_path, upstream_url, fork_url, default_branch, base_branch, created_at
+				FROM repos WHERE id = (SELECT repo_id FROM runs WHERE id = ?)`,
+			args: []any{runID},
+		},
+		{
+			name: "run",
+			query: `SELECT id, repo_id, branch, head_sha, base_sha, base_branch, source_ref,
+				bootstrap_test_repository, bootstrap_test_base_branch, bootstrap_test_command, bootstrap_test_policy_sha256,
+				submitted_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at,
+				last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at,
+				push_generation, push_active, custody_returned_at, error, awaiting_agent_since, parked_ms,
+				intent, intent_source, intent_session_id, intent_score, created_at, updated_at
+				FROM runs WHERE id = ?`,
+			args: []any{runID},
+		},
+		{
+			name: "steps",
+			query: `SELECT id, run_id, step_name, step_order, status, exit_code, duration_ms, log_path,
+				findings_json, error, started_at, completed_at, last_activity_at, last_activity, agent_pid, auto_fix_limit
+				FROM step_results WHERE run_id = ? ORDER BY step_order, id`,
+			args: []any{runID},
+		},
+		{
+			name: "rounds",
+			query: `SELECT r.id, r.step_result_id, r.round, r.trigger_type, r.findings_json,
+				r.user_findings_json, r.selected_finding_ids, r.selection_source, r.fix_summary,
+				r.duration_ms, r.created_at
+				FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id
+				WHERE s.run_id = ? ORDER BY s.step_order, r.round, r.id`,
+			args: []any{runID},
+		},
+		{
+			name: "sessions",
+			query: `SELECT run_id, role, agent, session_id, created_at, updated_at
+				FROM run_agent_sessions WHERE run_id = ? ORDER BY role, agent, session_id`,
+			args: []any{runID},
+		},
+		{
+			name:  "invocations",
+			query: `SELECT ` + agentInvocationColumns + ` FROM agent_invocations WHERE run_id = ? ORDER BY started_at, id`,
+			args:  []any{runID},
+		},
+	}
+	for _, query := range queries {
+		if err := hashInterruptedEvidenceRows(h, query.name, tx, query.query, query.args...); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func hashInterruptedEvidenceRows(h hash.Hash, name string, tx *sql.Tx, query string, args ...any) error {
+	writeInterruptedEvidenceValue(h, []byte(name), false)
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return fmt.Errorf("query %s: %w", name, err)
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		return fmt.Errorf("columns %s: %w", name, err)
+	}
+	for _, column := range columns {
+		writeInterruptedEvidenceValue(h, []byte(column), false)
+	}
+	rowCount := uint64(0)
+	for rows.Next() {
+		raw := make([]sql.RawBytes, len(columns))
+		dest := make([]any, len(columns))
+		for i := range raw {
+			dest[i] = &raw[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return fmt.Errorf("scan %s: %w", name, err)
+		}
+		rowCount++
+		for _, value := range raw {
+			writeInterruptedEvidenceValue(h, value, value == nil)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate %s: %w", name, err)
+	}
+	var count [8]byte
+	binary.BigEndian.PutUint64(count[:], rowCount)
+	_, _ = h.Write(count[:])
+	return nil
+}
+
+func writeInterruptedEvidenceValue(h hash.Hash, value []byte, isNull bool) {
+	if isNull {
+		_, _ = h.Write([]byte{0})
+		return
+	}
+	_, _ = h.Write([]byte{1})
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+	_, _ = h.Write(size[:])
+	_, _ = h.Write(value)
 }
 
 func inspectLegacyInterruptedGateTx(tx *sql.Tx, runID, repoID, branch, headSHA, submittedHead, intent, sourceRef string, expected []types.StepName) (*Run, *StepResult, types.StepStatus, error) {
