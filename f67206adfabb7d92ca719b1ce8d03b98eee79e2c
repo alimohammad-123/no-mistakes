@@ -1,0 +1,35 @@
+internal/pipeline/source_ref_test.go
+  s_bca92e9b5fd908::t_3c46627ee960b9 236,342,417
+  s_bca92e9b5fd908::t_6728f46d7ffd9a 434-483,488-535
+  s_bca92e9b5fd908::t_b31e814b4cb16f 484
+  s_bca92e9b5fd908::t_052b345c72a4cd 485-487
+internal/db/head_validation_test.go
+  s_bca92e9b5fd908::t_b5ffeccfc3002a 259-261
+  s_bca92e9b5fd908::t_3c46627ee960b9 219,223,266,325,366,392
+  s_bca92e9b5fd908::t_b212c2bab6cecb 406-489
+internal/pipeline/pipeline.go
+  s_bca92e9b5fd908::t_3ed9c040d1d056 115-117,119,176,184-185,190-192,195
+internal/pipeline/executor.go
+  s_bca92e9b5fd908::t_e3395207b1ef77 488
+internal/db/run.go
+  s_bca92e9b5fd908::t_3ed9c040d1d056 785-789,795,806-825,856-858,872,879,882,891-921,930-932
+internal/pipeline/executor_head_validation_test.go
+  s_bca92e9b5fd908::t_c899eb74518751 69-71,73-99,103-153,180-182
+  s_bca92e9b5fd908::t_97091e6104d37f 72,100-102,154-179
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f67206adfabb7d92ca719b1ce8d03b98eee79e2c",
+  "prompts": {},
+  "sessions": {
+    "s_bca92e9b5fd908": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8e5a-c081-7871-9b60-ad7062e8ebbd",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}

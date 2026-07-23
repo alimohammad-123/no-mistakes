@@ -1,0 +1,66 @@
+internal/daemon/startup_recovery_test.go
+  s_bca92e9b5fd908::t_c408b673c18513 90-138
+internal/pipeline/steps/rebase.go
+  s_bca92e9b5fd908::t_06f39df609b6c4 27-29
+internal/pipeline/steps/test.go
+  s_bca92e9b5fd908::t_c408b673c18513 142-146
+internal/pipeline/steps/common_test.go
+  s_bca92e9b5fd908::t_96301b8f9594d1 716-752
+internal/pipeline/pipeline.go
+  s_bca92e9b5fd908::t_a4cd6ca08966ae 256-257
+  s_bca92e9b5fd908::t_459988fa0ee30d 105-114,253-255,258-259
+  s_bca92e9b5fd908::t_06f39df609b6c4 137
+internal/daemon/manager.go
+  s_bca92e9b5fd908::t_06f39df609b6c4 482-485,1087-1090
+internal/db/run.go
+  s_bca92e9b5fd908::t_06f39df609b6c4 931-933,1034-1036,1038-1039,1055-1056,1058-1059,1061,1065,1083-1085,1091-1092,1122
+  s_bca92e9b5fd908::t_4e86f54adc70f3 1066
+  s_bca92e9b5fd908::t_459988fa0ee30d 690-710,712-715,722-725,863-864
+  s_bca92e9b5fd908::t_c408b673c18513 711,716-721
+internal/pipeline/steps/pr.go
+  s_bca92e9b5fd908::t_c408b673c18513 54-56
+internal/pipeline/steps/document.go
+  s_bca92e9b5fd908::t_b439cbe5f40c25 116-118
+internal/pipeline/steps/ci_fix.go
+  s_bca92e9b5fd908::t_b439cbe5f40c25 21-23
+internal/pipeline/steps/lint.go
+  s_bca92e9b5fd908::t_b439cbe5f40c25 22-24
+internal/pipeline/steps/common_fix.go
+  s_bca92e9b5fd908::t_b439cbe5f40c25 118-120,186-188
+internal/pipeline/steps/pr_test.go
+  s_bca92e9b5fd908::t_6dff54539a45da 48-71
+internal/pipeline/source_ref_test.go
+  s_bca92e9b5fd908::t_5a80101185290f 12,179-233,235-249,251-268
+  s_bca92e9b5fd908::t_e89a32acaacf7d 234,250
+  s_bca92e9b5fd908::t_98a3ed7869c839 269-270
+internal/pipeline/steps/push.go
+  s_bca92e9b5fd908::t_b439cbe5f40c25 24-26
+internal/daemon/daemon.go
+  s_bca92e9b5fd908::t_06f39df609b6c4 371-377
+internal/pipeline/steps/helpers_test.go
+  s_bca92e9b5fd908::t_96301b8f9594d1 419-434
+internal/pipeline/steps/push_test.go
+  s_bca92e9b5fd908::t_96301b8f9594d1 130-171
+internal/db/head_validation_test.go
+  s_bca92e9b5fd908::t_4e86f54adc70f3 453-454
+  s_bca92e9b5fd908::t_06f39df609b6c4 239,243,275,436,443,450
+  s_bca92e9b5fd908::t_96301b8f9594d1 464-467
+  s_bca92e9b5fd908::t_d50a2896155300 407,446-449,451-452,460-461,473-501
+  s_bca92e9b5fd908::t_44ff71768d4615 502-503
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "318477aefe33ef4f972f1db407bf38d4dcb94c99",
+  "prompts": {},
+  "sessions": {
+    "s_bca92e9b5fd908": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8e5a-c081-7871-9b60-ad7062e8ebbd",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}

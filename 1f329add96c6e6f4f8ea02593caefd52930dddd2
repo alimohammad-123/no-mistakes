@@ -1,0 +1,29 @@
+internal/db/head_validation_test.go
+  s_bca92e9b5fd908::t_6a4aeb5471bffb 150-181
+internal/pipeline/executor_head_validation_test.go
+  s_bca92e9b5fd908::t_6a4aeb5471bffb 279-387
+internal/db/run.go
+  s_bca92e9b5fd908::t_6a4aeb5471bffb 600-602,663-729
+  s_bca92e9b5fd908::t_c9e3e64f1b179b 730-731
+internal/pipeline/pipeline.go
+  s_bca92e9b5fd908::t_6a4aeb5471bffb 106-109,113-121
+internal/pipeline/executor.go
+  s_bca92e9b5fd908::t_6a4aeb5471bffb 408,433-434,442-444,481,1108,1622,1628-1633,1649-1651
+  s_bca92e9b5fd908::t_7d5db7de1dde67 1652-1653
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "1f329add96c6e6f4f8ea02593caefd52930dddd2",
+  "prompts": {},
+  "sessions": {
+    "s_bca92e9b5fd908": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8e5a-c081-7871-9b60-ad7062e8ebbd",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
