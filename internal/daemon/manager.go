@@ -480,6 +480,10 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			_ = plan.agent.Close()
 			m.closeSubscribers(plan.run.ID)
 			if !preserveWorktree {
+				transition, err := m.db.GetRunHeadTransition(plan.run.ID)
+				preserveWorktree = err != nil || transition != nil
+			}
+			if !preserveWorktree {
 				if err := git.WorktreeRemove(context.Background(), plan.gateDir, plan.workDir); err != nil {
 					slog.Warn("failed to remove recovered worktree", "path", plan.workDir, "error", err)
 				}
@@ -1080,6 +1084,10 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			ag.Close()
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
+			if !preserveWorktree {
+				transition, err := m.db.GetRunHeadTransition(run.ID)
+				preserveWorktree = err != nil || transition != nil
+			}
 			// Clean up terminal worktrees. A durably parked gate interrupted by
 			// daemon shutdown remains available to startup recovery.
 			if !preserveWorktree {

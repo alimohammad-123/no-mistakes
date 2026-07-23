@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -172,6 +173,98 @@ func TestAdvanceHeadSHARefusesSupersedingRefWithoutRewind(t *testing.T) {
 	}
 	if persisted.HeadSHA != first {
 		t.Fatalf("durable run head = %s, want unchanged %s", persisted.HeadSHA, first)
+	}
+}
+
+func TestAdvanceHeadSHAAnchorsOverBudgetCandidateBeforeFailing(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "user.name", "test"}, {"config", "user.email", "test@example.com"}} {
+		gitOutput(t, dir, args...)
+	}
+	writeCandidate := func(content string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "candidate"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitOutput(t, dir, "add", "candidate")
+		gitOutput(t, dir, "commit", "-m", strings.TrimSpace(content))
+		return gitOutput(t, dir, "rev-parse", "HEAD")
+	}
+	first := writeCandidate("first\n")
+	candidates := []string{
+		writeCandidate("candidate-1\n"),
+		writeCandidate("candidate-2\n"),
+		writeCandidate("candidate-3\n"),
+		writeCandidate("candidate-4\n"),
+	}
+	gitOutput(t, dir, "update-ref", "refs/heads/fm/feature", first)
+	gitOutput(t, dir, "checkout", "--detach", candidates[len(candidates)-1])
+
+	database, err := db.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepo(dir, "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "fm/feature", first, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	run.Status = types.RunRunning
+	if err := database.RecordSuccessfulTestHead(run.ID, first); err != nil {
+		t.Fatal(err)
+	}
+	run.TestHeadSHA = &first
+	sctx := &StepContext{
+		Ctx:     context.Background(),
+		Run:     run,
+		Repo:    repo,
+		WorkDir: dir,
+		DB:      database,
+		Config:  &config.Config{Commands: config.Commands{Test: "true"}},
+	}
+
+	for _, candidate := range candidates[:3] {
+		gitOutput(t, dir, "checkout", "--detach", candidate)
+		if err := sctx.AdvanceHeadSHA(candidate); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.RecordSuccessfulTestHead(run.ID, candidate); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.CompleteHeadValidation(run.ID, candidate); err != nil {
+			t.Fatal(err)
+		}
+		proved := candidate
+		run.TestHeadSHA = &proved
+		run.ValidationTargetSHA = nil
+	}
+
+	exhausted := candidates[3]
+	gitOutput(t, dir, "checkout", "--detach", exhausted)
+	if err := sctx.AdvanceHeadSHA(exhausted); err == nil || !strings.Contains(err.Error(), "did not converge") {
+		t.Fatalf("AdvanceHeadSHA() error = %v, want replay exhaustion", err)
+	}
+	if got := gitOutput(t, dir, "rev-parse", "refs/heads/fm/feature"); got != exhausted {
+		t.Fatalf("source ref = %s, want anchored candidate %s", got, exhausted)
+	}
+	got, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunFailed || got.HeadSHA != exhausted ||
+		got.ValidationTargetSHA == nil || *got.ValidationTargetSHA != exhausted ||
+		got.ValidationReplayCount != 4 || got.TestHeadSHA == nil || *got.TestHeadSHA == exhausted {
+		t.Fatalf("anchored exhausted candidate state = %#v", got)
+	}
+	if pending, err := database.GetRunHeadTransition(run.ID); err != nil || pending != nil {
+		t.Fatalf("anchored exhausted candidate transition = %#v, err %v", pending, err)
 	}
 }
 

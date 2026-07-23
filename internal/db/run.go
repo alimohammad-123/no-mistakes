@@ -687,6 +687,42 @@ func (d *DB) CompleteHeadValidation(id, headSHA string) error {
 	return nil
 }
 
+func (d *DB) CheckHeadValidationMutationCapacity(id string, maxReplays int) error {
+	if maxReplays <= 0 {
+		return fmt.Errorf("check head validation mutation capacity: replay bound must be positive")
+	}
+	var status types.RunStatus
+	var headSHA string
+	var targetSHA *string
+	var replayCount int
+	var custodyReturnedAt *int64
+	if err := d.sql.QueryRow(
+		`SELECT status, head_sha, validation_target_sha, COALESCE(validation_replay_count, 0), custody_returned_at
+		 FROM runs WHERE id = ?`, id,
+	).Scan(&status, &headSHA, &targetSHA, &replayCount, &custodyReturnedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("check head validation mutation capacity: run is missing")
+		}
+		return fmt.Errorf("check head validation mutation capacity: %w", err)
+	}
+	if status != types.RunRunning || custodyReturnedAt != nil {
+		return fmt.Errorf("check head validation mutation capacity: run is outside active pipeline custody")
+	}
+	if replayCount < 0 {
+		return fmt.Errorf("check head validation mutation capacity: replay state is inconsistent")
+	}
+	if replayCount >= maxReplays {
+		return fmt.Errorf("final-head validation did not converge after %d replay attempts", maxReplays)
+	}
+	if targetSHA == nil {
+		return nil
+	}
+	if *targetSHA != headSHA {
+		return fmt.Errorf("check head validation mutation capacity: replay state is inconsistent")
+	}
+	return nil
+}
+
 func headAdvancePushActive(phase HeadAdvancePhase) (bool, error) {
 	switch phase {
 	case HeadAdvancePipeline:
@@ -824,7 +860,8 @@ func (d *DB) ValidateRecoverableRunHeadTransition(transition *RunHeadTransition,
 		}
 	}
 	nextReplayCount := run.ValidationReplayCount + 1
-	if nextReplayCount > maxReplays ||
+	if run.ValidationReplayCount > maxReplays ||
+		nextReplayCount > maxReplays+1 ||
 		transition.NextReplayCount != nextReplayCount ||
 		transition.NextTargetSHA == nil ||
 		*transition.NextTargetSHA != transition.CandidateSHA {
@@ -891,6 +928,9 @@ func (d *DB) BeginRunHeadAdvance(id, sourceRef, previousSHA, candidateSHA string
 	if targetSHA != nil && *targetSHA != headSHA {
 		return nil, fmt.Errorf("begin run head advance: active replay target does not match run head")
 	}
+	if replayCount > maxReplays {
+		return nil, fmt.Errorf("final-head validation did not converge after %d replay attempts", maxReplays)
+	}
 	replayRetarget := testHeadSHA == nil && targetSHA != nil && *targetSHA == headSHA
 	staleProof := testHeadSHA != nil && *testHeadSHA == headSHA && *testHeadSHA != candidateSHA
 	if requireValidation != (staleProof || replayRetarget) {
@@ -926,9 +966,6 @@ func (d *DB) BeginRunHeadAdvance(id, sourceRef, previousSHA, candidateSHA string
 		nextReplayCount++
 		target := candidateSHA
 		nextTargetSHA = &target
-	}
-	if nextReplayCount > maxReplays {
-		return nil, fmt.Errorf("final-head validation did not converge after %d replay attempts", maxReplays)
 	}
 	transition := &RunHeadTransition{
 		RunID:               id,
@@ -994,10 +1031,12 @@ func (d *DB) BeginRunHeadAdvance(id, sourceRef, previousSHA, candidateSHA string
 	return transition, nil
 }
 
-func (d *DB) FinalizeRunHeadAdvance(transition *RunHeadTransition, recovering bool) (int, error) {
-	if transition == nil {
-		return 0, fmt.Errorf("finalize run head advance: transition is nil")
+func (d *DB) FinalizeRunHeadAdvance(transition *RunHeadTransition, recovering bool, maxReplays int) (int, error) {
+	if transition == nil || maxReplays <= 0 {
+		return 0, fmt.Errorf("finalize run head advance: transition and replay bound are required")
 	}
+	exhausted := transition.RequireValidation && transition.NextReplayCount > maxReplays
+	exhaustionError := fmt.Sprintf("final-head validation did not converge after %d replay attempts", maxReplays)
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return 0, fmt.Errorf("finalize run head advance: begin: %w", err)
@@ -1013,14 +1052,18 @@ func (d *DB) FinalizeRunHeadAdvance(transition *RunHeadTransition, recovering bo
 		var targetSHA *string
 		var replayCount int
 		var generation int64
+		var status types.RunStatus
+		var runError *string
 		if err := tx.QueryRow(
-			`SELECT head_sha, validation_target_sha, COALESCE(validation_replay_count, 0), COALESCE(head_advance_generation, 0)
+			`SELECT head_sha, validation_target_sha, COALESCE(validation_replay_count, 0),
+			        COALESCE(head_advance_generation, 0), status, error
 			 FROM runs WHERE id = ?`, transition.RunID,
-		).Scan(&headSHA, &targetSHA, &replayCount, &generation); err != nil {
+		).Scan(&headSHA, &targetSHA, &replayCount, &generation, &status, &runError); err != nil {
 			return 0, fmt.Errorf("finalize run head advance: read finalized run: %w", err)
 		}
 		if headSHA == transition.CandidateSHA && sameNullableString(targetSHA, transition.NextTargetSHA) &&
-			replayCount == transition.NextReplayCount && generation == transition.OwnershipGeneration {
+			replayCount == transition.NextReplayCount && generation == transition.OwnershipGeneration &&
+			(!exhausted || (status == types.RunFailed && runError != nil && *runError == exhaustionError)) {
 			return replayCount, nil
 		}
 		return replayCount, fmt.Errorf("finalize run head advance: durable transition is missing")
@@ -1037,13 +1080,16 @@ func (d *DB) FinalizeRunHeadAdvance(transition *RunHeadTransition, recovering bo
 		`UPDATE runs
 		 SET head_sha = ?, validation_target_sha = ?, validation_replay_count = ?,
 		     ci_ready_at = CASE WHEN ? THEN NULL ELSE ci_ready_at END,
-		     push_active = CASE WHEN ? THEN 0 ELSE push_active END, updated_at = ?
+		     push_active = CASE WHEN ? THEN 0 ELSE push_active END,
+		     status = CASE WHEN ? THEN ? ELSE status END,
+		     error = CASE WHEN ? THEN ? ELSE error END, updated_at = ?
 		 WHERE id = ? AND status = ? AND head_sha = ? AND COALESCE(validation_replay_count, 0) = ?
 		   AND ((validation_target_sha IS NULL AND ? IS NULL) OR validation_target_sha = ?)
 		   AND COALESCE(head_advance_generation, 0) = ?
 		   AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = ?`,
 		transition.CandidateSHA, transition.NextTargetSHA, transition.NextReplayCount,
-		transition.RequireValidation, clearPushActive, now(),
+		transition.RequireValidation, clearPushActive,
+		exhausted, types.RunFailed, exhausted, exhaustionError, now(),
 		transition.RunID, types.RunRunning, transition.PreviousSHA, transition.PriorReplayCount,
 		transition.PriorTargetSHA, transition.PriorTargetSHA, transition.OwnershipGeneration,
 		transition.ExpectedPushActive,
@@ -1073,7 +1119,7 @@ func (d *DB) FinalizeRecoveredRunHeadAdvance(transition *RunHeadTransition, maxR
 	if _, err := d.ValidateRecoverableRunHeadTransition(transition, maxReplays); err != nil {
 		return 0, err
 	}
-	return d.FinalizeRunHeadAdvance(transition, true)
+	return d.FinalizeRunHeadAdvance(transition, true, maxReplays)
 }
 
 func (d *DB) AdvanceRunHeadSHA(id, previousSHA, candidateSHA string, requireValidation bool, phase HeadAdvancePhase) (int, error) {

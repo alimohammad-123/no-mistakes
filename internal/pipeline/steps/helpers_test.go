@@ -416,6 +416,22 @@ func newTestContextWithDBRecords(t *testing.T, ag agent.Agent, workDir, baseSHA,
 	return sctx
 }
 
+func exhaustHeadValidationCapacity(t *testing.T, sctx *pipeline.StepContext, finalHeadSHA string) {
+	t.Helper()
+	for index, headSHA := range []string{"replay-head-1", "replay-head-2", finalHeadSHA} {
+		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
+			t.Fatal(err)
+		}
+		count, err := sctx.DB.ScheduleHeadValidationReplay(sctx.Run.ID, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count != index+1 {
+			t.Fatalf("replay count = %d, want %d", count, index+1)
+		}
+	}
+}
+
 // fakeCIGH creates a fake gh binary that responds to CI-related
 // commands (pr view --json state, pr checks --json, pr view --json comments).
 func fakeCIGH(t *testing.T, state, checksJSON string) []string {

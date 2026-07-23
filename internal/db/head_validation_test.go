@@ -236,11 +236,11 @@ func TestRunHeadTransitionPersistsBeforeFinalizationAndIsIdempotent(t *testing.T
 		t.Fatalf("pre-finalization run state = %#v", before)
 	}
 
-	count, err := d.FinalizeRunHeadAdvance(transition, false)
+	count, err := d.FinalizeRunHeadAdvance(transition, false, 3)
 	if err != nil || count != 1 {
 		t.Fatalf("finalize = count %d, err %v", count, err)
 	}
-	count, err = d.FinalizeRunHeadAdvance(transition, false)
+	count, err = d.FinalizeRunHeadAdvance(transition, false, 3)
 	if err != nil || count != 1 {
 		t.Fatalf("repeat finalize = count %d, err %v", count, err)
 	}
@@ -272,7 +272,7 @@ func TestFinalizeRunHeadAdvanceRejectsCorruptDurableIntent(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.FinalizeRunHeadAdvance(transition, false); err == nil {
+	if _, err := d.FinalizeRunHeadAdvance(transition, false, 3); err == nil {
 		t.Fatal("finalized a corrupt durable transition")
 	}
 	if _, err := d.ValidateRecoverableRunHeadTransition(transition, 3); err == nil {
@@ -404,7 +404,7 @@ func TestValidateRecoverableRunHeadTransitionDerivesPushPhaseAndTestProof(t *tes
 	}
 }
 
-func TestRunHeadTransitionBoundsActiveTestReplayRetargets(t *testing.T) {
+func TestRunHeadTransitionAnchorsOverBudgetReplayRetarget(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/test-replay-retargets", "git@github.com:user/project.git", "main")
 	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
@@ -433,29 +433,71 @@ func TestRunHeadTransitionBoundsActiveTestReplayRetargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count, err := d.FinalizeRunHeadAdvance(first, false); err != nil || count != 2 {
+	if count, err := d.FinalizeRunHeadAdvance(first, false, 3); err != nil || count != 2 {
 		t.Fatalf("first retarget = count %d, err %v", count, err)
 	}
 	second, err := d.BeginRunHeadAdvance(run.ID, ref, "head-2", "head-3", true, 3, HeadAdvancePipeline)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count, err := d.FinalizeRunHeadAdvance(second, false); err != nil || count != 3 {
+	if count, err := d.FinalizeRunHeadAdvance(second, false, 3); err != nil || count != 3 {
 		t.Fatalf("second retarget = count %d, err %v", count, err)
 	}
-	if _, err := d.BeginRunHeadAdvance(run.ID, ref, "head-3", "head-4", true, 3, HeadAdvancePipeline); err == nil {
-		t.Fatal("authorized replay retarget beyond convergence bound")
+	exhausted, err := d.BeginRunHeadAdvance(run.ID, ref, "head-3", "head-4", true, 3, HeadAdvancePipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count, err := d.FinalizeRunHeadAdvance(exhausted, false, 3); err != nil || count != 4 {
+		t.Fatalf("exhausted retarget = count %d, err %v", count, err)
+	}
+	if count, err := d.FinalizeRunHeadAdvance(exhausted, false, 3); err != nil || count != 4 {
+		t.Fatalf("exhausted retarget retry = count %d, err %v", count, err)
 	}
 	got, err := d.GetRun(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.HeadSHA != "head-3" || got.ValidationTargetSHA == nil || *got.ValidationTargetSHA != "head-3" ||
-		got.ValidationReplayCount != 3 || got.TestHeadSHA != nil {
+	if got.HeadSHA != "head-4" || got.ValidationTargetSHA == nil || *got.ValidationTargetSHA != "head-4" ||
+		got.ValidationReplayCount != 4 || got.TestHeadSHA != nil {
 		t.Fatalf("bounded retarget state = %#v", got)
+	}
+	if got.Status != types.RunFailed || got.Error == nil ||
+		*got.Error != "final-head validation did not converge after 3 replay attempts" {
+		t.Fatalf("exhausted retarget terminal state = %#v", got)
 	}
 	if pending, err := d.GetRunHeadTransition(run.ID); err != nil || pending != nil {
 		t.Fatalf("exhausted retarget persisted transition = %#v, err %v", pending, err)
+	}
+}
+
+func TestCheckHeadValidationMutationCapacityUsesExactBoundary(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/test-replay-capacity", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(
+		`UPDATE runs SET validation_target_sha = head_sha, validation_replay_count = 2 WHERE id = ?`,
+		run.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CheckHeadValidationMutationCapacity(run.ID, 3); err != nil {
+		t.Fatalf("capacity before boundary: %v", err)
+	}
+	if _, err := d.sql.Exec(`UPDATE runs SET validation_replay_count = 3 WHERE id = ?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CheckHeadValidationMutationCapacity(run.ID, 3); err == nil {
+		t.Fatal("capacity check allowed mutation at replay boundary")
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HeadSHA != "head-1" || got.ValidationReplayCount != 3 {
+		t.Fatalf("capacity preflight mutated run: %#v", got)
 	}
 }
 

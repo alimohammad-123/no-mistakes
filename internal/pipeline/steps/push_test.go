@@ -127,6 +127,48 @@ func TestPushStep_FormattingCommitYieldsBeforePublishingStaleTestHead(t *testing
 	}
 }
 
+func TestPushStep_RefusesExhaustedReplayBeforeLocalOrRemoteMutation(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
+		Test:   "true",
+		Format: "printf formatted > formatted.txt",
+	})
+	sctx.Repo.UpstreamURL = upstream
+	const prURL = "https://github.com/test/repo/pull/17"
+	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, prURL); err != nil {
+		t.Fatal(err)
+	}
+	exhaustHeadValidationCapacity(t, sctx, headSHA)
+
+	if _, err := (&PushStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), "did not converge") {
+		t.Fatalf("Execute() error = %v, want replay exhaustion", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "formatted.txt")); !os.IsNotExist(err) {
+		t.Fatalf("formatter output exists or stat failed: %v", err)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("local HEAD = %s, want %s", got, headSHA)
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != headSHA {
+		t.Fatalf("remote HEAD = %s, want %s", got, headSHA)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PRURL == nil || *run.PRURL != prURL || run.PushActive {
+		t.Fatalf("PR or push identity changed: %#v", run)
+	}
+}
+
 func TestPushStep_RefusesSupersededSourceRefAtUnchangedTestedHead(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()

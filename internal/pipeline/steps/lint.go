@@ -19,6 +19,9 @@ func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.BaseBranch())
 	lintCmd := sctx.Config.Commands.Lint
+	if err := sctx.PreflightHeadMutation(); err != nil {
+		return nil, err
+	}
 
 	if lintCmd == "" {
 		// The combined document+lint housekeeping pass already performed the

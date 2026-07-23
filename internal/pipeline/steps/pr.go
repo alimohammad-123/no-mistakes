@@ -51,6 +51,9 @@ type pipelineUpdateGroup struct {
 func (s *PRStep) Name() types.StepName { return types.StepPR }
 
 func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := sctx.PreflightHeadMutation(); err != nil {
+		return nil, err
+	}
 	ctx := sctx.Ctx
 
 	branch := sctx.Run.Branch

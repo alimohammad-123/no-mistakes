@@ -21,6 +21,9 @@ func (s *PushStep) Name() types.StepName { return types.StepPush }
 
 func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
+	if err := sctx.PreflightHeadMutation(); err != nil {
+		return nil, err
+	}
 	releaseCustody, err := sctx.AcquirePushCustody()
 	if err != nil {
 		return nil, err

@@ -139,6 +139,11 @@ Previous test findings to address:
 
 	useEvidenceAgent := testCmd == "" || cleanedUserIntent(sctx) != ""
 	if useEvidenceAgent {
+		if testCmd != "" {
+			if err := sctx.PreflightHeadMutation(); err != nil {
+				return nil, err
+			}
+		}
 		evidenceLocation := resolveTestEvidenceLocation(sctx.WorkDir, sctx.Run.Branch, sctx.Run.ID, sctx.Config.Test.Evidence)
 		evidenceDir := evidenceLocation.Dir
 		if evidenceLocation.StoreInRepo && gitIgnoresPath(ctx, sctx.WorkDir, evidenceDir) {

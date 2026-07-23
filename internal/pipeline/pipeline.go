@@ -102,6 +102,16 @@ func (sctx *StepContext) AdvanceHeadSHAWithPushCustody(candidateSHA string) erro
 	return sctx.advanceHeadSHA(candidateSHA, db.HeadAdvancePush)
 }
 
+func (sctx *StepContext) PreflightHeadMutation() error {
+	if sctx == nil || sctx.Run == nil || sctx.DB == nil {
+		return fmt.Errorf("pipeline head-mutation context is missing")
+	}
+	if sctx.Config == nil || sctx.Config.Commands.Test == "" {
+		return nil
+	}
+	return sctx.DB.CheckHeadValidationMutationCapacity(sctx.Run.ID, maxHeadValidationReplays)
+}
+
 func (sctx *StepContext) advanceHeadSHA(candidateSHA string, phase db.HeadAdvancePhase) error {
 	if sctx == nil || sctx.Run == nil || sctx.DB == nil {
 		return fmt.Errorf("pipeline source-ref context is missing")
@@ -124,7 +134,7 @@ func (sctx *StepContext) advanceHeadSHA(candidateSHA string, phase db.HeadAdvanc
 	if err := sourceprovenance.AdvanceCandidate(sctx.Ctx, sctx.WorkDir, ref, candidateSHA, previousSHA); err != nil {
 		return err
 	}
-	replayCount, err := sctx.DB.FinalizeRunHeadAdvance(transition, false)
+	replayCount, err := sctx.DB.FinalizeRunHeadAdvance(transition, false, maxHeadValidationReplays)
 	if err != nil {
 		return err
 	}
@@ -239,6 +249,13 @@ func RecoverRunHeadTransition(ctx context.Context, database *db.DB, run *db.Run,
 	run.CIReadyAt = nil
 	if transition.ExpectedPushActive {
 		run.PushActive = false
+	}
+	if replayCount > maxHeadValidationReplays {
+		err := fmt.Errorf("final-head validation did not converge after %d replay attempts", maxHeadValidationReplays)
+		run.Status = types.RunFailed
+		errMsg := err.Error()
+		run.Error = &errMsg
+		return false, err
 	}
 	return true, nil
 }

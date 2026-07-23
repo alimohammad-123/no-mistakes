@@ -18,6 +18,9 @@ import (
 // when the agent produced no changes, or (false, err) on failure.
 func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, failingNames []string, mergeConflict bool) (bool, error) {
 	ctx := sctx.Ctx
+	if err := sctx.PreflightHeadMutation(); err != nil {
+		return false, err
+	}
 	releaseCustody, err := sctx.AcquirePushCustody()
 	if err != nil {
 		return false, err

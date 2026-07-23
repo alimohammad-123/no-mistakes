@@ -368,6 +368,13 @@ func skipWorktreeCleanup(d *db.DB, runID string) (bool, string) {
 	if run != nil && (run.Status == types.RunPending || run.Status == types.RunRunning) {
 		return true, fmt.Sprintf("run %s is %s", runID, run.Status)
 	}
+	transition, transitionErr := d.GetRunHeadTransition(runID)
+	if transitionErr != nil {
+		return true, fmt.Sprintf("failed to look up run %s head transition: %v", runID, transitionErr)
+	}
+	if transition != nil {
+		return true, fmt.Sprintf("run %s has a pending head transition", runID)
+	}
 	// Preserve only a fully coherent legacy graceful-shutdown gate long enough
 	// for ordinary branch-matched AXI recovery to inspect its pipeline copy.
 	// This is read-only and does not claim the run during daemon startup.

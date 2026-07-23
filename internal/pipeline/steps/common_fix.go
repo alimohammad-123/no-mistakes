@@ -115,6 +115,9 @@ func assertPipelineHeadContinuity(sctx *pipeline.StepContext, stepName types.Ste
 
 func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string) error {
 	ctx := sctx.Ctx
+	if err := sctx.PreflightHeadMutation(); err != nil {
+		return err
+	}
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return err
 	}
@@ -179,6 +182,9 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fixExecutionOptions) (string, error) {
 	if !sctx.Fixing {
 		return "", nil
+	}
+	if err := sctx.PreflightHeadMutation(); err != nil {
+		return "", err
 	}
 	if opts.RequirePreviousFindings && sctx.PreviousFindings == "" {
 		return "", errors.New(opts.MissingFindingsError)
