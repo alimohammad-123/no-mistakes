@@ -731,6 +731,47 @@ func (d *DB) CheckHeadValidationMutationCapacity(id string, maxReplays int) erro
 	return nil
 }
 
+// CheckHeadValidationBoundaryAssessmentEligibility authorizes only an
+// isolated no-commit assessment at the exact proved replay boundary. It does
+// not authorize a head mutation. The caller must keep all assessment edits out
+// of the pipeline worktree and recheck this predicate before accepting a no-op.
+func (d *DB) CheckHeadValidationBoundaryAssessmentEligibility(id, headSHA string, maxReplays int) error {
+	if strings.TrimSpace(headSHA) == "" || maxReplays <= 0 {
+		return fmt.Errorf("check head validation boundary assessment: head and replay bound are required")
+	}
+	var status types.RunStatus
+	var durableHeadSHA string
+	var testHeadSHA *string
+	var targetSHA *string
+	var replayCount int
+	var custodyReturnedAt *int64
+	var pushActive bool
+	var pendingTransition bool
+	if err := d.sql.QueryRow(
+		`SELECT status, head_sha, test_head_sha, validation_target_sha,
+		        COALESCE(validation_replay_count, 0), custody_returned_at,
+		        COALESCE(push_active, 0),
+		        EXISTS(SELECT 1 FROM run_head_transitions WHERE run_id = runs.id)
+		 FROM runs WHERE id = ?`, id,
+	).Scan(
+		&status, &durableHeadSHA, &testHeadSHA, &targetSHA,
+		&replayCount, &custodyReturnedAt, &pushActive, &pendingTransition,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("check head validation boundary assessment: run is missing")
+		}
+		return fmt.Errorf("check head validation boundary assessment: %w", err)
+	}
+	if status != types.RunRunning || custodyReturnedAt != nil || pushActive || pendingTransition {
+		return fmt.Errorf("check head validation boundary assessment: run is outside isolated pipeline custody")
+	}
+	if durableHeadSHA != headSHA || testHeadSHA == nil || *testHeadSHA != headSHA ||
+		targetSHA == nil || *targetSHA != headSHA || replayCount != maxReplays {
+		return fmt.Errorf("check head validation boundary assessment: exact boundary proof is missing or inconsistent")
+	}
+	return nil
+}
+
 func (d *DB) CheckHeadValidationDeliveryEligibility(id, headSHA string, maxReplays int) error {
 	if strings.TrimSpace(headSHA) == "" || maxReplays <= 0 {
 		return fmt.Errorf("check head validation delivery eligibility: head and replay bound are required")

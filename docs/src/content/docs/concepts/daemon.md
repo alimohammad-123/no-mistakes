@@ -115,6 +115,20 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Enables Git push-option support on existing gate repos so per-push options like `no-mistakes.skip=...` keep working after upgrades
 - Clears any parked-awaiting-agent marker so a recovered failed run is not shown as still waiting for `axi respond`
 
+### Exact final-head capacity recovery
+
+A historical run can fail in Document at the three-target replay boundary even after the exact candidate passed configured Test. When AXI reports that exact capacity error, an operator may request the guarded same-run transition explicitly:
+
+```sh
+no-mistakes axi recover-final-head --run <id>
+```
+
+This path accepts only the precise terminal footprint. The run must still have matching head, Test proof, active validation target, replay count, source ref, gate ref, earlier push binding, open PR identity, Test and Document step history, and pending delivery suffix. It refuses a pending head transition, active push, returned custody, changed remote branch or PR, missing proof, unrelated failure, delivered head, or prior recovery event.
+
+The daemon may reconstruct only the missing canonical detached worktree at the exact gate commit. It reloads trusted policy, verifies the clean worktree and source binding, checks the remote branch and PR twice around an evidence-token-bound database claim, and never moves the operator worktree. Before reviving the run, the transaction appends a durable recovery event that preserves the prior failed status, errors, exact proof, source ref, PR, published head, and Document identity. The event makes the exceptional transition auditable and prevents another terminal revival.
+
+The resumed executor starts at Document without rerunning or weakening the exact Test proof. Document uses an isolated disposable clone at the boundary and can continue only when that assessment is a no-op. Any proposed change fails before a commit or source-ref advance. A daemon shutdown during the resumed suffix keeps the recovery event, proof, run ID, and worktree for ordinary active-run recovery.
+
 ### Interrupted approval compatibility
 
 Older daemons could turn a run that was waiting for approval into a failed run

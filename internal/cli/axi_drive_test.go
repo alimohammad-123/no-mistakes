@@ -8,7 +8,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -21,6 +23,30 @@ func ciRunView(ciStatus types.StepStatus) runView {
 			{Name: string(types.StepPR), Status: string(types.StepStatusCompleted)},
 			{Name: string(types.StepCI), Status: string(ciStatus)},
 		},
+	}
+}
+
+func TestAxiRecoverFinalHeadCommandIsExplicitAndRequiresRunID(t *testing.T) {
+	root := newAxiCmd()
+	command, _, err := root.Find([]string{"recover-final-head"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command == nil || command.Name() != "recover-final-head" {
+		t.Fatalf("recover command = %#v", command)
+	}
+	if !strings.Contains(command.Long, "not a general terminal-run retry") {
+		t.Fatalf("recover command did not state its narrow contract: %s", command.Long)
+	}
+	if flag := command.Flags().Lookup("run"); flag == nil {
+		t.Fatal("recover command has no --run selector")
+	}
+
+	command.SetArgs(nil)
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
+	if err := command.Execute(); err == nil {
+		t.Fatal("recover command accepted a missing --run selector")
 	}
 }
 
@@ -153,6 +179,30 @@ func TestGateResolution(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRenderDriveResult_ExactCapacityFailureOffersOnlyNarrowRecovery(t *testing.T) {
+	errText := db.ExactFinalHeadCapacityRunError(pipeline.MaxHeadValidationReplays)
+	run := &ipc.RunInfo{
+		ID: "run-boundary", Branch: "feature/x", Status: types.RunFailed,
+		HeadSHA: "abcdef1234567890", Error: &errText,
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := renderDriveResult(cmd, run, false); err == nil {
+		t.Fatal("failed run returned success")
+	}
+	got := out.String()
+	for _, want := range []string{
+		"no-mistakes axi recover-final-head --run run-boundary",
+		"not a general retry",
+		"stored open PR",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("capacity failure output missing %q:\n%s", want, got)
+		}
 	}
 }
 

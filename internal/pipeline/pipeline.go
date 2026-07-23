@@ -112,6 +112,19 @@ func (sctx *StepContext) PreflightHeadMutation() error {
 	return sctx.DB.CheckHeadValidationMutationCapacity(sctx.Run.ID, maxHeadValidationReplays)
 }
 
+// CheckBoundaryHeadAssessment authorizes only the exact proved replay
+// boundary. It never grants mutation capacity; callers must isolate all edits
+// and accept only a verified no-op.
+func (sctx *StepContext) CheckBoundaryHeadAssessment() error {
+	if sctx == nil || sctx.Run == nil || sctx.DB == nil {
+		return fmt.Errorf("pipeline boundary-assessment context is missing")
+	}
+	if sctx.Config == nil || sctx.Config.Commands.Test == "" {
+		return fmt.Errorf("pipeline boundary assessment requires configured Test proof")
+	}
+	return sctx.DB.CheckHeadValidationBoundaryAssessmentEligibility(sctx.Run.ID, sctx.Run.HeadSHA, maxHeadValidationReplays)
+}
+
 func (sctx *StepContext) advanceHeadSHA(candidateSHA string, phase db.HeadAdvancePhase) error {
 	if sctx == nil || sctx.Run == nil || sctx.DB == nil {
 		return fmt.Errorf("pipeline source-ref context is missing")

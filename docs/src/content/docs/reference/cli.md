@@ -133,6 +133,29 @@ Use `no-mistakes rerun` only after that monitor is no longer running, such as a 
 Successful outcomes (`checks-passed` and `passed`) also carry `help` instructions telling the agent to summarize the run.
 When the pipeline applied fixes, they include a `fixes` table and a `help` instruction to acknowledge the misses and list those fixes for the user's review.
 
+## no-mistakes axi recover-final-head
+
+Revive the same terminal run only for the exact final-head replay-capacity failure reported by AXI:
+
+```sh
+no-mistakes axi recover-final-head --run <id>
+```
+
+| Flag    | Type     | Default | Description                              |
+| ------- | -------- | ------- | ---------------------------------------- |
+| `--run` | `string` | (none)  | Exact terminal run ID to recover; required |
+
+This is an explicit, narrow recovery operation, not a general terminal-run retry.
+It requires the failed capacity error, exact `head == test_head == validation_target` proof at replay count three, no pending head transition, inactive push custody, the frozen source ref and gate ref at that head, a stable open PR still published at the recorded earlier head, completed Test, a pre-round Document capacity failure, and pristine pending delivery steps.
+It reconstructs a missing canonical pipeline worktree from the exact gate commit when needed, reloads trusted configuration, repeats mutable Git and remote checks before the database claim, preserves the run and PR identities, and resumes at Document.
+The claim appends a durable recovery event containing the prior terminal snapshot before it changes the run back to active.
+A repeated call reattaches only while that explicitly recovered run is still active; a second terminal recovery is refused.
+Missing, ambiguous, changed, already-delivered, differently failed, or unrelated historical states remain unchanged.
+
+At the exact replay boundary, Document assesses the candidate in a disposable isolated clone.
+A no-op continues through Lint, exact proof closure, Push, the existing PR update, and CI.
+A proposed repository change is discarded and fails with the three-target bound intact; it never creates a fourth candidate.
+
 ## no-mistakes axi respond
 
 Answer the current approval gate and continue until the next gate, CI-ready decision point, or final outcome.

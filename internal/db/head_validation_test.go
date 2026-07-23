@@ -517,6 +517,55 @@ func TestCheckHeadValidationMutationCapacityUsesExactBoundary(t *testing.T) {
 	}
 }
 
+func TestCheckHeadValidationBoundaryAssessmentEligibilityRequiresExactProof(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/test-boundary-assessment", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(
+		`UPDATE runs
+		 SET validation_target_sha = head_sha, validation_replay_count = 3, test_head_sha = head_sha
+		 WHERE id = ?`, run.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CheckHeadValidationBoundaryAssessmentEligibility(run.ID, "head-1", 3); err != nil {
+		t.Fatalf("exact boundary assessment eligibility: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate string
+	}{
+		{name: "non-exact test proof", mutate: `test_head_sha = 'other'`},
+		{name: "non-exact target", mutate: `validation_target_sha = 'other'`},
+		{name: "below boundary", mutate: `validation_replay_count = 2`},
+		{name: "beyond boundary", mutate: `validation_replay_count = 4`},
+		{name: "push active", mutate: `push_active = 1`},
+		{name: "terminal", mutate: `status = 'failed'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := d.sql.Exec(
+				`UPDATE runs
+				 SET status = ?, head_sha = 'head-1', test_head_sha = head_sha,
+				     validation_target_sha = head_sha, validation_replay_count = 3,
+				     push_active = 0, custody_returned_at = NULL
+				 WHERE id = ?`, types.RunRunning, run.ID,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.sql.Exec(`UPDATE runs SET `+tc.mutate+` WHERE id = ?`, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.CheckHeadValidationBoundaryAssessmentEligibility(run.ID, "head-1", 3); err == nil {
+				t.Fatal("inconsistent state was eligible for a boundary assessment")
+			}
+		})
+	}
+}
+
 func TestHeadValidationPreflightsRejectPendingTransition(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/test-pending-transition", "git@github.com:user/project.git", "main")

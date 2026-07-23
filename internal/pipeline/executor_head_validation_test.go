@@ -330,6 +330,135 @@ func TestExecutor_ExactReplayBoundaryCanDeliverProvenCandidate(t *testing.T) {
 	}
 }
 
+func TestExecutor_ResumeExactBoundaryCapacityRecoveryStartsAtDocument(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := initExecutorGitRepo(t, database, run)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	published := run.HeadSHA
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index <= maxHeadValidationReplays; index++ {
+		if index > 1 {
+			previous := run.HeadSHA
+			path := filepath.Join(workDir, fmt.Sprintf("recovery-target-%d", index))
+			if err := os.WriteFile(path, []byte("candidate"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			execGit(t, workDir, "add", filepath.Base(path))
+			execGit(t, workDir, "commit", "-m", fmt.Sprintf("candidate %d", index))
+			run.HeadSHA = execGitOutput(t, workDir, "rev-parse", "HEAD")
+			execGit(t, workDir, "update-ref", ref, run.HeadSHA, previous)
+			if err := database.UpdateRunHeadSHA(run.ID, run.HeadSHA); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if count, err := database.ScheduleHeadValidationReplay(run.ID, maxHeadValidationReplays); err != nil || count != index {
+			t.Fatalf("schedule replay %d: count=%d err=%v", index, count, err)
+		}
+	}
+	if err := database.RecordSuccessfulTestHead(run.ID, run.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPRURL(run.ID, "https://github.com/test/repo/pull/42"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPushBinding(run.ID, db.PushBinding{
+		HeadSHA: published, TargetKind: "upstream", TargetFingerprint: "fingerprint", Ref: ref,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	testStep := &proofRecordingTestStep{}
+	documentCalls := 0
+	var cancelRecovery context.CancelCauseFunc
+	document := &adaptiveCallStep{name: types.StepDocument, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		documentCalls++
+		if documentCalls == 1 {
+			cancelRecovery(ErrDaemonShutdown)
+			return nil, sctx.Ctx.Err()
+		}
+		return &StepOutcome{}, nil
+	}}
+	lint := newPassStep(types.StepLint)
+	push := newPassStep(types.StepPush)
+	pr := newPassStep(types.StepPR)
+	ci := newPassStep(types.StepCI)
+	steps := []Step{
+		newPassStep(types.StepIntent), newPassStep(types.StepRebase), newPassStep(types.StepReview),
+		testStep, document, lint, push, pr, ci,
+	}
+	for _, step := range steps {
+		result, err := database.InsertStepResult(run.ID, step.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case step.Name().Order() <= types.StepTest.Order():
+			if err := database.CompleteStep(result.ID, 0, 1, string(step.Name())+".log"); err != nil {
+				t.Fatal(err)
+			}
+		case step.Name() == types.StepDocument:
+			if err := database.StartStep(result.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.FailStep(result.ID, db.ExactFinalHeadCapacityStepError(maxHeadValidationReplays), 1); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := database.UpdateRunErrorStatus(run.ID, db.ExactFinalHeadCapacityRunError(maxHeadValidationReplays), types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	failure, err := database.InspectExactFinalHeadCapacityFailure(run.ID, maxHeadValidationReplays, types.AllSteps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := database.RestoreExactFinalHeadCapacityFailure(run.ID, failure.EvidenceToken, maxHeadValidationReplays, types.AllSteps())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Commands.Test = "configured-test-command"
+	interruptedCtx, cancel := context.WithCancelCause(context.Background())
+	cancelRecovery = cancel
+	exec := NewExecutor(database, p, cfg, nil, steps, nil)
+	if err := exec.ResumeHeadValidation(interruptedCtx, restored, repo, workDir); !errors.Is(err, ErrValidationRunInterrupted) {
+		t.Fatalf("interrupted ResumeHeadValidation() error = %v", err)
+	}
+	interrupted, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if interrupted.Status != types.RunRunning || interrupted.ValidationTargetSHA == nil || testStep.calls != 0 {
+		t.Fatalf("interrupted exact-boundary recovery = %#v, Test calls %d", interrupted, testStep.calls)
+	}
+
+	resumed := NewExecutor(database, p, cfg, nil, steps, nil)
+	if err := resumed.ResumeHeadValidation(context.Background(), interrupted, repo, workDir); err != nil {
+		t.Fatalf("resumed ResumeHeadValidation() error = %v", err)
+	}
+	got, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunCompleted || got.ID != run.ID || got.ValidationReplayCount != maxHeadValidationReplays ||
+		got.ValidationTargetSHA != nil || got.TestHeadSHA == nil || *got.TestHeadSHA != got.HeadSHA {
+		t.Fatalf("completed recovered boundary run = %#v", got)
+	}
+	if testStep.calls != 0 || documentCalls != 2 || lint.callCount() != 1 || push.callCount() != 1 || pr.callCount() != 1 || ci.callCount() != 1 {
+		t.Fatalf("recovered calls: test=%d document=%d lint=%d push=%d pr=%d ci=%d", testStep.calls, documentCalls, lint.callCount(), push.callCount(), pr.callCount(), ci.callCount())
+	}
+	event, err := database.GetRunRecoveryEvent(run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil || event == nil {
+		t.Fatalf("recovery provenance = %#v, err %v", event, err)
+	}
+}
+
 func TestExecutor_DaemonShutdownDuringValidationReplayResumesIdempotently(t *testing.T) {
 	for _, interruptedStep := range []types.StepName{types.StepTest, types.StepDocument, types.StepLint} {
 		t.Run(string(interruptedStep), func(t *testing.T) {

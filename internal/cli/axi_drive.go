@@ -14,10 +14,12 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
@@ -103,6 +105,53 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	return cmd
+}
+
+func newAxiRecoverFinalHeadCmd() *cobra.Command {
+	var runID string
+	cmd := &cobra.Command{
+		Use:   "recover-final-head",
+		Short: "Revive one exact replay-capacity failure without replacing its run",
+		Long: "Explicitly recover the same terminal run only when its exact final-head\n" +
+			"Test proof, three-target replay boundary, source and gate refs, earlier\n" +
+			"published head, stored open PR, and untouched delivery suffix still agree.\n" +
+			"This is not a general terminal-run retry.",
+		Args:          cobra.NoArgs,
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return trackAxiSurface("axi-recover-final-head", "/axi/recover-final-head", telemetry.Fields{}, func() error {
+				return runAxiRecoverFinalHead(cmd, runID)
+			})
+		},
+	}
+	cmd.Flags().StringVar(&runID, "run", "", "exact terminal run ID to recover")
+	_ = cmd.MarkFlagRequired("run")
+	return cmd
+}
+
+func runAxiRecoverFinalHead(cmd *cobra.Command, runID string) error {
+	env, err := openAxiDaemonEnv()
+	if err != nil {
+		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
+	}
+	defer env.close()
+	var recovered ipc.RecoverExactFinalHeadRunResult
+	if err := env.client.Call(ipc.MethodRecoverExactFinalHeadRun, &ipc.RecoverExactFinalHeadRunParams{
+		RepoID: env.repo.ID,
+		RunID:  strings.TrimSpace(runID),
+	}, &recovered); err != nil {
+		return emitError(cmd, 1, err.Error(),
+			"The historical run was not replaced. Correct only the reported invariant mismatch or use ordinary custody recovery for a new transaction")
+	}
+	if recovered.RunID == "" || recovered.RunID != strings.TrimSpace(runID) {
+		return emitError(cmd, 1, "exact final-head recovery returned a different run identity")
+	}
+	run, ciReady, err := driveRun(cmd.Context(), cmd.ErrOrStderr(), env.client, recovered.RunID, false, ciLogReader(env.p))
+	if err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("drive recovered run: %v", err))
+	}
+	return renderDriveResult(cmd, run, ciReady)
 }
 
 func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent string) error {
@@ -677,6 +726,12 @@ func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool) error
 	}
 
 	help := []string{preserveGateFixCommitsGuidance}
+	if run.Error != nil && *run.Error == db.ExactFinalHeadCapacityRunError(pipeline.MaxHeadValidationReplays) {
+		help = append([]string{
+			fmt.Sprintf("This exact replay-capacity failure may be eligible for the narrow same-run recovery: `no-mistakes axi recover-final-head --run %s`", run.ID),
+			"The command verifies the exact Test proof, replay boundary, source and gate refs, earlier published head, stored open PR, and untouched delivery suffix. It is not a general retry.",
+		}, help...)
+	}
 	if hasBranchSync {
 		help = append(help, branchSyncAgentGuidance)
 	}

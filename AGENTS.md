@@ -30,7 +30,7 @@ Safest local verification sequence after non-trivial changes:
 
 **Final-Head Configured Test Proof**
 
-- For runs with `commands.test`, `runs.test_head_sha` must exactly equal the final candidate before Push, PR, CI readiness, or completion after validation begins (Rebase's empty-diff whole-pipeline skip has no delivery candidate). The bounded same-run replay and active legacy-CI recovery are owned by `internal/pipeline/executor.go`; publication steps must finalize locally and yield before pushing a stale head. Public semantics live in `docs/src/content/docs/reference/pipeline-steps.md`.
+- For runs with `commands.test`, `runs.test_head_sha` must exactly equal the final candidate before Push, PR, CI readiness, or completion after validation begins (Rebase's empty-diff whole-pipeline skip has no delivery candidate). The bounded same-run replay and active legacy-CI recovery are owned by `internal/pipeline/executor.go`; publication steps must finalize locally and yield before pushing a stale head. At the exact proved third-target boundary, Document may assess only in its disposable isolated clone and may continue only on a no-op. The explicit `axi recover-final-head --run <id>` transition is limited to the matching terminal capacity footprint and appends `run_recovery_events` provenance before reviving the same run. Public semantics live in `docs/src/content/docs/reference/pipeline-steps.md`, `docs/src/content/docs/reference/cli.md`, and `docs/src/content/docs/concepts/daemon.md`.
 
 **Credential Redaction in Stored URLs and Errors (security)**
 

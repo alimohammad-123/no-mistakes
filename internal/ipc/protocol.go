@@ -9,18 +9,19 @@ import (
 
 // JSON-RPC 2.0 method names.
 const (
-	MethodPushReceived          = "push_received"
-	MethodGetRun                = "get_run"
-	MethodGetRuns               = "get_runs"
-	MethodGetRunsForHead        = "get_runs_for_head"
-	MethodGetActiveRun          = "get_active_run"
-	MethodRecoverInterruptedRun = "recover_interrupted_run"
-	MethodRerun                 = "rerun"
-	MethodSubscribe             = "subscribe"
-	MethodRespond               = "respond"
-	MethodCancelRun             = "cancel_run"
-	MethodHealth                = "health"
-	MethodShutdown              = "shutdown"
+	MethodPushReceived             = "push_received"
+	MethodGetRun                   = "get_run"
+	MethodGetRuns                  = "get_runs"
+	MethodGetRunsForHead           = "get_runs_for_head"
+	MethodGetActiveRun             = "get_active_run"
+	MethodRecoverInterruptedRun    = "recover_interrupted_run"
+	MethodRecoverExactFinalHeadRun = "recover_exact_final_head_run"
+	MethodRerun                    = "rerun"
+	MethodSubscribe                = "subscribe"
+	MethodRespond                  = "respond"
+	MethodCancelRun                = "cancel_run"
+	MethodHealth                   = "health"
+	MethodShutdown                 = "shutdown"
 )
 
 // JSON-RPC 2.0 error codes.
@@ -110,6 +111,14 @@ type RecoverInterruptedRunParams struct {
 	Intent    string `json:"intent"`
 }
 
+// RecoverExactFinalHeadRunParams requests the explicit narrow recovery for one
+// terminal exact replay-capacity failure. RepoID prevents cross-repository
+// claims when a caller supplies a valid run ID from another registration.
+type RecoverExactFinalHeadRunParams struct {
+	RepoID string `json:"repo_id"`
+	RunID  string `json:"run_id"`
+}
+
 // RerunParams requests a new run for the latest gate head on a branch.
 // Intent, when set, is stamped onto the new run like PushReceivedParams.Intent.
 type RerunParams struct {
@@ -178,6 +187,12 @@ type GetActiveRunResult struct {
 type RecoverInterruptedRunResult struct {
 	RunID   string `json:"run_id,omitempty"`
 	Matched bool   `json:"matched"`
+}
+
+// RecoverExactFinalHeadRunResult returns the original durable run ID after the
+// audited recovery transition has been claimed or is already active.
+type RecoverExactFinalHeadRunResult struct {
+	RunID string `json:"run_id"`
 }
 
 // RerunResult confirms a rerun was created.

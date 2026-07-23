@@ -70,6 +70,31 @@ CREATE TABLE IF NOT EXISTS run_head_transitions (
     created_at             INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS run_recovery_events (
+    id                    TEXT PRIMARY KEY,
+    run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    kind                  TEXT NOT NULL,
+    recovered_at          INTEGER NOT NULL,
+    evidence_token        TEXT NOT NULL,
+    prior_status          TEXT NOT NULL,
+    prior_error           TEXT NOT NULL,
+    head_sha              TEXT NOT NULL,
+    test_head_sha         TEXT NOT NULL,
+    validation_target_sha TEXT NOT NULL,
+    replay_count          INTEGER NOT NULL,
+    source_ref            TEXT NOT NULL,
+    pr_url                  TEXT NOT NULL,
+    last_pushed_sha         TEXT NOT NULL,
+    push_target_kind        TEXT NOT NULL,
+    push_target_fingerprint TEXT NOT NULL,
+    push_generation         INTEGER NOT NULL,
+    last_pushed_at          INTEGER NOT NULL,
+    document_step_id        TEXT NOT NULL,
+    prior_step_status     TEXT NOT NULL,
+    prior_step_error      TEXT NOT NULL,
+    UNIQUE (run_id, kind)
+);
+
 CREATE TABLE IF NOT EXISTS step_results (
     id               TEXT PRIMARY KEY,
     run_id           TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

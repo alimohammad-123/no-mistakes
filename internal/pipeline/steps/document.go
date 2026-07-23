@@ -1,11 +1,17 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -113,8 +119,15 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		sctx.Log("no changes to document")
 		return &pipeline.StepOutcome{}, nil
 	}
+	boundaryAssessment := false
 	if err := sctx.PreflightHeadMutation(); err != nil {
-		return nil, err
+		if !errors.Is(err, db.ErrHeadValidationMutationExhausted) {
+			return nil, err
+		}
+		if boundaryErr := sctx.CheckBoundaryHeadAssessment(); boundaryErr != nil {
+			return nil, err
+		}
+		boundaryAssessment = true
 	}
 
 	if combinedLint {
@@ -131,26 +144,34 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		purpose = "housekeeping"
 	}
 
-	result, err := sctx.Agent.Run(ctx, agent.RunOpts{
+	runOpts := agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		JSONSchema: schema,
 		OnChunk:    sctx.LogChunk,
 		Purpose:    purpose,
-	})
+	}
+	var result *agent.Result
+	if boundaryAssessment {
+		result, err = assessDocumentAtReplayBoundary(sctx, runOpts)
+	} else {
+		result, err = sctx.Agent.Run(ctx, runOpts)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("agent document: %w", err)
 	}
 
-	// Commit whatever the agent edited, regardless of how trustworthy its
-	// structured output turns out to be.
 	commitSummary := extractDocumentSummary(result.Output, "")
 	fallbackSummary := "update documentation"
 	if combinedLint {
 		fallbackSummary = "update documentation and fix lint"
 	}
-	if err := commitAgentFixes(sctx, s.Name(), commitSummary, fallbackSummary); err != nil {
-		return nil, err
+	if !boundaryAssessment {
+		// Commit whatever the agent edited, regardless of how trustworthy its
+		// structured output turns out to be.
+		if err := commitAgentFixes(sctx, s.Name(), commitSummary, fallbackSummary); err != nil {
+			return nil, err
+		}
 	}
 
 	// Without trustworthy structured output we cannot confirm the agent
@@ -192,6 +213,132 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		Findings:      string(findingsJSON),
 		FixSummary:    docFindings.Summary,
 	}, nil
+}
+
+// assessDocumentAtReplayBoundary runs the ordinary Document prompt in a
+// standalone local clone. The clone has separate refs and an isolated index,
+// so an assessment cannot create the fourth pipeline candidate. Only a clean
+// no-op is accepted. Every exit path removes the assessment copy and verifies
+// that the authoritative candidate remained exact.
+func assessDocumentAtReplayBoundary(sctx *pipeline.StepContext, opts agent.RunOpts) (*agent.Result, error) {
+	if err := verifyBoundaryDocumentCandidate(sctx, sctx.Ctx); err != nil {
+		return nil, err
+	}
+	assessmentDir, err := os.MkdirTemp(filepath.Dir(sctx.WorkDir), ".no-mistakes-document-assessment-")
+	if err != nil {
+		return nil, fmt.Errorf("create isolated boundary assessment: %w", err)
+	}
+	cleanup := func() error {
+		if err := os.RemoveAll(assessmentDir); err != nil {
+			return fmt.Errorf("remove isolated boundary assessment: %w", err)
+		}
+		return nil
+	}
+	failPreparation := func(primary error) (*agent.Result, error) {
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			return nil, fmt.Errorf("%w; cleanup failed: %v", primary, cleanupErr)
+		}
+		return nil, primary
+	}
+	if _, err := git.Run(sctx.Ctx, filepath.Dir(assessmentDir), "clone", "--no-hardlinks", "--no-checkout", "--", sctx.WorkDir, assessmentDir); err != nil {
+		return failPreparation(fmt.Errorf("clone exact boundary candidate: %w", err))
+	}
+	if _, err := git.Run(sctx.Ctx, assessmentDir, "checkout", "--detach", sctx.Run.HeadSHA); err != nil {
+		return failPreparation(fmt.Errorf("check out exact boundary candidate: %w", err))
+	}
+	if _, err := git.Run(sctx.Ctx, assessmentDir, "remote", "remove", "origin"); err != nil {
+		return failPreparation(fmt.Errorf("detach boundary assessment from its clone source: %w", err))
+	}
+
+	opts.CWD = assessmentDir
+	result, runErr := sctx.Agent.Run(sctx.Ctx, opts)
+	changes, inspectErr := boundaryDocumentAssessmentChanges(sctx.Ctx, assessmentDir, sctx.Run.HeadSHA)
+	cleanupErr := cleanup()
+
+	verifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	candidateErr := verifyBoundaryDocumentCandidate(sctx, verifyCtx)
+	if candidateErr != nil {
+		return nil, fmt.Errorf("boundary assessment candidate integrity: %w", candidateErr)
+	}
+	if cleanupErr != nil {
+		return nil, cleanupErr
+	}
+	if runErr != nil {
+		return nil, runErr
+	}
+	if inspectErr != nil {
+		return nil, inspectErr
+	}
+	if changes != "" {
+		capacityErr := sctx.PreflightHeadMutation()
+		if capacityErr == nil {
+			return nil, fmt.Errorf("boundary assessment lost its exhausted mutation guard")
+		}
+		return nil, fmt.Errorf("%w: boundary Document assessment proposed repository changes: %s", capacityErr, changes)
+	}
+	sctx.Log("exact replay-boundary Document assessment was a no-op")
+	return result, nil
+}
+
+func verifyBoundaryDocumentCandidate(sctx *pipeline.StepContext, ctx context.Context) error {
+	if err := sctx.CheckBoundaryHeadAssessment(); err != nil {
+		return err
+	}
+	head, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return fmt.Errorf("read pipeline worktree head: %w", err)
+	}
+	if head != sctx.Run.HeadSHA {
+		return fmt.Errorf("pipeline worktree head changed from exact candidate")
+	}
+	status, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain=v1", "--untracked-files=all")
+	if err != nil {
+		return fmt.Errorf("inspect pipeline worktree: %w", err)
+	}
+	if strings.TrimSpace(status) != "" {
+		return fmt.Errorf("pipeline worktree is not clean for isolated assessment")
+	}
+	copyCtx := *sctx
+	copyCtx.Ctx = ctx
+	if _, err := copyCtx.BindSourceRef(); err != nil {
+		return fmt.Errorf("verify exact source ref: %w", err)
+	}
+	return nil
+}
+
+func boundaryDocumentAssessmentChanges(ctx context.Context, dir, originalHead string) (string, error) {
+	head, err := git.HeadSHA(ctx, dir)
+	if err != nil {
+		return "", fmt.Errorf("inspect boundary assessment head: %w", err)
+	}
+	status, err := git.Run(ctx, dir, "status", "--porcelain=v1", "--untracked-files=all")
+	if err != nil {
+		return "", fmt.Errorf("inspect boundary assessment worktree: %w", err)
+	}
+	parts := make([]string, 0, 2)
+	if head != originalHead {
+		changed, diffErr := git.Run(ctx, dir, "diff", "--name-only", originalHead+".."+head)
+		if diffErr != nil {
+			return "", fmt.Errorf("inspect committed boundary assessment changes: %w", diffErr)
+		}
+		if strings.TrimSpace(changed) == "" {
+			changed = "assessment HEAD advanced"
+		}
+		parts = append(parts, changed)
+	}
+	if strings.TrimSpace(status) != "" {
+		parts = append(parts, status)
+	}
+	if len(parts) == 0 {
+		return "", nil
+	}
+	summary := strings.Join(parts, "; ")
+	summary = strings.Join(strings.Fields(summary), " ")
+	if len(summary) > 1000 {
+		summary = summary[:1000] + "..."
+	}
+	return summary, nil
 }
 
 // buildPrompt assembles the document (or combined document+lint) prompt: the
