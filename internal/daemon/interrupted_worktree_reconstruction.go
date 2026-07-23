@@ -42,6 +42,7 @@ const (
 	arenaMissingWorktreeCreatedAt          = int64(1784709535)
 	arenaMissingWorktreeUpdatedAt          = int64(1784723813)
 	arenaMissingWorktreeParkedMS           = int64(11095356)
+	arenaMissingWorktreePRQueryLimit       = 100
 	interruptedJournalVersion              = 1
 	interruptedJournalManifestName         = "manifest.json"
 )
@@ -515,7 +516,7 @@ func defaultInterruptedExternalStateProbe(ctx context.Context, repo *db.Repo, ga
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(probeCtx, gh, "pr", "list", "--repo", "ArenaCRM/arena-crm", "--head", branch, "--base", base, "--state", "all", "--json", "number,headRefName,headRepositoryOwner,baseRefName")
+	cmd := exec.CommandContext(probeCtx, gh, "pr", "list", "--repo", "ArenaCRM/arena-crm", "--head", branch, "--base", base, "--state", "all", "--limit", fmt.Sprint(arenaMissingWorktreePRQueryLimit), "--json", "number,headRefName,headRepositoryOwner,baseRefName")
 	cmd.Dir = repo.WorkingPath
 	shellenv.ConfigureShellCommand(cmd)
 	out, err := shellenv.CombinedOutputShellCommand(cmd)
@@ -537,6 +538,9 @@ func defaultInterruptedExternalStateProbe(ctx context.Context, repo *db.Repo, ga
 }
 
 func arenaCandidatePR(prs []interruptedPR, branch, base string) (int, bool, error) {
+	if len(prs) >= arenaMissingWorktreePRQueryLimit {
+		return 0, false, fmt.Errorf("pull request query reached its completeness limit")
+	}
 	for _, pr := range prs {
 		if pr.Number <= 0 || pr.HeadRefName != branch || pr.BaseRefName != base || pr.HeadRepositoryOwner == nil || strings.TrimSpace(pr.HeadRepositoryOwner.Login) == "" {
 			return 0, false, fmt.Errorf("pull request query returned incomplete or mismatched identity")

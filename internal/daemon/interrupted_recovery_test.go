@@ -981,6 +981,14 @@ func TestArenaCandidatePRFilterRequiresExactOwnerBranchAndBase(t *testing.T) {
 	if _, ok, err := arenaCandidatePR(prs[:1], arenaMissingWorktreeBranch, arenaMissingWorktreeBaseBranch); err != nil || ok {
 		t.Fatalf("foreign owner result = %v, %v, want false, nil", ok, err)
 	}
+	fullPage := make([]interruptedPR, arenaMissingWorktreePRQueryLimit)
+	for i := range fullPage {
+		fullPage[i] = prs[0]
+		fullPage[i].Number = i + 1
+	}
+	if _, _, err := arenaCandidatePR(fullPage, arenaMissingWorktreeBranch, arenaMissingWorktreeBaseBranch); err == nil {
+		t.Fatal("complete PR evidence was accepted at the query limit")
+	}
 	for _, malformed := range []string{
 		`[{"number":2,"headRefName":"other","baseRefName":"staging","headRepositoryOwner":{"login":"ArenaCRM"}}]`,
 		`[{"number":3,"headRefName":"fm/arena-no-mistakes-beta","baseRefName":"main","headRepositoryOwner":{"login":"ArenaCRM"}}]`,
