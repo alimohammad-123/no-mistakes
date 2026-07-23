@@ -405,7 +405,7 @@ func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
 // ValidateHeadValidationRecovery accepts only an active configured-Test
 // candidate with the fixed step topology. Legacy rows without a replay target
 // are eligible solely while CI is running on a coherently pushed PR; rows with
-// a target may resume a reset/in-progress Test-through-CI replay. Terminal,
+// a target may resume a reset/in-progress suffix from Test. Terminal,
 // parked, push-active, custody-returned, or malformed histories fail closed.
 func ValidateHeadValidationRecovery(database *db.DB, run *db.Run, steps []Step) error {
 	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince != nil || run.PushActive || run.CustodyReturnedAt != nil {
@@ -430,8 +430,8 @@ func ValidateHeadValidationRecovery(database *db.DB, run *db.Run, steps []Step) 
 			ciIndex = index
 		}
 	}
-	if testIndex < 0 || ciIndex < 0 || ciIndex <= testIndex {
-		return fmt.Errorf("head-validation recovery requires Test through CI topology")
+	if testIndex < 0 {
+		return fmt.Errorf("head-validation recovery requires a Test step")
 	}
 	for index := 0; index < testIndex; index++ {
 		if status := results[index].Status; status != types.StepStatusCompleted && status != types.StepStatusSkipped {
@@ -439,6 +439,9 @@ func ValidateHeadValidationRecovery(database *db.DB, run *db.Run, steps []Step) 
 		}
 	}
 	if run.ValidationTargetSHA == nil {
+		if ciIndex < 0 || ciIndex <= testIndex {
+			return fmt.Errorf("legacy head-validation recovery requires Test through CI topology")
+		}
 		for index := testIndex; index < ciIndex; index++ {
 			if status := results[index].Status; status != types.StepStatusCompleted && status != types.StepStatusSkipped {
 				return fmt.Errorf("legacy head-validation predecessor %s is %s", results[index].StepName, status)
@@ -475,7 +478,7 @@ func ValidateHeadValidationRecovery(database *db.DB, run *db.Run, steps []Step) 
 
 	pendingSeen := false
 	runningSeen := false
-	for index := testIndex; index <= ciIndex; index++ {
+	for index := testIndex; index < len(results); index++ {
 		status := results[index].Status
 		switch status {
 		case types.StepStatusCompleted, types.StepStatusSkipped:
@@ -1102,7 +1105,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
-			if e.configuredTestRequired() && errors.Is(context.Cause(ctx), ErrDaemonShutdown) &&
+			if daemonShutdownCancellation(ctx, err) && e.configuredTestRequired() &&
 				(run.ValidationTargetSHA != nil || stepName == types.StepCI) {
 				return false, fmt.Errorf("%w: %s", ErrValidationRunInterrupted, stepName)
 			}
@@ -1616,16 +1619,18 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	}
 	if e.configuredTestRequired() && run.ValidationTargetSHA != nil {
 		for _, ctx := range ctxs {
-			if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+			if daemonShutdownCancellation(ctx, err) {
 				return fmt.Errorf("%w: %v", ErrValidationRunInterrupted, err)
 			}
 		}
 	}
 	errMsg := err.Error()
-	for _, ctx := range ctxs {
-		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
-			errMsg = cause.Error()
-			break
+	if errors.Is(err, context.Canceled) {
+		for _, ctx := range ctxs {
+			if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
+				errMsg = cause.Error()
+				break
+			}
 		}
 	}
 	runStatus := types.RunFailed
@@ -1639,6 +1644,11 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	run.Error = &errMsg
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	return err
+}
+
+func daemonShutdownCancellation(ctx context.Context, err error) bool {
+	return errors.Is(context.Cause(ctx), ErrDaemonShutdown) &&
+		(errors.Is(err, context.Canceled) || errors.Is(err, ErrDaemonShutdown))
 }
 
 // --- event helpers ---

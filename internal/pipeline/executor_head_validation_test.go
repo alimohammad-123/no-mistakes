@@ -276,6 +276,115 @@ func TestExecutor_DaemonShutdownDuringValidationReplayResumesIdempotently(t *tes
 	}
 }
 
+func TestExecutor_RecoversPersistedReplayThroughReducedTopology(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := initExecutorGitRepo(t, database, run)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.RecordSuccessfulTestHead(run.ID, run.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	testedHead := run.HeadSHA
+	run.TestHeadSHA = &testedHead
+	testStep := &proofRecordingTestStep{}
+	steps := []Step{testStep, newPassStep(types.StepDocument), newPassStep(types.StepLint)}
+	for _, step := range steps {
+		result, err := database.InsertStepResult(run.ID, step.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch step.Name() {
+		case types.StepTest:
+			if err := database.CompleteStep(result.ID, 0, 1, "test.log"); err != nil {
+				t.Fatal(err)
+			}
+		case types.StepDocument:
+			if err := database.StartStep(result.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	path := filepath.Join(workDir, "reduced-recovery")
+	if err := os.WriteFile(path, []byte("candidate"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Run(context.Background(), workDir, "add", filepath.Base(path)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Run(context.Background(), workDir, "commit", "-m", "advance reduced candidate"); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := git.HeadSHA(context.Background(), workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Commands.Test = "configured-test-command"
+	sctx := &StepContext{Ctx: context.Background(), Run: run, Repo: repo, WorkDir: workDir, Config: cfg, DB: database}
+	if err := sctx.AdvanceHeadSHA(candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.AdvanceHeadSHA(candidate); err != nil {
+		t.Fatalf("idempotent head advance: %v", err)
+	}
+
+	interrupted, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if interrupted.ValidationTargetSHA == nil || *interrupted.ValidationTargetSHA != candidate || interrupted.ValidationReplayCount != 1 {
+		t.Fatalf("persisted boundary state = target %v count %d", interrupted.ValidationTargetSHA, interrupted.ValidationReplayCount)
+	}
+	if err := ValidateHeadValidationRecovery(database, interrupted, steps); err != nil {
+		t.Fatalf("ValidateHeadValidationRecovery() error = %v", err)
+	}
+	exec := NewExecutor(database, p, cfg, nil, steps, nil)
+	if err := exec.ResumeHeadValidation(context.Background(), interrupted, repo, workDir); err != nil {
+		t.Fatalf("ResumeHeadValidation() error = %v", err)
+	}
+	completed, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != types.RunCompleted || completed.ValidationReplayCount != 1 ||
+		completed.TestHeadSHA == nil || *completed.TestHeadSHA != completed.HeadSHA {
+		t.Fatalf("reduced recovery = status %s count %d proof %v head %s", completed.Status, completed.ValidationReplayCount, completed.TestHeadSHA, completed.HeadSHA)
+	}
+}
+
+func TestExecutor_DaemonShutdownDoesNotMaskIndependentReplayFailure(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := initExecutorGitRepo(t, database, run)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	testStep := &proofRecordingTestStep{}
+	documentCalls := 0
+	document := &adaptiveCallStep{name: types.StepDocument, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		documentCalls++
+		if documentCalls == 1 {
+			mutator := &headMutatingStep{name: types.StepDocument, mutateEvery: true}
+			return mutator.Execute(sctx)
+		}
+		cancel(ErrDaemonShutdown)
+		return nil, errors.New("independent repository failure")
+	}}
+	cfg := &config.Config{}
+	cfg.Commands.Test = "configured-test-command"
+	exec := NewExecutor(database, p, cfg, nil, []Step{testStep, document, newPassStep(types.StepLint)}, nil)
+
+	err := exec.Execute(ctx, run, repo, workDir)
+	if err == nil || errors.Is(err, ErrValidationRunInterrupted) || !strings.Contains(err.Error(), "independent repository failure") {
+		t.Fatalf("Execute() error = %v, want independent terminal failure", err)
+	}
+	failed, getErr := database.GetRun(run.ID)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if failed.Status != types.RunFailed || failed.Error == nil || !strings.Contains(*failed.Error, "independent repository failure") {
+		t.Fatalf("failed replay run = status %s error %v", failed.Status, failed.Error)
+	}
+}
+
 func TestExecutor_ResumeLegacyRunningCIReplaysMissingProofInSameRun(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := initExecutorGitRepo(t, database, run)

@@ -147,3 +147,35 @@ func TestScheduleHeadValidationReplayNeverRewritesTerminalHistory(t *testing.T) 
 		t.Fatalf("terminal run was rewritten: %#v", got)
 	}
 }
+
+func TestAdvanceRunHeadSHAPersistsReplayObligationIdempotently(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/test-advance-proof", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RecordSuccessfulTestHead(run.ID, "head-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunCIReady(run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := d.AdvanceRunHeadSHA(run.ID, "head-1", "head-2", true)
+	if err != nil || count != 1 {
+		t.Fatalf("advance run head = count %d, err %v", count, err)
+	}
+	count, err = d.AdvanceRunHeadSHA(run.ID, "head-2", "head-2", true)
+	if err != nil || count != 1 {
+		t.Fatalf("idempotent advance = count %d, err %v", count, err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HeadSHA != "head-2" || got.ValidationTargetSHA == nil || *got.ValidationTargetSHA != "head-2" ||
+		got.ValidationReplayCount != 1 || got.CIReadyAt != nil {
+		t.Fatalf("advanced replay state = %#v", got)
+	}
+}

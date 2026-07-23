@@ -103,10 +103,22 @@ func (sctx *StepContext) AdvanceHeadSHA(candidateSHA string) error {
 	if err := sourceprovenance.AdvanceCandidate(sctx.Ctx, sctx.WorkDir, ref, candidateSHA, previousSHA); err != nil {
 		return err
 	}
-	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, candidateSHA); err != nil {
+	requireValidation := sctx.Config != nil && sctx.Config.Commands.Test != "" &&
+		sctx.Run.TestHeadSHA != nil && *sctx.Run.TestHeadSHA != candidateSHA
+	replayCount, err := sctx.DB.AdvanceRunHeadSHA(sctx.Run.ID, previousSHA, candidateSHA, requireValidation)
+	if err != nil {
 		return err
 	}
 	sctx.Run.HeadSHA = candidateSHA
+	if requireValidation {
+		target := candidateSHA
+		sctx.Run.ValidationTargetSHA = &target
+		sctx.Run.ValidationReplayCount = replayCount
+		sctx.Run.CIReadyAt = nil
+		if replayCount > maxHeadValidationReplays {
+			return fmt.Errorf("final-head validation did not converge after %d replay attempts", maxHeadValidationReplays)
+		}
+	}
 	return nil
 }
 
