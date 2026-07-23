@@ -848,6 +848,13 @@ func (d *DB) ValidateRecoverableRunHeadTransition(transition *RunHeadTransition,
 	if transition == nil || maxReplays <= 0 {
 		return nil, fmt.Errorf("validate recoverable run head transition: transition and replay bound are required")
 	}
+	persisted, err := d.GetRunHeadTransition(transition.RunID)
+	if err != nil {
+		return nil, fmt.Errorf("validate recoverable run head transition: read durable transition: %w", err)
+	}
+	if !sameRunHeadTransition(persisted, transition) {
+		return nil, fmt.Errorf("validate recoverable run head transition: durable transition is missing, corrupt, or changed")
+	}
 	run, err := d.GetRun(transition.RunID)
 	if err != nil {
 		return nil, fmt.Errorf("validate recoverable run head transition: %w", err)
@@ -906,6 +913,7 @@ func (d *DB) ValidateRecoverableRunHeadTransition(transition *RunHeadTransition,
 	}
 	nextReplayCount := run.ValidationReplayCount + 1
 	if run.ValidationReplayCount > maxReplays ||
+		(transition.Phase == HeadAdvancePipeline && nextReplayCount > maxReplays) ||
 		nextReplayCount > maxReplays+1 ||
 		transition.NextReplayCount != nextReplayCount ||
 		transition.NextTargetSHA == nil ||

@@ -117,6 +117,16 @@ func (sctx *StepContext) advanceHeadSHA(candidateSHA string, phase db.HeadAdvanc
 		return fmt.Errorf("pipeline source-ref context is missing")
 	}
 	previousSHA := sctx.Run.HeadSHA
+	if candidateSHA == previousSHA {
+		if err := sctx.DB.ValidateRunHeadAdvance(sctx.Run.ID, previousSHA, phase); err != nil {
+			return err
+		}
+		ref, err := sctx.Run.FrozenSourceRef()
+		if err != nil {
+			return err
+		}
+		return sourceprovenance.BindCandidateIfUnchanged(sctx.Ctx, sctx.WorkDir, ref, previousSHA, previousSHA)
+	}
 	ref, err := sctx.Run.FrozenSourceRef()
 	if err != nil {
 		return err

@@ -147,10 +147,23 @@ func newTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA stri
 	t.Cleanup(func() { database.Close() })
 
 	sourceRef := "refs/heads/feature"
+	repo, err := database.InsertRepo(workDir, "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	run.Status = types.RunRunning
+	run.SourceRef = &sourceRef
 	return &pipeline.StepContext{
 		Ctx:      context.Background(),
-		Run:      &db.Run{ID: "run-1", RepoID: "repo-1", Branch: "feature", HeadSHA: headSHA, BaseSHA: baseSHA, BaseBranch: "main", SourceRef: &sourceRef},
-		Repo:     &db.Repo{ID: "repo-1", WorkingPath: workDir, UpstreamURL: "https://github.com/test/repo", DefaultBranch: "main"},
+		Run:      run,
+		Repo:     repo,
 		WorkDir:  workDir,
 		Agent:    ag,
 		Config:   &config.Config{Agent: types.AgentClaude, Commands: cmds},
@@ -392,28 +405,11 @@ func fakeGlab(t *testing.T, mrViewJSON string) (env []string, logFile string) {
 	return env, logFile
 }
 
-// newTestContextWithDBRecords is like newTestContext but also inserts
-// repo and run records into the database so GetRun works after updates.
+// newTestContextWithDBRecords preserves the explicit fixture name used by
+// tests that exercise persisted run state.
 func newTestContextWithDBRecords(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA string, cmds config.Commands) *pipeline.StepContext {
 	t.Helper()
-	sctx := newTestContext(t, ag, workDir, baseSHA, headSHA, cmds)
-
-	// Insert repo + run records so DB queries work
-	repo, err := sctx.DB.InsertRepo(workDir, "https://github.com/test/repo", "main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err := sctx.DB.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sctx.DB.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
-		t.Fatal(err)
-	}
-	run.Status = types.RunRunning
-	sctx.Run = run
-	sctx.Repo = repo
-	return sctx
+	return newTestContext(t, ag, workDir, baseSHA, headSHA, cmds)
 }
 
 func exhaustHeadValidationCapacity(t *testing.T, sctx *pipeline.StepContext, finalHeadSHA string) {

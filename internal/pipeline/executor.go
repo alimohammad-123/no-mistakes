@@ -1123,6 +1123,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
 			}
 			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", redactedErr, &durationMS)
+			if errors.Is(err, context.Canceled) {
+				return false, fmt.Errorf("step %s failed: %w", stepName, context.Canceled)
+			}
 			return false, fmt.Errorf("step %s failed: %s", stepName, redactedErr)
 		}
 
