@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -270,26 +271,39 @@ func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdSt
 		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
 	}
 	shellenv.ConfigureShellCommand(cmd)
-	var cancellationApplied atomic.Bool
+	var leaderKillApplied atomic.Bool
 	cancelCommand := cmd.Cancel
 	cmd.Cancel = func() error {
-		err := cancelCommand()
-		if err == nil {
-			cancellationApplied.Store(true)
+		leaderErr := os.ErrProcessDone
+		if cmd.Process != nil {
+			leaderErr = cmd.Process.Kill()
+			if leaderErr == nil {
+				leaderKillApplied.Store(true)
+			}
 		}
-		return err
+		groupErr := cancelCommand()
+		switch {
+		case groupErr == nil:
+			return nil
+		case leaderErr == nil && errors.Is(groupErr, os.ErrProcessDone):
+			return nil
+		case errors.Is(leaderErr, os.ErrProcessDone):
+			return groupErr
+		default:
+			return fmt.Errorf("kill command leader: %v; kill command group: %w", leaderErr, groupErr)
+		}
 	}
 	cmd.Dir = dir
 	if len(env) > 0 {
 		cmd.Env = mergeEnv(env)
 	}
 	out, err := shellenv.CombinedOutputShellCommand(cmd)
-	return classifyShellCommandResult(ctx, cmdStr, out, err, cancellationApplied.Load())
+	return classifyShellCommandResult(ctx, cmdStr, out, cmd, err, leaderKillApplied.Load())
 }
 
-func classifyShellCommandResult(ctx context.Context, cmdStr string, out []byte, err error, cancellationApplied bool) (string, int, error) {
+func classifyShellCommandResult(ctx context.Context, cmdStr string, out []byte, cmd *exec.Cmd, err error, leaderKillApplied bool) (string, int, error) {
 	if err != nil {
-		if cancellationApplied {
+		if shellenv.CommandLeaderCanceled(cmd, err, leaderKillApplied) {
 			if cause := context.Cause(ctx); cause != nil {
 				return string(out), -1, fmt.Errorf("run command %q: %w", cmdStr, cause)
 			}

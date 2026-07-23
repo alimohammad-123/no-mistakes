@@ -4,14 +4,66 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
+
+func TestClassifyShellCommandResultPreservesLeaderOutcome(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(pipeline.ErrDaemonShutdown)
+
+	t.Run("direct cancellation", func(t *testing.T) {
+		cmd := exec.Command("sh", "-c", "exec sleep 30")
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Process.Kill(); err != nil {
+			t.Fatal(err)
+		}
+		err := cmd.Wait()
+		_, code, gotErr := classifyShellCommandResult(ctx, "sleep 30", nil, cmd, err, true)
+		if code != -1 || !errors.Is(gotErr, pipeline.ErrDaemonShutdown) {
+			t.Fatalf("direct cancellation = code %d error %v", code, gotErr)
+		}
+	})
+
+	t.Run("success before shutdown", func(t *testing.T) {
+		cmd := exec.Command("sh", "-c", "exit 0")
+		err := cmd.Run()
+		_, code, gotErr := classifyShellCommandResult(ctx, "exit 0", nil, cmd, err, false)
+		if code != 0 || gotErr != nil {
+			t.Fatalf("success = code %d error %v", code, gotErr)
+		}
+	})
+
+	t.Run("nonzero leader with lingering child", func(t *testing.T) {
+		cmd := exec.CommandContext(context.Background(), "sh", "-c", "sleep 30 >/dev/null 2>&1 & exit 42")
+		shellenv.ConfigureShellCommand(cmd)
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		err := cmd.Wait()
+		if killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); killErr != nil {
+			t.Fatalf("kill lingering child group: %v", killErr)
+		}
+		for i := 0; i < 100; i++ {
+			_, code, gotErr := classifyShellCommandResult(ctx, "exit 42", nil, cmd, err, false)
+			if code != 42 || gotErr != nil {
+				t.Fatalf("race %d = code %d error %v", i, code, gotErr)
+			}
+		}
+	})
+}
 
 // TestRunShellCommandWithEnv_KillsGrandchildOnCancel is a regression test for
 // orphan subprocesses on cancellation. runShellCommandWithEnv must kill the
