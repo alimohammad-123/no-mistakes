@@ -1,0 +1,100 @@
+internal/ipc/protocol.go
+  s_47dd97bf3d53b7::t_b697a9826ce8b5 17-24,114-121,192-196
+  s_47dd97bf3d53b7::t_1bc1d942fec173 12-16,197
+internal/pipeline/executor_head_validation_test.go
+  s_47dd97bf3d53b7::t_206a9042953d53 333-375,386-426,429,444-452,455-461
+  s_47dd97bf3d53b7::t_9f6090e8853688 376-385,427-428,430-443,453-454
+internal/daemon/daemon.go
+  s_47dd97bf3d53b7::t_e95b72a5cbb80a 523-534
+internal/ipc/protocol_test.go
+  s_47dd97bf3d53b7::t_74073c9b43fe7e 405
+  s_47dd97bf3d53b7::t_e52f58a88385ea 423-424
+internal/db/exact_final_head_recovery.go
+  s_47dd97bf3d53b7::t_2696206ea10ffd 41-47,77-78,85-87,364-366,370-372
+  s_47dd97bf3d53b7::t_5cd0b0b4aee5d4 190-192,196-198
+  s_47dd97bf3d53b7::t_3684dc30bc1ddd 405
+  s_47dd97bf3d53b7::t_1b05b430aaa10f 1-28,50-55,62-76,79-84,88-121,132-156,163-189,193-195,199-251,285-363,367-369,373-404,406-429,432,435,437-439,445-463,494-496
+  s_47dd97bf3d53b7::t_f46f1cb142319f 59-61,160-162
+  s_47dd97bf3d53b7::t_db4aa654a4a5b4 252-284
+  s_47dd97bf3d53b7::t_303945c158e076 122-131
+  s_47dd97bf3d53b7::t_2282ecb16b7d5c 430-431,433-434,436,464-481,485,488-489,492-493
+  s_47dd97bf3d53b7::t_4a2e606592c470 440-444,486-487,490-491
+  s_47dd97bf3d53b7::t_c2e7824e80779f 482-484
+  s_47dd97bf3d53b7::t_4e028b38c92b07 29-40,48-49
+  s_47dd97bf3d53b7::t_ba9cc6f0cc81b6 56-58,157-159
+docs/src/content/docs/reference/cli.md
+  s_47dd97bf3d53b7::t_005b1a0f54d64e 136-158
+internal/pipeline/pipeline.go
+  s_47dd97bf3d53b7::t_33a17b9f583739 115-127
+internal/daemon/exact_final_head_recovery_test.go
+  s_47dd97bf3d53b7::t_b9aeed678d50f8 256,259-267
+  s_47dd97bf3d53b7::t_d81e8e96694e93 1-255,257-258,268-319
+internal/cli/axi_drive_test.go
+  s_47dd97bf3d53b7::t_d0fc421cd16c88 11,13,185-206
+  s_47dd97bf3d53b7::t_50972be2b49ab6 29-52,207
+  s_47dd97bf3d53b7::t_7b439a8c0fa4e2 208
+internal/cli/axi_drive.go
+  s_47dd97bf3d53b7::t_9d6a27a34829d9 17,729-734
+  s_47dd97bf3d53b7::t_b3934fab4a6dab 22
+  s_47dd97bf3d53b7::t_aad9ece289f127 110-156
+internal/db/run.go
+  s_47dd97bf3d53b7::t_666d9694f02f18 734-774
+internal/db/head_validation_test.go
+  s_47dd97bf3d53b7::t_0419a5b0bad518 520-568
+internal/e2e/exact_final_head_recovery_test.go
+  s_47dd97bf3d53b7::t_df21d75eb5d7fe 1-46,52-154
+  s_47dd97bf3d53b7::t_e7997c877d94ba 47-51
+internal/cli/axi.go
+  s_47dd97bf3d53b7::t_b14bf6e9a0c387 48
+internal/db/schema.go
+  s_47dd97bf3d53b7::t_75a9b9abf3d87b 73-85,93-97
+  s_47dd97bf3d53b7::t_de2a52328edefc 86-92
+docs/src/content/docs/reference/pipeline-steps.md
+  s_47dd97bf3d53b7::t_48499299e45366 20,117
+internal/db/db_test.go
+  s_47dd97bf3d53b7::t_18d5ef51ed91fd 41-43
+internal/pipeline/executor.go
+  s_47dd97bf3d53b7::t_f61e78c8517576 741
+  s_47dd97bf3d53b7::t_c0bbe0c23aa8f9 710-711,713-725,731-740
+  s_47dd97bf3d53b7::t_d57f91702fc406 415-418,420-425,705-708,712,742-743
+  s_47dd97bf3d53b7::t_4e38bf984513ed 419,709,726-730
+  s_47dd97bf3d53b7::t_e3535fdcf0ffcf 34,36-37
+internal/db/exact_final_head_recovery_test.go
+  s_47dd97bf3d53b7::t_cac14ff27d85d3 219-227
+  s_47dd97bf3d53b7::t_361fed1d08e1ef 1-181,185-218,228-269,316-336
+  s_47dd97bf3d53b7::t_af14dbe85917de 270-315
+  s_47dd97bf3d53b7::t_144011e48f1752 182-184
+AGENTS.md
+  s_47dd97bf3d53b7::t_4a9d219b87688c 33
+internal/daemon/exact_final_head_recovery_e2e.go
+  s_47dd97bf3d53b7::t_309f3591a7a21d 1-20
+internal/daemon/exact_final_head_recovery.go
+  s_47dd97bf3d53b7::t_8d3fb8716f0529 153-157
+  s_47dd97bf3d53b7::t_293b602e697775 1-88,98-101,103-152,158-182,184-192,194-211,213-294
+  s_47dd97bf3d53b7::t_b29442770f5b99 89-96
+  s_47dd97bf3d53b7::t_1193badf3462cf 97,102,183,193,212
+docs/src/content/docs/concepts/daemon.md
+  s_47dd97bf3d53b7::t_068d02c6e7c2c0 118-131
+internal/pipeline/steps/document.go
+  s_47dd97bf3d53b7::t_64c5a6672c2bbb 4,6,8-9,11,14,122,124-130,147,153-159,169-174,218-343
+internal/pipeline/steps/document_boundary_test.go
+  s_47dd97bf3d53b7::t_4b698ad9a403b3 1-266
+internal/pipeline/steps/exact_final_head_recovery.go
+  s_47dd97bf3d53b7::t_7b29d08d64b308 1-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "c747f5810507e569cca05128912aeec06eeb9243",
+  "prompts": {},
+  "sessions": {
+    "s_47dd97bf3d53b7": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019f90f9-18ed-7539-ada0-237035190feb",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
