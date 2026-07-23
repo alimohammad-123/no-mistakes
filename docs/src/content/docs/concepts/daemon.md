@@ -136,12 +136,33 @@ head before execution can continue.
 Recovery is allowed only for the exact legacy shutdown error with one preserved
 failed gate, a nonempty matching findings round, completed earlier steps, and
 pristine pending later steps. The run must be the newest run for the repository
-and branch, have the same submitted head and authoritative intent, have no push,
-pull request, CI, or custody-return provenance, and retain a clean registered
-pipeline worktree whose recorded head is available in the local gate. Missing or
-dirty worktrees, head or branch mismatches, malformed or empty findings,
-ambiguous step history, genuine command failures, and any external-delivery
-provenance are refused without changing the failed run.
+and branch, have the same submitted head and authoritative intent, and have no
+push, pull request, CI, or custody-return provenance. Ordinarily it must also
+retain a clean registered pipeline worktree whose recorded head is available in
+the local gate. Dirty worktrees, head or branch mismatches, malformed or empty
+findings, ambiguous step history, genuine command failures, and any
+external-delivery provenance are refused without changing the failed run.
+
+There is one compile-time allowlisted exception for a known Arena Test-gate
+incident whose registered pipeline worktree is genuinely absent. This is not a
+general repair command or fallback. The ordinary `axi run` path reconstructs
+that exact run's detached worktree at its canonical path and exact stored
+pipeline commit only after its fixed repository, run, branch, base, submitted
+head, pipeline head, intent digest, Test step, shutdown error, Git topology,
+paths, process ownership, parent remote branch, all-state pull requests,
+delivery state, and complete durable database evidence all match. Any mismatch,
+unreachable commit, existing replacement, ambiguous Git administration, live
+owner, or changed evidence is refused without mutation.
+
+The exception records a private ownership journal under
+`$NM_HOME/recovery/interrupted-worktrees/` before creating the linked worktree,
+copies commit identity from the registered source worktree into per-worktree
+configuration, repeats mutable checks before an evidence-token-bound database
+claim, and removes the journal only after executor admission. Before that claim,
+failure rolls back only journal-owned artifacts. After the claim, failure marks
+the same run failed and rolls back owned artifacts. Daemon startup reconciles a
+partial journal before ordinary stale-run and worktree cleanup, while a fully
+claimed parked run resumes through the existing crash-recovery path.
 
 Trusted repository policy is reloaded from the run's frozen pipeline base before
 the restore transaction. Existing reviewer and fixer session metadata must

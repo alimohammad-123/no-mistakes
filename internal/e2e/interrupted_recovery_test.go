@@ -239,6 +239,7 @@ func TestAxiRunReconstructsAllowlistedMissingLegacyWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconstruct missing interrupted Test gate: %v\n%s", err, reconstructedOut)
 	}
+	t.Logf("ordinary axi run reconstructed the missing pipeline worktree and returned the preserved Test gate:\n%s", reconstructedOut)
 	for _, want := range []string{arenaEvidenceRunID, "step: test", "status: awaiting_approval", "test-1"} {
 		if !strings.Contains(reconstructedOut, want) {
 			t.Errorf("reconstructed output missing %q:\n%s", want, reconstructedOut)
@@ -317,6 +318,16 @@ func TestAxiRunReconstructsAllowlistedMissingLegacyWorktree(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	statusOut, err := h.RunInDir(operator, "axi", "status")
+	if err != nil {
+		t.Fatalf("read completed reconstructed run: %v\n%s", err, statusOut)
+	}
+	for _, want := range []string{arenaEvidenceRunID, "status: completed"} {
+		if !strings.Contains(statusOut, want) {
+			t.Errorf("completed reconstructed run output missing %q:\n%s", want, statusOut)
+		}
+	}
+	t.Logf("same reconstructed run completed after the explicit Test-gate response:\n%s", statusOut)
 }
 
 const (
