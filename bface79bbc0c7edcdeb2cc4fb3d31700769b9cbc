@@ -1,0 +1,33 @@
+internal/e2e/interrupted_recovery_test.go
+  s_7ec5c4d1d46449::t_9e2afe2c7a8790 242,321-330
+docs/src/content/docs/concepts/daemon.md
+  s_6aefad081e1e38::t_ab482aed420f5e 139-165
+AGENTS.md
+  s_6aefad081e1e38::t_ab482aed420f5e 126
+docs/src/content/docs/reference/environment.md
+  s_6aefad081e1e38::t_ab482aed420f5e 20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "bface79bbc0c7edcdeb2cc4fb3d31700769b9cbc",
+  "prompts": {},
+  "sessions": {
+    "s_6aefad081e1e38": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8d1f-2021-7e80-9495-a455c733be33",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    },
+    "s_7ec5c4d1d46449": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8d1b-6951-7681-9a5e-4f6b20c4f659",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}

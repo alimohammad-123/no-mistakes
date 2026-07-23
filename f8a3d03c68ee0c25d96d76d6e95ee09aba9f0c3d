@@ -1,0 +1,21 @@
+internal/daemon/interrupted_worktree_reconstruction.go
+  s_dd648f2776d008::t_e2a7476e85978c 45,519,541-543
+internal/daemon/interrupted_recovery_test.go
+  s_dd648f2776d008::t_e2a7476e85978c 984-991
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f8a3d03c68ee0c25d96d76d6e95ee09aba9f0c3d",
+  "prompts": {},
+  "sessions": {
+    "s_dd648f2776d008": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8d09-04e8-7951-bad1-aaf37c0c6447",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
