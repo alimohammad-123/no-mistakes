@@ -31,7 +31,12 @@ type EventFunc func(ipc.Event)
 const (
 	defaultGateReconcileInterval = 2 * time.Minute
 	defaultGateReconcileTimeout  = 30 * time.Second
+	// maxHeadValidationReplays bounds distinct stale candidate heads. Restarting
+	// the same persisted target is idempotent and does not consume the budget.
+	maxHeadValidationReplays = 3
 )
+
+var errHeadValidationReplayRequired = errors.New("head validation replay required")
 
 var (
 	// ErrDaemonShutdown is the typed cancellation cause used by the daemon.
@@ -39,6 +44,10 @@ var (
 	// ErrParkedRunInterrupted reports that shutdown reached a fully durable gate.
 	// Callers must preserve its run row and worktree for ordinary crash recovery.
 	ErrParkedRunInterrupted = errors.New("daemon shutdown interrupted a parked approval gate")
+	// ErrValidationRunInterrupted preserves a configured-Test run interrupted
+	// while CI was only monitoring an already-pushed exact candidate. Startup
+	// recovery reopens validation before trusting CI readiness again.
+	ErrValidationRunInterrupted = errors.New("daemon shutdown interrupted final-head validation monitoring")
 )
 
 type approvalResponse struct {
@@ -183,26 +192,77 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		stepRecords[step.Name()] = sr
 	}
 
-	// Execute steps sequentially
-	for i, step := range e.steps {
+	// Execute steps sequentially. A stale configured-Test proof rewinds the
+	// existing Test-through-CI rows in place; step identities stay stable while
+	// rounds remain append-only across every convergence cycle.
+	i := 0
+	skippedRemainder := false
+	for {
 		if ctx.Err() != nil {
-			return e.failRun(run, repo, context.Cause(ctx))
+			return e.failRun(run, repo, context.Cause(ctx), ctx)
+		}
+		if i >= len(e.steps) {
+			if !skippedRemainder {
+				replayIndex, replay, err := e.ensureFreshTestHead(ctx, run, workDir)
+				if err != nil {
+					return e.failRun(run, repo, err, ctx)
+				}
+				if replay {
+					e.shared = &RunShared{}
+					i = replayIndex
+					continue
+				}
+			}
+			break
+		}
+
+		step := e.steps[i]
+		if isDeliveryStep(step.Name()) {
+			replayIndex, replay, err := e.ensureFreshTestHead(ctx, run, workDir)
+			if err != nil {
+				return e.failRun(run, repo, err, ctx)
+			}
+			if replay {
+				e.shared = &RunShared{}
+				i = replayIndex
+				continue
+			}
 		}
 
 		sr := stepRecords[step.Name()]
 		if e.skips[step.Name()] {
+			if step.Name() == types.StepTest && e.configuredTestRequired() {
+				return e.failRun(run, repo, fmt.Errorf("configured Test step was skipped and cannot prove the final head"), ctx)
+			}
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
 				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
 			}
 			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, step.Name(), string(types.StepStatusSkipped), "", "", "", nil)
+			i++
 			continue
 		}
-		skipRemaining, err := e.executeStep(ctx, step, sr, run, repo, workDir, logDir, stepExecutionState{})
+		state, err := e.executionStateForStep(sr, run.ValidationTargetSHA != nil)
+		if err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		skipRemaining, err := e.executeStep(ctx, step, sr, run, repo, workDir, logDir, state)
+		if errors.Is(err, errHeadValidationReplayRequired) {
+			replayIndex, replay, replayErr := e.ensureFreshTestHead(ctx, run, workDir)
+			if replayErr != nil {
+				return e.failRun(run, repo, replayErr, ctx)
+			}
+			if !replay {
+				return e.failRun(run, repo, fmt.Errorf("step %s requested head validation replay without a stale Test proof", step.Name()), ctx)
+			}
+			e.shared = &RunShared{}
+			i = replayIndex
+			continue
+		}
 		if err != nil {
 			return e.failRun(run, repo, err, ctx)
 		}
 		if skipRemaining {
-			// Mark all subsequent steps as skipped
+			// Mark all subsequent steps as skipped.
 			for _, remaining := range e.steps[i+1:] {
 				rsr := stepRecords[remaining.Name()]
 				if dbErr := e.db.CompleteStepWithStatus(rsr.ID, types.StepStatusSkipped, 0, 0, ""); dbErr != nil {
@@ -210,8 +270,11 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 				}
 				e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, remaining.Name(), string(types.StepStatusSkipped), "", "", "", nil)
 			}
-			break
+			skippedRemainder = true
+			i = len(e.steps)
+			continue
 		}
+		i++
 	}
 
 	// Mark run as completed. A failure here must emit a terminal failure rather
@@ -230,6 +293,98 @@ func (e *Executor) initializeRunScopes(runID string) {
 	e.shared = &RunShared{}
 }
 
+func (e *Executor) configuredTestRequired() bool {
+	if e.config == nil || e.config.Commands.Test == "" {
+		return false
+	}
+	// Reduced step factories are used by deterministic daemon embeddings that
+	// never publish. The final-head invariant activates only when this executor
+	// actually contains a delivery boundary; production always does.
+	for _, step := range e.steps {
+		if isDeliveryStep(step.Name()) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDeliveryStep(name types.StepName) bool {
+	return name == types.StepPush || name == types.StepPR || name == types.StepCI
+}
+
+// ensureFreshTestHead either closes a matching validation target or atomically
+// schedules a same-run replay from Test. Missing provenance is stale for an
+// active configured-Test run; no historical or commit-message inference is
+// allowed.
+func (e *Executor) ensureFreshTestHead(ctx context.Context, run *db.Run, workDir string) (replayIndex int, replay bool, err error) {
+	if !e.configuredTestRequired() {
+		return 0, false, nil
+	}
+	testIndex := -1
+	for index, step := range e.steps {
+		if step.Name() == types.StepTest {
+			testIndex = index
+			break
+		}
+	}
+	if testIndex < 0 {
+		return 0, false, fmt.Errorf("configured Test command has no Test step in the pipeline")
+	}
+	if e.skips[types.StepTest] {
+		return 0, false, fmt.Errorf("configured Test step was skipped and cannot prove the final head")
+	}
+	if run.TestHeadSHA != nil && *run.TestHeadSHA == run.HeadSHA {
+		ref, err := run.FrozenSourceRef()
+		if err != nil {
+			return 0, false, err
+		}
+		if err := sourceprovenance.BindCandidateIfUnchanged(ctx, workDir, ref, run.HeadSHA, run.HeadSHA); err != nil {
+			return 0, false, fmt.Errorf("verify final-head source ref: %w", err)
+		}
+		if err := e.db.CompleteHeadValidation(run.ID, run.HeadSHA); err != nil {
+			return 0, false, err
+		}
+		run.ValidationTargetSHA = nil
+		return 0, false, nil
+	}
+	if err := e.scheduleHeadValidationReplay(run); err != nil {
+		return 0, false, err
+	}
+	return testIndex, true, nil
+}
+
+func (e *Executor) scheduleHeadValidationReplay(run *db.Run) error {
+	count, err := e.db.ScheduleHeadValidationReplay(run.ID, maxHeadValidationReplays)
+	if err != nil {
+		return err
+	}
+	target := run.HeadSHA
+	run.ValidationTargetSHA = &target
+	run.ValidationReplayCount = count
+	return nil
+}
+
+func (e *Executor) executionStateForStep(sr *db.StepResult, replaying bool) (stepExecutionState, error) {
+	rounds, err := e.db.GetRoundsByStep(sr.ID)
+	if err != nil {
+		return stepExecutionState{}, fmt.Errorf("get %s replay rounds: %w", sr.StepName, err)
+	}
+	if len(rounds) == 0 {
+		if replaying {
+			return stepExecutionState{trigger: "head_revalidation"}, nil
+		}
+		return stepExecutionState{}, nil
+	}
+	lastRound := 0
+	for _, round := range rounds {
+		if round.Round <= lastRound {
+			return stepExecutionState{}, fmt.Errorf("%s replay round history is malformed at round %d", sr.StepName, round.Round)
+		}
+		lastRound = round.Round
+	}
+	return stepExecutionState{roundNum: lastRound, trigger: "head_revalidation"}, nil
+}
+
 type stepExecutionState struct {
 	fixing           bool
 	previousFindings string
@@ -237,6 +392,7 @@ type stepExecutionState struct {
 	autoFixAttempts  int
 	executionMS      int64
 	currentRoundID   string
+	trigger          string
 }
 
 type recoveredGate struct {
@@ -255,6 +411,103 @@ func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
 	}
 	_, err := (&Executor{db: database, steps: steps}).recoveredGate(run.ID)
 	return err
+}
+
+// ValidateHeadValidationRecovery accepts only an active configured-Test
+// candidate with the fixed step topology. Legacy rows without a replay target
+// are eligible solely while CI is running on a coherently pushed PR; rows with
+// a target may resume a reset/in-progress Test-through-CI replay. Terminal,
+// parked, push-active, custody-returned, or malformed histories fail closed.
+func ValidateHeadValidationRecovery(database *db.DB, run *db.Run, steps []Step) error {
+	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince != nil || run.PushActive || run.CustodyReturnedAt != nil {
+		return fmt.Errorf("run is not an active pipeline-owned head-validation candidate")
+	}
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		return fmt.Errorf("get head-validation recovery steps: %w", err)
+	}
+	if len(results) != len(steps) {
+		return fmt.Errorf("head-validation recovery has %d step records for %d steps", len(results), len(steps))
+	}
+	testIndex, ciIndex := -1, -1
+	for index, result := range results {
+		if result.StepName != steps[index].Name() {
+			return fmt.Errorf("head-validation recovery step %d is %q, want %q", index, result.StepName, steps[index].Name())
+		}
+		if result.StepName == types.StepTest {
+			testIndex = index
+		}
+		if result.StepName == types.StepCI {
+			ciIndex = index
+		}
+	}
+	if testIndex < 0 || ciIndex < 0 || ciIndex <= testIndex {
+		return fmt.Errorf("head-validation recovery requires Test through CI topology")
+	}
+	for index := 0; index < testIndex; index++ {
+		if status := results[index].Status; status != types.StepStatusCompleted && status != types.StepStatusSkipped {
+			return fmt.Errorf("head-validation recovery predecessor %s is %s", results[index].StepName, status)
+		}
+	}
+	if run.ValidationTargetSHA == nil {
+		for index := testIndex; index < ciIndex; index++ {
+			if status := results[index].Status; status != types.StepStatusCompleted && status != types.StepStatusSkipped {
+				return fmt.Errorf("legacy head-validation predecessor %s is %s", results[index].StepName, status)
+			}
+		}
+		if run.LastPushedSHA == nil || *run.LastPushedSHA != run.HeadSHA || run.PushTargetKind == nil || run.PushTargetFingerprint == nil ||
+			run.PushRef == nil || run.LastPushedAt == nil || run.PushGeneration == nil || *run.PushGeneration <= 0 {
+			return fmt.Errorf("legacy head-validation recovery lacks coherent push provenance")
+		}
+		switch results[ciIndex].Status {
+		case types.StepStatusRunning:
+			if run.PRURL == nil || strings.TrimSpace(*run.PRURL) == "" {
+				return fmt.Errorf("legacy running-CI recovery lacks a stored PR identity")
+			}
+		case types.StepStatusCompleted, types.StepStatusSkipped:
+			if run.TestHeadSHA == nil || *run.TestHeadSHA != run.HeadSHA {
+				return fmt.Errorf("completed head-validation recovery lacks exact Test proof")
+			}
+			prIndex := -1
+			for index := testIndex; index < ciIndex; index++ {
+				if results[index].StepName == types.StepPR {
+					prIndex = index
+					break
+				}
+			}
+			if prIndex >= 0 && results[prIndex].Status == types.StepStatusCompleted && (run.PRURL == nil || strings.TrimSpace(*run.PRURL) == "") {
+				return fmt.Errorf("completed head-validation recovery lacks its PR identity")
+			}
+		default:
+			return fmt.Errorf("legacy head-validation CI step is %s", results[ciIndex].Status)
+		}
+		return nil
+	}
+
+	pendingSeen := false
+	runningSeen := false
+	for index := testIndex; index <= ciIndex; index++ {
+		status := results[index].Status
+		switch status {
+		case types.StepStatusCompleted, types.StepStatusSkipped:
+			if pendingSeen || runningSeen {
+				return fmt.Errorf("head-validation recovery has completed step %s after an interrupted suffix", results[index].StepName)
+			}
+		case types.StepStatusRunning:
+			if pendingSeen || runningSeen {
+				return fmt.Errorf("head-validation recovery has multiple active suffix steps")
+			}
+			runningSeen = true
+		case types.StepStatusPending:
+			pendingSeen = true
+		default:
+			return fmt.Errorf("head-validation recovery step %s is %s", results[index].StepName, status)
+		}
+	}
+	if !pendingSeen && !runningSeen {
+		return fmt.Errorf("head-validation recovery has no interrupted suffix")
+	}
+	return nil
 }
 
 func (e *Executor) hasDurableParkedGate(runID string) bool {
@@ -425,6 +678,82 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 }
 
+// ResumeHeadValidation conservatively restores an active running-CI legacy run
+// or an interrupted persisted replay. Missing/malformed proof is never
+// backfilled: the same run is reset to Test and must establish exact evidence.
+func (e *Executor) ResumeHeadValidation(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
+	if repo == nil {
+		return fmt.Errorf("recovered head-validation run has no repository")
+	}
+	if err := ValidateHeadValidationRecovery(e.db, run, e.steps); err != nil {
+		return err
+	}
+	if _, err := run.FrozenSourceRef(); err != nil {
+		return err
+	}
+	logDir := e.paths.RunLogDir(run.ID)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
+	}
+	e.initializeRunScopes(run.ID)
+
+	start := -1
+	if run.ValidationTargetSHA != nil {
+		if err := e.scheduleHeadValidationReplay(run); err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		start = e.stepIndex(types.StepTest)
+	} else if run.TestHeadSHA == nil || *run.TestHeadSHA != run.HeadSHA {
+		replayIndex, replay, err := e.ensureFreshTestHead(ctx, run, workDir)
+		if err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		if !replay {
+			return e.failRun(run, repo, fmt.Errorf("legacy recovery unexpectedly had fresh Test proof"), ctx)
+		}
+		start = replayIndex
+	} else {
+		ciIndex := e.stepIndex(types.StepCI)
+		if ciIndex < 0 {
+			return e.failRun(run, repo, fmt.Errorf("recovered head-validation run has no CI step"), ctx)
+		}
+		results, err := e.db.GetStepsByRun(run.ID)
+		if err != nil {
+			return e.failRun(run, repo, fmt.Errorf("read recovered CI step: %w", err), ctx)
+		}
+		if ciIndex >= len(results) {
+			return e.failRun(run, repo, fmt.Errorf("recovered CI step is missing"), ctx)
+		}
+		if results[ciIndex].Status == types.StepStatusRunning {
+			start = ciIndex
+			if err := e.db.ResetActiveStepForRecovery(run.ID, types.StepCI); err != nil {
+				return e.failRun(run, repo, err, ctx)
+			}
+			if err := e.db.SetRunCIReady(run.ID, false); err != nil {
+				return e.failRun(run, repo, err, ctx)
+			}
+		} else {
+			// Every step already reached a terminal status and only the run-level
+			// completion write was interrupted. Defense-in-depth freshness below
+			// finalizes it without rerunning CI or changing PR identity.
+			start = len(e.steps)
+		}
+	}
+	if start < 0 {
+		return e.failRun(run, repo, fmt.Errorf("recovered head-validation run has no Test step"), ctx)
+	}
+	return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, start)
+}
+
+func (e *Executor) stepIndex(name types.StepName) int {
+	for index, step := range e.steps {
+		if step.Name() == name {
+			return index
+		}
+	}
+	return -1
+}
+
 func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 	results, err := e.db.GetStepsByRun(runID)
 	if err != nil {
@@ -489,20 +818,83 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 	if err != nil {
 		return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err), ctx)
 	}
-	for index := start; index < len(e.steps); index++ {
+	index := start
+	for {
 		if ctx.Err() != nil {
 			return e.failRun(run, repo, context.Cause(ctx), ctx)
+		}
+		if index >= len(e.steps) {
+			replayIndex, replay, err := e.ensureFreshTestHead(ctx, run, workDir)
+			if err != nil {
+				return e.failRun(run, repo, err, ctx)
+			}
+			if replay {
+				e.shared = &RunShared{}
+				results, err = e.db.GetStepsByRun(run.ID)
+				if err != nil {
+					return e.failRun(run, repo, fmt.Errorf("reload replay steps: %w", err), ctx)
+				}
+				index = replayIndex
+				continue
+			}
+			break
+		}
+		if isDeliveryStep(e.steps[index].Name()) {
+			replayIndex, replay, err := e.ensureFreshTestHead(ctx, run, workDir)
+			if err != nil {
+				return e.failRun(run, repo, err, ctx)
+			}
+			if replay {
+				e.shared = &RunShared{}
+				results, err = e.db.GetStepsByRun(run.ID)
+				if err != nil {
+					return e.failRun(run, repo, fmt.Errorf("reload replay steps: %w", err), ctx)
+				}
+				index = replayIndex
+				continue
+			}
 		}
 		if index >= len(results) || results[index].StepName != e.steps[index].Name() || results[index].Status != types.StepStatusPending {
 			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index), ctx)
 		}
-		skipRemaining, err := e.executeStep(ctx, e.steps[index], results[index], run, repo, workDir, logDir, stepExecutionState{})
+		if e.skips[e.steps[index].Name()] {
+			if e.steps[index].Name() == types.StepTest && e.configuredTestRequired() {
+				return e.failRun(run, repo, fmt.Errorf("configured Test step was skipped and cannot prove the final head"), ctx)
+			}
+			if err := e.db.CompleteStepWithStatus(results[index].ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
+				return e.failRun(run, repo, err, ctx)
+			}
+			index++
+			continue
+		}
+		state, err := e.executionStateForStep(results[index], run.ValidationTargetSHA != nil)
+		if err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		skipRemaining, err := e.executeStep(ctx, e.steps[index], results[index], run, repo, workDir, logDir, state)
+		if errors.Is(err, errHeadValidationReplayRequired) {
+			replayIndex, replay, replayErr := e.ensureFreshTestHead(ctx, run, workDir)
+			if replayErr != nil {
+				return e.failRun(run, repo, replayErr, ctx)
+			}
+			if !replay {
+				return e.failRun(run, repo, fmt.Errorf("recovered step %s requested replay without stale proof", e.steps[index].Name()), ctx)
+			}
+			e.shared = &RunShared{}
+			results, err = e.db.GetStepsByRun(run.ID)
+			if err != nil {
+				return e.failRun(run, repo, fmt.Errorf("reload replay steps: %w", err), ctx)
+			}
+			index = replayIndex
+			continue
+		}
 		if err != nil {
 			return e.failRun(run, repo, err, ctx)
 		}
 		if skipRemaining {
 			return e.skipRecoveredRemainder(run, repo, index+1)
 		}
+		index++
 	}
 	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
 		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err), ctx)
@@ -698,7 +1090,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		},
 	}
 
-	nextTrigger := "initial"
+	nextTrigger := state.trigger
+	if nextTrigger == "" {
+		nextTrigger = "initial"
+	}
 	if sctx.Fixing {
 		nextTrigger = "auto_fix"
 	}
@@ -706,12 +1101,21 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	stepSkipped := false
 	currentRoundID := state.currentRoundID
 
-	// Execute with possible fix loop
+	// Execute with possible fix loop.
 	for {
+		if stepName == types.StepTest && e.configuredTestRequired() {
+			if err := e.db.BeginConfiguredTestAttempt(run.ID, run.HeadSHA); err != nil {
+				return false, fmt.Errorf("begin configured Test attempt: %w", err)
+			}
+			run.TestHeadSHA = nil
+		}
 		outcome, err := step.Execute(sctx)
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
+			if stepName == types.StepCI && e.configuredTestRequired() && errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+				return false, fmt.Errorf("%w: %s", ErrValidationRunInterrupted, stepName)
+			}
 			durationMS := executionMS + roundDuration
 			// Persist the failure reason to the step's own log file. The error
 			// often carries the only detail of why the step failed (e.g. git
@@ -730,6 +1134,21 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 
 		outcome.Findings = normalizeFindingsJSON(outcome.Findings, string(stepName))
+		if outcome.TestedHeadSHA != "" {
+			if stepName != types.StepTest {
+				return false, fmt.Errorf("step %s returned configured-Test proof outside the Test step", stepName)
+			}
+			if e.configuredTestRequired() {
+				if outcome.TestedHeadSHA != run.HeadSHA {
+					return false, fmt.Errorf("configured Test proof head %s does not match run head %s", outcome.TestedHeadSHA, run.HeadSHA)
+				}
+				if err := e.db.RecordSuccessfulTestHead(run.ID, outcome.TestedHeadSHA); err != nil {
+					return false, err
+				}
+				tested := outcome.TestedHeadSHA
+				run.TestHeadSHA = &tested
+			}
+		}
 		finalExitCode = outcome.ExitCode
 		durationOverrideMS += outcome.DurationOverrideMS
 
@@ -758,6 +1177,13 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			slog.Warn("failed to insert step round", "step", stepName, "round", roundNum, "error", dbErr)
 		} else {
 			currentRoundID = roundInsertID(currentRoundID, inserted, nil)
+		}
+
+		if outcome.ReplayValidation {
+			if !e.configuredTestRequired() {
+				return false, fmt.Errorf("step %s requested configured-Test replay without a configured Test command", stepName)
+			}
+			return false, errHeadValidationReplayRequired
 		}
 
 		// If the step produced a PR URL, propagate it to the run and emit an update.
@@ -890,6 +1316,14 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			goto done
 
 		case types.ActionSkip:
+			if stepName == types.StepTest && e.configuredTestRequired() {
+				err := fmt.Errorf("configured Test was skipped and cannot prove the final head")
+				if dbErr := e.db.FailStep(sr.ID, err.Error(), executionMS); dbErr != nil {
+					slog.Warn("failed to mark skipped configured Test as failed", "error", dbErr)
+				}
+				e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", err.Error(), &executionMS)
+				return false, err
+			}
 			// Skip - mark step skipped and return (not an error)
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, finalExitCode, executionMS, logPath); err != nil {
 				return false, fmt.Errorf("complete step %s (skip): %w", stepName, err)
@@ -944,6 +1378,14 @@ done:
 	if durationOverrideMS > 0 {
 		durationMS = durationOverrideMS
 	}
+	if stepName == types.StepTest && e.configuredTestRequired() && (run.TestHeadSHA == nil || *run.TestHeadSHA != run.HeadSHA) {
+		err := fmt.Errorf("configured Test completed without successful evidence for head %s", run.HeadSHA)
+		if dbErr := e.db.FailStep(sr.ID, err.Error(), durationMS); dbErr != nil {
+			slog.Warn("failed to mark unproven configured Test as failed", "error", dbErr)
+		}
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", err.Error(), &durationMS)
+		return false, err
+	}
 	status := types.StepStatusCompleted
 	if stepSkipped {
 		status = types.StepStatusSkipped
@@ -986,8 +1428,8 @@ func (a *sourceRefAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Re
 		opts.UnsetEnv = append(opts.UnsetEnv, sourceprovenance.EnvironmentVariable)
 		return a.inner.Run(ctx, opts)
 	}
-	if err := sourceprovenance.BindCandidate(ctx, a.workDir, ref, a.run.HeadSHA); err != nil {
-		return nil, fmt.Errorf("bind source ref before agent: %w", err)
+	if err := sourceprovenance.BindCandidateIfUnchanged(ctx, a.workDir, ref, a.run.HeadSHA, a.run.HeadSHA); err != nil {
+		return nil, fmt.Errorf("verify source ref before agent: %w", err)
 	}
 	opts.Env = sourceprovenance.AuthoritativeEnv(opts.Env, ref)
 	return a.inner.Run(ctx, opts)
@@ -1179,7 +1621,7 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 // It accepts an optional context; if the context was cancelled with a cause,
 // the cause message is used as the run's error (more informative than "context canceled").
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
-	if errors.Is(err, ErrParkedRunInterrupted) {
+	if errors.Is(err, ErrParkedRunInterrupted) || errors.Is(err, ErrValidationRunInterrupted) {
 		return err
 	}
 	errMsg := err.Error()

@@ -87,6 +87,33 @@ func TestPRStep_UpdatesExistingPR(t *testing.T) {
 	}
 }
 
+func TestPRStep_RefusesToReplaceStoredPRIdentity(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
+
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	stored := "https://github.com/test/repo/pull/1477"
+	sctx.Run.PRURL = &stored
+	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, stored); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := (&PRStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "does not match stored identity") {
+		t.Fatalf("Execute() error = %v, want stored-identity refusal", err)
+	}
+	logData, readErr := os.ReadFile(logFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(logData), "pr create") || strings.Contains(string(logData), "pr edit") {
+		t.Fatalf("mismatched identity mutated a PR:\n%s", logData)
+	}
+}
+
 func TestPRStep_BitbucketUpdatesExistingPR(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

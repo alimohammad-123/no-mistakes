@@ -89,6 +89,90 @@ func TestSourceRefAgentSuppressesProvenanceOnlyDuringActiveRebase(t *testing.T) 
 	}
 }
 
+func TestSourceRefAgentRefusesSupersedingRefWithoutRewind(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "user.name", "test"}, {"config", "user.email", "test@example.com"}} {
+		gitOutput(t, dir, args...)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "candidate"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "candidate"}, {"commit", "-m", "first"}} {
+		gitOutput(t, dir, args...)
+	}
+	first := gitOutput(t, dir, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(dir, "candidate"), []byte("superseding\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "candidate"}, {"commit", "-m", "superseding"}, {"branch", "fm/feature"}, {"checkout", "--detach", first}} {
+		gitOutput(t, dir, args...)
+	}
+	superseding := gitOutput(t, dir, "rev-parse", "fm/feature")
+	ref := "refs/heads/fm/feature"
+	inner := &sourceRefCaptureAgent{}
+	wrapped := &sourceRefAgent{inner: inner, run: &db.Run{Branch: "fm/feature", HeadSHA: first, SourceRef: &ref}, workDir: dir}
+
+	if _, err := wrapped.Run(context.Background(), agent.RunOpts{}); err == nil {
+		t.Fatal("stale agent launch rewound a superseding source ref")
+	}
+	if got := gitOutput(t, dir, "rev-parse", ref); got != superseding {
+		t.Fatalf("source ref = %s, want superseding candidate %s", got, superseding)
+	}
+	if inner.calls != 0 {
+		t.Fatalf("stale agent launched inner agent %d times", inner.calls)
+	}
+}
+
+func TestAdvanceHeadSHARefusesSupersedingRefWithoutRewind(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "user.name", "test"}, {"config", "user.email", "test@example.com"}} {
+		gitOutput(t, dir, args...)
+	}
+	writeCandidate := func(content, message string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "candidate"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitOutput(t, dir, "add", "candidate")
+		gitOutput(t, dir, "commit", "-m", message)
+		return gitOutput(t, dir, "rev-parse", "HEAD")
+	}
+	first := writeCandidate("first\n", "first")
+	candidate := writeCandidate("candidate\n", "candidate")
+	superseding := writeCandidate("superseding\n", "superseding")
+	gitOutput(t, dir, "branch", "fm/feature")
+	gitOutput(t, dir, "checkout", "--detach", candidate)
+
+	database, err := db.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepo(dir, "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "fm/feature", first, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx := &StepContext{Ctx: context.Background(), Run: run, Repo: repo, WorkDir: dir, DB: database}
+
+	if err := sctx.AdvanceHeadSHA(candidate); err == nil {
+		t.Fatal("stale candidate advanced across a superseding source ref")
+	}
+	if got := gitOutput(t, dir, "rev-parse", "refs/heads/fm/feature"); got != superseding {
+		t.Fatalf("source ref = %s, want superseding candidate %s", got, superseding)
+	}
+	persisted, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.HeadSHA != first {
+		t.Fatalf("durable run head = %s, want unchanged %s", persisted.HeadSHA, first)
+	}
+}
+
 func gitOutput(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
@@ -122,7 +206,7 @@ func TestSourceRefAgentOverridesSpoofAndPreservesCapabilities(t *testing.T) {
 	if err := os.WriteFile(dir+"/candidate", []byte("advanced candidate\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"add", "candidate"}, {"commit", "-m", "advanced candidate"}, {"checkout", "--detach"}, {"update-ref", "refs/heads/fm/feature", "HEAD^"}} {
+	for _, args := range [][]string{{"add", "candidate"}, {"commit", "-m", "advanced candidate"}, {"checkout", "--detach"}, {"update-ref", "refs/heads/fm/feature", "HEAD"}} {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {

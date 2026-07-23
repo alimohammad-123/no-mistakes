@@ -38,13 +38,24 @@ type Run struct {
 	PRState                   *string
 	PRStateObservedAt         *int64
 	CIReadyAt                 *int64
-	LastPushedSHA             *string
-	PushTargetKind            *string
-	PushTargetFingerprint     *string
-	PushRef                   *string
-	LastPushedAt              *int64
-	PushGeneration            *int64
-	PushActive                bool
+	// TestHeadSHA is the exact candidate on which this run's configured Test
+	// command most recently succeeded. Nil is unknown, including every
+	// pre-upgrade historical row; it is never inferred from mutable HeadSHA.
+	TestHeadSHA *string
+	// ValidationTargetSHA is the stale candidate currently being replayed. A
+	// restart of the same target is idempotent and does not consume another
+	// convergence attempt; only a newly changed target advances the counter.
+	ValidationTargetSHA *string
+	// ValidationReplayCount persists the bounded final-head convergence budget
+	// so a crash or daemon upgrade cannot reset an otherwise non-converging run.
+	ValidationReplayCount int
+	LastPushedSHA         *string
+	PushTargetKind        *string
+	PushTargetFingerprint *string
+	PushRef               *string
+	LastPushedAt          *int64
+	PushGeneration        *int64
+	PushActive            bool
 	// CustodyReturnedAt is non-nil once a guarded branch-sync recovery
 	// explicitly ended this run's ownership of an unpublished pipeline head
 	// (terminal run whose head was never successfully pushed, or moved after
@@ -71,7 +82,7 @@ type Run struct {
 	UpdatedAt       int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(base_branch, ''), source_ref, bootstrap_test_repository, bootstrap_test_base_branch, bootstrap_test_command, bootstrap_test_policy_sha256, submitted_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(base_branch, ''), source_ref, bootstrap_test_repository, bootstrap_test_base_branch, bootstrap_test_command, bootstrap_test_policy_sha256, submitted_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, test_head_sha, validation_target_sha, COALESCE(validation_replay_count, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -80,7 +91,7 @@ func scanRun(row interface {
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.BaseBranch, &r.SourceRef,
 		&r.BootstrapTestRepository, &r.BootstrapTestBaseBranch, &r.BootstrapTestCommand, &r.BootstrapTestPolicySHA256,
 		&r.SubmittedHeadSHA, &r.Status,
-		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt,
+		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt, &r.TestHeadSHA, &r.ValidationTargetSHA, &r.ValidationReplayCount,
 		&r.LastPushedSHA, &r.PushTargetKind, &r.PushTargetFingerprint, &r.PushRef,
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive,
 		&r.CustodyReturnedAt, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
@@ -501,6 +512,171 @@ func (d *DB) SetRunCIReady(id string, ready bool) error {
 	_, err := d.sql.Exec(`UPDATE runs SET ci_ready_at = ?, updated_at = ? WHERE id = ? AND ((ci_ready_at IS NULL AND ? = 1) OR (ci_ready_at IS NOT NULL AND ? = 0))`, readyAt, now(), id, ready, ready)
 	if err != nil {
 		return fmt.Errorf("set run CI ready: %w", err)
+	}
+	return nil
+}
+
+// BeginConfiguredTestAttempt invalidates any prior proof before each configured
+// Test execution. This prevents a failed or approved-failing retry at the same
+// SHA from reusing an older success.
+func (d *DB) BeginConfiguredTestAttempt(id, headSHA string) error {
+	if strings.TrimSpace(headSHA) == "" {
+		return fmt.Errorf("begin configured Test attempt: head SHA is empty")
+	}
+	result, err := d.sql.Exec(
+		`UPDATE runs SET test_head_sha = NULL, updated_at = ?
+		 WHERE id = ? AND status = ? AND head_sha = ? AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = 0`,
+		now(), id, types.RunRunning, headSHA,
+	)
+	if err != nil {
+		return fmt.Errorf("begin configured Test attempt: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("begin configured Test attempt: %w", err)
+	}
+	if count != 1 {
+		return fmt.Errorf("begin configured Test attempt: run is missing, stale, terminal, publishing, or outside pipeline custody")
+	}
+	return nil
+}
+
+// RecordSuccessfulTestHead records positive configured-Test evidence for the
+// exact active candidate. It refuses stale, terminal, custody-returned, or
+// push-active rows rather than inferring proof from mutable run state.
+func (d *DB) RecordSuccessfulTestHead(id, headSHA string) error {
+	if strings.TrimSpace(headSHA) == "" {
+		return fmt.Errorf("record successful Test head: head SHA is empty")
+	}
+	result, err := d.sql.Exec(
+		`UPDATE runs SET test_head_sha = ?, updated_at = ?
+		 WHERE id = ? AND status = ? AND head_sha = ? AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = 0`,
+		headSHA, now(), id, types.RunRunning, headSHA,
+	)
+	if err != nil {
+		return fmt.Errorf("record successful Test head: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("record successful Test head: %w", err)
+	}
+	if count != 1 {
+		return fmt.Errorf("record successful Test head: run is missing, stale, terminal, publishing, or outside pipeline custody")
+	}
+	return nil
+}
+
+// ScheduleHeadValidationReplay atomically consumes one persisted convergence
+// attempt, clears stale CI readiness, and resets the existing Test-through-CI
+// step rows for same-run replay. Round history and run/PR/push identity remain
+// intact. Terminal history and custody-returned branches are never rewritten.
+func (d *DB) ScheduleHeadValidationReplay(id string, maxReplays int) (int, error) {
+	if maxReplays <= 0 {
+		return 0, fmt.Errorf("schedule head validation replay: replay bound must be positive")
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("schedule head validation replay: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var status types.RunStatus
+	var headSHA string
+	var targetSHA *string
+	var replayCount int
+	var custodyReturnedAt *int64
+	var pushActive bool
+	if err := tx.QueryRow(
+		`SELECT status, head_sha, validation_target_sha, COALESCE(validation_replay_count, 0), custody_returned_at, COALESCE(push_active, 0) FROM runs WHERE id = ?`, id,
+	).Scan(&status, &headSHA, &targetSHA, &replayCount, &custodyReturnedAt, &pushActive); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, fmt.Errorf("schedule head validation replay: run is missing")
+		}
+		return 0, fmt.Errorf("schedule head validation replay: read run: %w", err)
+	}
+	if status != types.RunRunning || custodyReturnedAt != nil || pushActive {
+		return replayCount, fmt.Errorf("schedule head validation replay: run is not an active pipeline-owned candidate")
+	}
+	next := replayCount
+	if targetSHA == nil || *targetSHA != headSHA {
+		if replayCount >= maxReplays {
+			return replayCount, fmt.Errorf("final-head validation did not converge after %d replay attempts", replayCount)
+		}
+		next++
+	}
+	result, err := tx.Exec(
+		`UPDATE runs SET validation_target_sha = ?, validation_replay_count = ?, ci_ready_at = NULL, awaiting_agent_since = NULL, updated_at = ?
+		 WHERE id = ? AND status = ? AND COALESCE(validation_replay_count, 0) = ? AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = 0`,
+		headSHA, next, now(), id, types.RunRunning, replayCount,
+	)
+	if err != nil {
+		return replayCount, fmt.Errorf("schedule head validation replay: update run: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		if err != nil {
+			return replayCount, fmt.Errorf("schedule head validation replay: update run: %w", err)
+		}
+		return replayCount, fmt.Errorf("schedule head validation replay: run changed concurrently")
+	}
+	if _, err := tx.Exec(
+		`UPDATE step_results
+		 SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL, findings_json = NULL, error = NULL,
+		     started_at = NULL, completed_at = NULL, last_activity_at = NULL, last_activity = NULL, agent_pid = NULL, auto_fix_limit = NULL
+		 WHERE run_id = ? AND step_order >= ?`,
+		types.StepStatusPending, id, types.StepTest.Order(),
+	); err != nil {
+		return replayCount, fmt.Errorf("schedule head validation replay: reset steps: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return replayCount, fmt.Errorf("schedule head validation replay: commit: %w", err)
+	}
+	return next, nil
+}
+
+// CompleteHeadValidation clears an in-progress validation target only when the
+// exact active candidate and its configured-Test proof still agree. A stale or
+// concurrently changed run fails closed and keeps the target for recovery.
+func (d *DB) CompleteHeadValidation(id, headSHA string) error {
+	result, err := d.sql.Exec(
+		`UPDATE runs SET validation_target_sha = NULL, updated_at = ?
+		 WHERE id = ? AND status = ? AND head_sha = ? AND test_head_sha = ?
+		   AND (validation_target_sha IS NULL OR validation_target_sha = ?)
+		   AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = 0`,
+		now(), id, types.RunRunning, headSHA, headSHA, headSHA,
+	)
+	if err != nil {
+		return fmt.Errorf("complete head validation: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("complete head validation: %w", err)
+	}
+	if count != 1 {
+		return fmt.Errorf("complete head validation: candidate proof is missing, stale, or outside pipeline custody")
+	}
+	return nil
+}
+
+// ResetActiveStepForRecovery changes one interrupted active step back to
+// pending without altering its round history. It is used only after daemon
+// recovery has independently validated the run/worktree/topology.
+func (d *DB) ResetActiveStepForRecovery(runID string, stepName types.StepName) error {
+	result, err := d.sql.Exec(
+		`UPDATE step_results
+		 SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL, findings_json = NULL, error = NULL,
+		     started_at = NULL, completed_at = NULL, last_activity_at = NULL, last_activity = NULL, agent_pid = NULL, auto_fix_limit = NULL
+		 WHERE run_id = ? AND step_name = ? AND status = ?`,
+		types.StepStatusPending, runID, stepName, types.StepStatusRunning,
+	)
+	if err != nil {
+		return fmt.Errorf("reset active step for recovery: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("reset active step for recovery: %w", err)
+	}
+	if count != 1 {
+		return fmt.Errorf("reset active step for recovery: active step changed or is missing")
 	}
 	return nil
 }

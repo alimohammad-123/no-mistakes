@@ -9,6 +9,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -123,6 +124,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if configuredTestProofStale(sctx) {
+		sctx.Log("CI monitoring withheld until configured Test proves the exact candidate")
+		return &pipeline.StepOutcome{ReplayValidation: true}, nil
+	}
+	if err := validateCIMonitorCandidate(sctx); err != nil {
+		return nil, err
+	}
 	provider := scm.DetectProviderContext(ctx, sctx.Repo.UpstreamURL)
 	if provider == scm.ProviderUnknown && sctx.Run.PRURL != nil {
 		provider = scm.DetectProviderContext(ctx, *sctx.Run.PRURL)
@@ -209,6 +217,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 
 	for {
 		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if configuredTestProofStale(sctx) {
+			clearCIMonitorReady(sctx)
+			return &pipeline.StepOutcome{ReplayValidation: true}, nil
+		}
+		if err := validateCIMonitorCandidate(sctx); err != nil {
+			clearCIMonitorReady(sctx)
 			return nil, err
 		}
 
@@ -343,10 +359,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					manualFixAttempted = true
 					sctx.Log(fmt.Sprintf("issues detected: %s - manual fix requested...", issueDesc))
 					previousHeadSHA := sctx.Run.HeadSHA
-					pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict)
+					changed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict)
 					if err != nil {
 						sctx.Log(fmt.Sprintf("warning: CI manual fix failed: %v", err))
-					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
+					} else if changed || sctx.Run.HeadSHA != previousHeadSHA {
+						if sctx.Config.Commands.Test != "" {
+							return &pipeline.StepOutcome{ReplayValidation: true}, nil
+						}
 						s.lastFixedChecks = fixKey
 						s.lastFixedCompletedAt = fixCompletedAt
 					} else {
@@ -367,10 +386,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					s.ciFixAttempts++
 					sctx.Log(fmt.Sprintf("issues detected: %s - auto-fixing (attempt %d/%d)...", issueDesc, s.ciFixAttempts, ciFixLimit))
 					previousHeadSHA := sctx.Run.HeadSHA
-					pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict)
+					changed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict)
 					if err != nil {
 						sctx.Log(fmt.Sprintf("warning: CI auto-fix failed: %v", err))
-					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
+					} else if changed || sctx.Run.HeadSHA != previousHeadSHA {
+						if sctx.Config.Commands.Test != "" {
+							return &pipeline.StepOutcome{ReplayValidation: true}, nil
+						}
 						s.lastFixedChecks = fixKey
 						s.lastFixedCompletedAt = fixCompletedAt
 					} else {
@@ -432,11 +454,45 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 }
 
+func configuredTestProofStale(sctx *pipeline.StepContext) bool {
+	return sctx != nil && sctx.Config != nil && sctx.Config.Commands.Test != "" &&
+		(sctx.Run == nil || sctx.Run.TestHeadSHA == nil || *sctx.Run.TestHeadSHA != sctx.Run.HeadSHA)
+}
+
+// validateCIMonitorCandidate permits only the legacy no-configured-Test retry
+// shape in which a prior CI push advanced the worktree/ref but its run-head
+// write did not persist. pushUpdatedHeadSHA reconciles that state idempotently.
+// Configured-Test runs and stable candidates always require the exact binding.
+func validateCIMonitorCandidate(sctx *pipeline.StepContext) error {
+	liveHead, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+	if err != nil {
+		return fmt.Errorf("resolve CI candidate head: %w", err)
+	}
+	if sctx.Run != nil && liveHead != sctx.Run.HeadSHA && (sctx.Config == nil || sctx.Config.Commands.Test == "") {
+		return nil
+	}
+	return sctx.ValidateDeliveryCandidate()
+}
+
 func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) string {
 	if message != previous {
 		ready := message == ciChecksPassedMsg || message == ciNoChecksPassedMsg
+		if ready {
+			if err := sctx.ValidateDeliveryCandidate(); err != nil {
+				clearCIMonitorReady(sctx)
+				sctx.Log(fmt.Sprintf("CI readiness withheld: %v", err))
+				return ""
+			}
+		}
 		if err := sctx.DB.SetRunCIReady(sctx.Run.ID, ready); err != nil {
 			sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
+		}
+		if ready {
+			if err := sctx.ValidateDeliveryCandidate(); err != nil {
+				clearCIMonitorReady(sctx)
+				sctx.Log(fmt.Sprintf("CI readiness withdrawn: %v", err))
+				return ""
+			}
 		}
 		sctx.Log(message)
 	}

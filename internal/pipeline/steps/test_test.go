@@ -36,6 +36,9 @@ func TestTestStep_ConfiguredCommandSeesAuthoritativeSourceRef(t *testing.T) {
 	if outcome.NeedsApproval {
 		t.Fatalf("configured command failed: %s", outcome.Findings)
 	}
+	if outcome.TestedHeadSHA != headSHA {
+		t.Fatalf("configured Test proof = %q, want %q", outcome.TestedHeadSHA, headSHA)
+	}
 	data, err := os.ReadFile(observed)
 	if err != nil {
 		t.Fatal(err)
@@ -75,6 +78,7 @@ func TestTestStep_RefusesCandidateMismatchBeforeConfiguredCommand(t *testing.T) 
 	marker := filepath.Join(dir, "must-not-run")
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "echo ran > must-not-run"})
 	sctx.Run.HeadSHA = baseSHA
+	gitCmd(t, dir, "update-ref", "refs/heads/feature", baseSHA)
 	_, err := (&TestStep{}).Execute(sctx)
 	if err == nil || !strings.Contains(err.Error(), "pipeline candidate mismatch") {
 		t.Fatalf("error = %v", err)
@@ -119,6 +123,7 @@ func TestTestStep_ResumeRunsExactCommandWithCurrentPipelineCandidate(t *testing.
 	if err := database.UpdateRunHeadSHA(run.ID, candidate); err != nil {
 		t.Fatal(err)
 	}
+	gitCmd(t, dir, "update-ref", "refs/heads/fm/arena/source-ref", candidate)
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}

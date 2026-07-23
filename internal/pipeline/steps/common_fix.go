@@ -146,16 +146,8 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return err
 	}
-	ref := normalizedBranchRef(sctx.Run.Branch)
-	if _, err := git.Run(ctx, sctx.WorkDir, "update-ref", ref, headSHA); err != nil {
-		return fmt.Errorf("update local branch ref: %w", err)
-	}
-	sctx.Run.HeadSHA = headSHA
-	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
-		return err
-	}
-	if _, err := sctx.BindSourceRef(); err != nil {
-		return fmt.Errorf("bind source ref after %s fix: %w", stepName, err)
+	if err := sctx.AdvanceHeadSHA(headSHA); err != nil {
+		return fmt.Errorf("advance source ref after %s fix: %w", stepName, err)
 	}
 	sctx.Log(fmt.Sprintf("committed agent fixes: %s", commitMessage))
 	return nil

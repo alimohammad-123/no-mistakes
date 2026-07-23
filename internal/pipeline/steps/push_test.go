@@ -69,6 +69,99 @@ func TestPushStep_ReconcilesStaleDatabaseHeadSHA(t *testing.T) {
 	}
 }
 
+func TestPushStep_FormattingCommitYieldsBeforePublishingStaleTestHead(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "init.txt"), []byte("init"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "initial")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "feature")
+	testedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, testedHead, config.Commands{
+		Test:   "true",
+		Format: "printf formatted > formatted.txt",
+	})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "feature"
+	sctx.Run.TestHeadSHA = &testedHead
+
+	outcome, err := (&PushStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.ReplayValidation {
+		t.Fatal("Push did not yield for configured-Test replay after formatting commit")
+	}
+	if sctx.Run.HeadSHA == testedHead {
+		t.Fatal("formatting did not advance the local pipeline candidate")
+	}
+	if remote := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); remote != testedHead {
+		t.Fatalf("stale-Test candidate was published: remote %s, want %s", remote, testedHead)
+	}
+	dbRun, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dbRun.HeadSHA != sctx.Run.HeadSHA || dbRun.LastPushedSHA != nil {
+		t.Fatalf("local candidate/push provenance = %#v", dbRun)
+	}
+}
+
+func TestPushStep_RefusesSupersededSourceRefAtUnchangedTestedHead(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, testedHead := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+	gitCmd(t, dir, "checkout", "--detach", testedHead)
+	if err := os.WriteFile(filepath.Join(dir, "superseding.txt"), []byte("new push\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "superseding.txt")
+	gitCmd(t, dir, "commit", "-m", "superseding push")
+	supersedingHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "--detach", testedHead)
+	gitCmd(t, dir, "update-ref", "refs/heads/feature", supersedingHead)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, testedHead, config.Commands{Test: "true"})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.TestHeadSHA = &testedHead
+
+	_, err := (&PushStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "source ref") {
+		t.Fatalf("Execute() error = %v, want superseding source-ref refusal", err)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); got != supersedingHead {
+		t.Fatalf("gate source ref = %s, want superseding head %s", got, supersedingHead)
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != testedHead {
+		t.Fatalf("upstream head = %s, want unchanged tested head %s", got, testedHead)
+	}
+}
+
 func TestPushStep_ForceAddsInRepoEvidenceArtifacts(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()

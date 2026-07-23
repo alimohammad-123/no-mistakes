@@ -84,6 +84,21 @@ Previous test findings to address:
 
 	testCmd := sctx.Config.Commands.Test
 	tested := []string{}
+	configuredTestHead := ""
+	withConfiguredTestProof := func(outcome *pipeline.StepOutcome) (*pipeline.StepOutcome, error) {
+		if configuredTestHead == "" {
+			return outcome, nil
+		}
+		liveHead, err := git.HeadSHA(ctx, sctx.WorkDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve head after configured Test: %w", err)
+		}
+		if liveHead != configuredTestHead || sctx.Run.HeadSHA != configuredTestHead {
+			return nil, fmt.Errorf("configured Test succeeded at %s but candidate changed to live %s / recorded %s before proof could be recorded", configuredTestHead, liveHead, sctx.Run.HeadSHA)
+		}
+		outcome.TestedHeadSHA = configuredTestHead
+		return outcome, nil
+	}
 	if testCmd != "" {
 		sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
 		output, exitCode, err := runStepShellCommand(sctx, testCmd)
@@ -112,6 +127,14 @@ Previous test findings to address:
 				FixSummary:    fixSummary,
 			}, nil
 		}
+		liveHead, err := git.HeadSHA(ctx, sctx.WorkDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve head after configured Test command: %w", err)
+		}
+		if liveHead != sctx.Run.HeadSHA {
+			return nil, fmt.Errorf("configured Test command changed HEAD from recorded candidate %s to %s", sctx.Run.HeadSHA, liveHead)
+		}
+		configuredTestHead = liveHead
 	}
 
 	useEvidenceAgent := testCmd == "" || cleanedUserIntent(sctx) != ""
@@ -225,12 +248,12 @@ Rules:
 		}
 
 		findingsJSON, _ := json.Marshal(findings)
-		return &pipeline.StepOutcome{
+		return withConfiguredTestProof(&pipeline.StepOutcome{
 			NeedsApproval: needsApproval,
 			AutoFixable:   autoFixable,
 			Findings:      string(findingsJSON),
 			FixSummary:    fixSummary,
-		}, nil
+		})
 	}
 
 	// In fix mode the agent may add new test files while making tests pass.
@@ -250,14 +273,14 @@ Rules:
 			})
 		}
 		findingsJSON, _ := json.Marshal(findings)
-		return &pipeline.StepOutcome{
+		return withConfiguredTestProof(&pipeline.StepOutcome{
 			NeedsApproval: false,
 			Findings:      string(findingsJSON),
 			FixSummary:    fixSummary,
-		}, nil
+		})
 	}
 
 	sctx.Log("all tests passed")
 	findingsJSON, _ := json.Marshal(Findings{Tested: tested})
-	return &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary}, nil
+	return withConfiguredTestProof(&pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary})
 }

@@ -21,7 +21,6 @@ func (s *PushStep) Name() types.StepName { return types.StepPush }
 
 func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
-	newHeadSHA := ""
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 		return nil, err
 	}
@@ -52,11 +51,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		if err != nil {
 			return nil, fmt.Errorf("commit agent changes: %w", err)
 		}
-		headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
-		if err != nil {
+		if _, err := git.HeadSHA(ctx, sctx.WorkDir); err != nil {
 			return nil, fmt.Errorf("resolve head after commit: %w", err)
 		}
-		newHeadSHA = headSHA
 	}
 
 	ref := normalizedBranchRef(sctx.Run.Branch)
@@ -76,6 +73,21 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
+	if headBeingPushed != sctx.Run.HeadSHA {
+		// Push owns final local formatting/evidence commits. Advance the durable
+		// candidate and source ref before any network operation, then yield to the
+		// executor when that new head lacks configured-Test proof.
+		if err := sctx.AdvanceHeadSHA(headBeingPushed); err != nil {
+			return nil, fmt.Errorf("advance source ref after finalizing push candidate: %w", err)
+		}
+	}
+	if sctx.Config.Commands.Test != "" && (sctx.Run.TestHeadSHA == nil || *sctx.Run.TestHeadSHA != headBeingPushed) {
+		sctx.Log("final push candidate changed after configured Test; replaying validation before publication")
+		return &pipeline.StepOutcome{ReplayValidation: true}, nil
+	}
+	if err := sctx.ValidateDeliveryCandidate(); err != nil {
+		return nil, err
+	}
 
 	// Decide whether force-pushing would discard commits the pipeline never saw.
 	// The lease is anchored to the remote-tracking ref the rebase step freshly
@@ -92,7 +104,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	switch {
 	case decision.newBranch:
 		// New branch: regular push (no force needed).
-		if err := git.Push(ctx, sctx.WorkDir, pushURL, ref, "", false); err != nil {
+		if err := git.PushSHA(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, "", false); err != nil {
 			return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
 	case decision.upToDate:
@@ -100,7 +112,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		// successful binding even though no objects needed to move.
 	default:
 		// Existing branch: force-with-lease anchored to the verified remote head.
-		if err := git.Push(ctx, sctx.WorkDir, pushURL, ref, decision.remoteSHA, true); err != nil {
+		if err := git.PushSHA(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, decision.remoteSHA, true); err != nil {
 			return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
 	}
@@ -120,20 +132,13 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 
-	if newHeadSHA != "" {
-		if _, err := git.Run(ctx, sctx.WorkDir, "update-ref", ref, newHeadSHA); err != nil {
-			return nil, fmt.Errorf("update local branch ref: %w", err)
-		}
-	}
-
 	headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve HEAD after push: %w", err)
 	}
 	if headSHA != sctx.Run.HeadSHA {
-		sctx.Run.HeadSHA = headSHA
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
-			return nil, err
+		if err := sctx.AdvanceHeadSHA(headSHA); err != nil {
+			return nil, fmt.Errorf("advance source ref after push: %w", err)
 		}
 	}
 

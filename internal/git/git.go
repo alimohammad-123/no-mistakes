@@ -443,8 +443,20 @@ func Push(ctx context.Context, dir, remote, ref, expectedSHA string, forceWithLe
 	return PushWithOptions(ctx, dir, remote, ref, expectedSHA, forceWithLease, nil)
 }
 
-// PushWithOptions pushes a ref to a remote with per-push options.
+// PushWithOptions pushes HEAD to a remote with per-push options.
 func PushWithOptions(ctx context.Context, dir, remote, ref, expectedSHA string, forceWithLease bool, pushOptions []string) error {
+	return PushSHAWithOptions(ctx, dir, remote, "HEAD", ref, expectedSHA, forceWithLease, pushOptions)
+}
+
+// PushSHA pushes one exact source object to a remote ref. Callers with
+// validation provenance use this instead of mutable HEAD so the object proven
+// immediately before publication is the object Git sends.
+func PushSHA(ctx context.Context, dir, remote, sourceSHA, ref, expectedSHA string, forceWithLease bool) error {
+	return PushSHAWithOptions(ctx, dir, remote, sourceSHA, ref, expectedSHA, forceWithLease, nil)
+}
+
+// PushSHAWithOptions is PushSHA with per-push options.
+func PushSHAWithOptions(ctx context.Context, dir, remote, sourceSHA, ref, expectedSHA string, forceWithLease bool, pushOptions []string) error {
 	args := []string{"push"}
 	for _, option := range pushOptions {
 		args = append(args, "-o", option)
@@ -457,7 +469,7 @@ func PushWithOptions(ctx context.Context, dir, remote, ref, expectedSHA string, 
 			args = append(args, "--force-with-lease")
 		}
 	}
-	args = append(args, "HEAD:"+ref)
+	args = append(args, sourceSHA+":"+ref)
 	_, err := Run(ctx, dir, args...)
 	return err
 }

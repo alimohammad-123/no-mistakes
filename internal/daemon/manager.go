@@ -85,6 +85,7 @@ type recoveredRunPlan struct {
 	agent          agent.Agent
 	steps          []pipeline.Step
 	reconstruction *interruptedWorktreeReconstruction
+	headValidation bool
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) ([]recoveredRunPlan, map[string]struct{}) {
@@ -107,7 +108,13 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) ([]recoveredRunP
 			}
 			continue
 		}
-		plan, err := m.prepareRecoveredRun(ctx, run)
+		var plan *recoveredRunPlan
+		var err error
+		if run.AwaitingAgentSince != nil {
+			plan, err = m.prepareRecoveredRun(ctx, run)
+		} else {
+			plan, err = m.prepareRecoveredHeadValidationRun(ctx, run)
+		}
 		if err != nil {
 			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", err)
 			if m.mustPreserveInterruptedJournalArtifact(run) {
@@ -194,6 +201,77 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		agent:          ag,
 		steps:          execSteps,
 		reconstruction: reconstruction,
+	}, nil
+}
+
+func (m *RunManager) prepareRecoveredHeadValidationRun(ctx context.Context, run *db.Run) (*recoveredRunPlan, error) {
+	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince != nil || run.Branch == "" {
+		return nil, fmt.Errorf("run is not an active head-validation run")
+	}
+	sourceRef, err := m.db.EnsureActiveRunSourceRef(run)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := m.db.GetRepo(run.RepoID)
+	if err != nil {
+		return nil, fmt.Errorf("get repo: %w", err)
+	}
+	if repo == nil {
+		return nil, fmt.Errorf("run repository is missing")
+	}
+	workDir := m.paths.WorktreeDir(repo.ID, run.ID)
+	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("worktree is missing")
+	}
+	headSHA, err := git.HeadSHA(ctx, workDir)
+	if err != nil || headSHA != run.HeadSHA {
+		return nil, fmt.Errorf("worktree head does not match run head")
+	}
+	status, err := git.Run(ctx, workDir, "status", "--porcelain")
+	if err != nil || strings.TrimSpace(status) != "" {
+		return nil, fmt.Errorf("worktree is not clean for head-validation recovery")
+	}
+	gateDir := m.paths.RepoDir(repo.ID)
+	commonDir, err := git.Run(ctx, workDir, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return nil, fmt.Errorf("resolve worktree common git dir: %w", err)
+	}
+	if !samePath(resolveGitPath(workDir, commonDir), gateDir) {
+		return nil, fmt.Errorf("worktree does not belong to its gate repository")
+	}
+	if err := sourceprovenance.VerifyCandidateBinding(ctx, workDir, sourceRef, run.HeadSHA); err != nil {
+		return nil, fmt.Errorf("worktree source ref does not match run head: %w", err)
+	}
+	execSteps := m.steps()
+	if err := pipeline.ValidateHeadValidationRecovery(m.db, run, execSteps); err != nil {
+		return nil, err
+	}
+	cfg, err := m.loadRecoveredConfig(ctx, run, repo, workDir)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Commands.Test == "" {
+		return nil, fmt.Errorf("head-validation recovery requires a trusted configured Test command")
+	}
+	ag, err := newPipelineAgent(ctx, cfg, exec.LookPath)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.SessionReuse {
+		if err := validateRecoveredSessionProviders(m.db, run.ID, ag); err != nil {
+			_ = ag.Close()
+			return nil, err
+		}
+	}
+	return &recoveredRunPlan{
+		run:            run,
+		repo:           repo,
+		workDir:        workDir,
+		gateDir:        gateDir,
+		cfg:            cfg,
+		agent:          ag,
+		steps:          execSteps,
+		headValidation: true,
 	}, nil
 }
 
@@ -410,21 +488,27 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			m.mu.Unlock()
 		}()
 
-		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
-			if errors.Is(err, pipeline.ErrParkedRunInterrupted) {
+		var executeErr error
+		if plan.headValidation {
+			executeErr = executor.ResumeHeadValidation(runCtx, plan.run, plan.repo, plan.workDir)
+		} else {
+			executeErr = executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
+		}
+		if executeErr != nil {
+			if errors.Is(executeErr, pipeline.ErrParkedRunInterrupted) || errors.Is(executeErr, pipeline.ErrValidationRunInterrupted) {
 				preserveWorktree = true
-				slog.Info("preserved parked run during daemon shutdown", "run_id", plan.run.ID)
+				slog.Info("preserved recoverable run during daemon shutdown", "run_id", plan.run.ID)
 				return
 			}
 			if plan.run.Status == types.RunRunning {
-				errMsg := err.Error()
+				errMsg := executeErr.Error()
 				plan.run.Status = types.RunFailed
 				plan.run.Error = &errMsg
 				if dbErr := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, types.RunFailed); dbErr != nil {
 					slog.Error("failed to mark recovered run failed", "run_id", plan.run.ID, "error", dbErr)
 				}
 			}
-			slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", err)
+			slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", executeErr)
 		}
 		fields := telemetry.Fields{
 			"action":      "finished",
@@ -1009,9 +1093,9 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		}()
 
 		if err := executor.Execute(runCtx, run, repo, wtDir); err != nil {
-			if errors.Is(err, pipeline.ErrParkedRunInterrupted) {
+			if errors.Is(err, pipeline.ErrParkedRunInterrupted) || errors.Is(err, pipeline.ErrValidationRunInterrupted) {
 				preserveWorktree = true
-				slog.Info("preserved parked run during daemon shutdown", "run_id", run.ID)
+				slog.Info("preserved recoverable run during daemon shutdown", "run_id", run.ID)
 				return
 			}
 			fields := telemetry.Fields{

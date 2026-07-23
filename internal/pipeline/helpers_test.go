@@ -251,6 +251,11 @@ func initExecutorGitRepo(t *testing.T, database *db.DB, run *db.Run) string {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
 	headSHA := execGitOutput(t, dir, "rev-parse", "HEAD")
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	execGit(t, dir, "update-ref", ref, headSHA)
 	execGit(t, dir, "checkout", "--detach", headSHA)
 	run.HeadSHA = headSHA
 	if err := database.UpdateRunHeadSHA(run.ID, headSHA); err != nil {

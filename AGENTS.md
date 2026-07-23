@@ -28,6 +28,10 @@ Safest local verification sequence after non-trivial changes:
 - Init precedence is explicit `--base-branch`/`--clear-base-branch`, freshly pinned config from the current trust root, the stored override, then detected parent default. Validation uses the parent `origin`, follows one delegation at most, and updates registration only after the exact branch and any config are readable. Feature config cannot retarget trust; both actual default and pipeline base are protected run sources.
 - Regressions: `internal/gate/base_branch_test.go`, `internal/db/base_branch_test.go`, `internal/daemon/base_branch_test.go`, `internal/daemon/manager_trust_test.go`, pipeline PR/rebase/CI tests, and e2e `TestForkRouting`.
 
+**Final-Head Configured Test Proof**
+
+- For runs with `commands.test`, `runs.test_head_sha` must exactly equal the final candidate before Push, PR, CI readiness, or completion after validation begins (Rebase's empty-diff whole-pipeline skip has no delivery candidate). The bounded same-run replay and active legacy-CI recovery are owned by `internal/pipeline/executor.go`; publication steps must finalize locally and yield before pushing a stale head. Public semantics live in `docs/src/content/docs/reference/pipeline-steps.md`.
+
 **Credential Redaction in Stored URLs and Errors (security)**
 
 - `gate.InitWithFork` runs the upstream URL through `safeurl.Redact` before every DB persist (`UpdateRepoMetadata*`, `InsertRepoWithIDAndFork`) and the "gate initialized" log line; the bare gate's `origin` remote still carries the full credentialled URL (via `provisionGate`) so carved worktrees authenticate. Because the DB copy is redacted, push and CI auto-fix push must recover the credential from the worktree's `origin` remote at run time (`resolvePushURL`/`resolveUpstreamURL`), never from `Repo.UpstreamURL`/`Repo.PushURL()`.

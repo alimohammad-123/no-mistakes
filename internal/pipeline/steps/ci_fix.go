@@ -115,7 +115,41 @@ CI logs:
 		return false, fmt.Errorf("agent CI fix: %w", err)
 	}
 
+	if sctx.Config.Commands.Test != "" {
+		return s.commitForValidation(sctx)
+	}
 	return s.commitAndPush(sctx)
+}
+
+// commitForValidation commits a CI repair and durably advances only the local
+// pipeline candidate. The executor then replays Test/Document/Lint before the
+// ordinary Push step updates the existing remote branch and PR.
+func (s *CIStep) commitForValidation(sctx *pipeline.StepContext) (bool, error) {
+	status, err := stepGitRun(sctx, "status", "--porcelain")
+	if err != nil {
+		return false, fmt.Errorf("check CI changes: %w", err)
+	}
+	if strings.TrimSpace(status) != "" {
+		if _, err := stepGitRun(sctx, "add", "-A"); err != nil {
+			return false, fmt.Errorf("stage CI changes: %w", err)
+		}
+		if _, err := stepGitRun(sctx, "commit", "-m", "no-mistakes: apply CI fixes"); err != nil {
+			return false, fmt.Errorf("commit: %w", err)
+		}
+	}
+	headSHA, err := stepGitHeadSHA(sctx)
+	if err != nil {
+		return false, fmt.Errorf("resolve head after CI repair: %w", err)
+	}
+	if headSHA == sctx.Run.HeadSHA {
+		sctx.Log("no changes to commit")
+		return false, nil
+	}
+	if err := sctx.AdvanceHeadSHA(headSHA); err != nil {
+		return false, fmt.Errorf("advance source ref after local CI repair: %w", err)
+	}
+	sctx.Log("committed CI fixes locally; configured Test replay required before push")
+	return true, nil
 }
 
 // commitAndPush commits any uncommitted changes and force-pushes to the
@@ -193,15 +227,8 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		if err := persistBinding(); err != nil {
 			return false, err
 		}
-		if _, err := stepGitRun(sctx, "update-ref", ref, newHeadSHA); err != nil {
-			return false, fmt.Errorf("update local branch ref: %w", err)
-		}
-		sctx.Run.HeadSHA = newHeadSHA
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, newHeadSHA); err != nil {
-			return false, err
-		}
-		if _, err := sctx.BindSourceRef(); err != nil {
-			return false, fmt.Errorf("bind source ref after CI fix: %w", err)
+		if err := sctx.AdvanceHeadSHA(newHeadSHA); err != nil {
+			return false, fmt.Errorf("advance source ref after CI fix: %w", err)
 		}
 		return false, nil
 	}
@@ -212,15 +239,8 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		return false, err
 	}
 
-	if _, err := stepGitRun(sctx, "update-ref", ref, newHeadSHA); err != nil {
-		return false, fmt.Errorf("update local branch ref: %w", err)
-	}
-	sctx.Run.HeadSHA = newHeadSHA
-	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, newHeadSHA); err != nil {
-		return false, err
-	}
-	if _, err := sctx.BindSourceRef(); err != nil {
-		return false, fmt.Errorf("bind source ref after CI fix: %w", err)
+	if err := sctx.AdvanceHeadSHA(newHeadSHA); err != nil {
+		return false, fmt.Errorf("advance source ref after CI fix: %w", err)
 	}
 
 	sctx.Log("committed and pushed fixes")

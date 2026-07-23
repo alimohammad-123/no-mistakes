@@ -493,12 +493,8 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 		return nil, fmt.Errorf("resolve head after rebase: %w", err)
 	}
 	if headSHA != "" && headSHA != sctx.Run.HeadSHA {
-		sctx.Run.HeadSHA = headSHA
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
-			return nil, err
-		}
-		if _, err := sctx.BindSourceRef(); err != nil {
-			return nil, fmt.Errorf("bind source ref after rebase: %w", err)
+		if err := sctx.AdvanceHeadSHA(headSHA); err != nil {
+			return nil, fmt.Errorf("advance source ref after rebase: %w", err)
 		}
 		sctx.Log(fmt.Sprintf("updated head SHA to %s", shortSHA(headSHA)))
 	}

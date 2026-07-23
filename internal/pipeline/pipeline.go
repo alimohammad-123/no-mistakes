@@ -70,8 +70,9 @@ func (sctx *StepContext) BaseBranch() string {
 	return sctx.Run.EffectiveBaseBranch(sctx.Repo)
 }
 
-// BindSourceRef verifies the current detached candidate against the durable run
-// head, then advances only the pipeline-local authoritative source ref.
+// BindSourceRef verifies that the stable detached candidate and canonical
+// source ref both still match the durable run head. The no-op compare-and-swap
+// refuses a superseding receive-side ref move instead of rewinding it.
 func (sctx *StepContext) BindSourceRef() (string, error) {
 	if sctx == nil || sctx.Run == nil {
 		return "", fmt.Errorf("pipeline source-ref context is missing")
@@ -80,10 +81,47 @@ func (sctx *StepContext) BindSourceRef() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := sourceprovenance.BindCandidate(sctx.Ctx, sctx.WorkDir, ref, sctx.Run.HeadSHA); err != nil {
+	if err := sourceprovenance.BindCandidateIfUnchanged(sctx.Ctx, sctx.WorkDir, ref, sctx.Run.HeadSHA, sctx.Run.HeadSHA); err != nil {
 		return "", err
 	}
 	return ref, nil
+}
+
+// AdvanceHeadSHA compare-and-swaps the source ref from the run's prior head to
+// candidateSHA before persisting the new durable candidate. A ref already at
+// candidateSHA is an idempotent database-write retry; any third value is a
+// superseding push and is left untouched.
+func (sctx *StepContext) AdvanceHeadSHA(candidateSHA string) error {
+	if sctx == nil || sctx.Run == nil || sctx.DB == nil {
+		return fmt.Errorf("pipeline source-ref context is missing")
+	}
+	previousSHA := sctx.Run.HeadSHA
+	ref, err := sctx.Run.FrozenSourceRef()
+	if err != nil {
+		return err
+	}
+	if err := sourceprovenance.AdvanceCandidate(sctx.Ctx, sctx.WorkDir, ref, candidateSHA, previousSHA); err != nil {
+		return err
+	}
+	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, candidateSHA); err != nil {
+		return err
+	}
+	sctx.Run.HeadSHA = candidateSHA
+	return nil
+}
+
+// ValidateDeliveryCandidate refuses remote delivery unless the canonical
+// source ref still names this run's exact detached HEAD and, when configured,
+// Test proof names that same candidate.
+func (sctx *StepContext) ValidateDeliveryCandidate() error {
+	if _, err := sctx.BindSourceRef(); err != nil {
+		return fmt.Errorf("verify delivery source ref: %w", err)
+	}
+	if sctx.Config != nil && sctx.Config.Commands.Test != "" &&
+		(sctx.Run.TestHeadSHA == nil || *sctx.Run.TestHeadSHA != sctx.Run.HeadSHA) {
+		return fmt.Errorf("configured Test proof is missing or stale for delivery head %s", sctx.Run.HeadSHA)
+	}
+	return nil
 }
 
 // AuthoritativeEnv removes spoofed source-ref values and appends the frozen
@@ -124,6 +162,16 @@ type StepOutcome struct {
 	// mode so the executor can persist it on the round record and later
 	// rounds can reference what was previously attempted.
 	FixSummary string
+
+	// TestedHeadSHA is positive configured-Test evidence produced by the Test
+	// step for this exact candidate. The executor persists it before any gate
+	// can park; empty means no successful configured command ran this round.
+	TestedHeadSHA string
+	// ReplayValidation asks the executor to restart the bounded Test/Document/
+	// Lint convergence phase. A mutating delivery step uses this only after it
+	// has committed locally and durably advanced the run head, before network
+	// publication.
+	ReplayValidation bool
 
 	// DurationOverrideMS, when positive, replaces the wall-clock duration
 	// reported for this step. Used by demo mode to show realistic durations

@@ -72,6 +72,58 @@ func TestCIStep_CommitAndPush(t *testing.T) {
 	}
 }
 
+func TestCIStep_CommitForValidationDoesNotPublishConfiguredTestStaleHead(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "init.txt"), []byte("init"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "initial")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "feature")
+	testedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "ci-fix.txt"), []byte("fixed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, testedHead, config.Commands{Test: "true"})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "feature"
+	sctx.Run.TestHeadSHA = &testedHead
+	changed, err := (&CIStep{}).commitForValidation(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || sctx.Run.HeadSHA == testedHead {
+		t.Fatalf("CI repair change = %v, head = %s, tested = %s", changed, sctx.Run.HeadSHA, testedHead)
+	}
+	if remote := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); remote != testedHead {
+		t.Fatalf("CI repair published stale-Test head %s; remote should remain %s", remote, testedHead)
+	}
+	dbRun, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dbRun.HeadSHA != sctx.Run.HeadSHA || dbRun.LastPushedSHA != nil {
+		t.Fatalf("CI local candidate/push provenance = %#v", dbRun)
+	}
+}
+
 func TestCIStep_CommitAndPushTargetsForkWhenConfigured(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()
