@@ -46,7 +46,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Fatalf("repos.%s column missing from fresh schema", column)
 		}
 	}
-	for _, column := range []string{"base_branch", "source_ref", "bootstrap_test_repository", "bootstrap_test_base_branch", "bootstrap_test_command", "bootstrap_test_policy_sha256", "submitted_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "pr_state", "pr_state_observed_at", "ci_ready_at", "custody_returned_at"} {
+	for _, column := range []string{"base_branch", "source_ref", "bootstrap_test_repository", "bootstrap_test_base_branch", "bootstrap_test_command", "bootstrap_test_policy_sha256", "submitted_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "pr_state", "pr_state_observed_at", "ci_ready_at", "test_head_sha", "validation_target_sha", "validation_replay_count", "custody_returned_at"} {
 		if !hasColumn(t, d, "runs", column) {
 			t.Fatalf("runs.%s column missing from fresh schema", column)
 		}
@@ -97,6 +97,9 @@ func TestOpenMigratesRunSyncProvenanceWithoutBackfillingMutableHead(t *testing.T
 	}
 	if run == nil || run.HeadSHA != "mutable-head" {
 		t.Fatalf("migrated run = %#v", run)
+	}
+	if run.TestHeadSHA != nil || run.ValidationTargetSHA != nil || run.ValidationReplayCount != 0 {
+		t.Fatalf("migration inferred final-head Test provenance from mutable history: %#v", run)
 	}
 	if run.SubmittedHeadSHA != nil || run.LastPushedSHA != nil || run.PushGeneration != nil || run.PushTargetFingerprint != nil {
 		t.Fatalf("legacy provenance was inferred from mutable head: %#v", run)

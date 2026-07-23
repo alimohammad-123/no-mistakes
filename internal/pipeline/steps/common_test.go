@@ -341,6 +341,7 @@ func TestRunShellCommand(t *testing.T) {
 			t.Errorf("exit code = %d, want 42", code)
 		}
 	})
+
 }
 
 func TestStepCLIAvailable_ResolvesExecutableSuffixFromCustomPath(t *testing.T) {
@@ -709,6 +710,43 @@ func TestExecuteFixMode_RejectsUnsafeSummaryWithoutStaging(t *testing.T) {
 				t.Fatalf("HEAD after summary error = %q, want %q", got, headSHA)
 			}
 		})
+	}
+}
+
+func TestExecuteFixMode_RefusesExhaustedReplayBeforeAgent(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	agentCalls := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			agentCalls++
+			if err := os.WriteFile(filepath.Join(opts.CWD, "agent-change.txt"), []byte("change"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"summary":"change"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "true"})
+	sctx.Fixing = true
+	exhaustHeadValidationCapacity(t, sctx, headSHA)
+
+	if _, err := executeFixMode(sctx, types.StepReview, fixExecutionOptions{
+		ErrorPrefix:     "agent fix review",
+		FallbackSummary: "fix review findings",
+	}); err == nil || !strings.Contains(err.Error(), "did not converge") {
+		t.Fatalf("executeFixMode() error = %v, want replay exhaustion", err)
+	}
+	if agentCalls != 0 {
+		t.Fatalf("agent calls = %d, want 0", agentCalls)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "agent-change.txt")); !os.IsNotExist(err) {
+		t.Fatalf("agent change exists or stat failed: %v", err)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("HEAD after preflight = %q, want %q", got, headSHA)
 	}
 }
 

@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS runs (
     pr_state                TEXT,
     pr_state_observed_at    INTEGER,
     ci_ready_at             INTEGER,
+    test_head_sha           TEXT,
+    validation_target_sha   TEXT,
+    validation_replay_count INTEGER NOT NULL DEFAULT 0,
+    head_advance_generation INTEGER NOT NULL DEFAULT 0,
     last_pushed_sha         TEXT,
     push_target_kind        TEXT,
     push_target_fingerprint TEXT,
@@ -48,6 +52,22 @@ CREATE TABLE IF NOT EXISTS runs (
     parked_ms            INTEGER,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_head_transitions (
+    run_id                 TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    source_ref             TEXT NOT NULL,
+    previous_sha           TEXT NOT NULL,
+    candidate_sha          TEXT NOT NULL,
+    require_validation     INTEGER NOT NULL,
+    phase                  TEXT NOT NULL,
+    expected_push_active   INTEGER NOT NULL,
+    prior_target_sha       TEXT,
+    next_target_sha        TEXT,
+    prior_replay_count     INTEGER NOT NULL,
+    next_replay_count      INTEGER NOT NULL,
+    ownership_generation  INTEGER NOT NULL,
+    created_at             INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS step_results (
@@ -188,6 +208,13 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN pr_state TEXT`,
 	`ALTER TABLE runs ADD COLUMN pr_state_observed_at INTEGER`,
 	`ALTER TABLE runs ADD COLUMN ci_ready_at INTEGER`,
+	// Final-head Test provenance is nullable so historical rows remain
+	// explicitly unknown. The replay counter is persisted to bound convergence
+	// across crashes and daemon upgrades rather than restarting the budget.
+	`ALTER TABLE runs ADD COLUMN test_head_sha TEXT`,
+	`ALTER TABLE runs ADD COLUMN validation_target_sha TEXT`,
+	`ALTER TABLE runs ADD COLUMN validation_replay_count INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE runs ADD COLUMN head_advance_generation INTEGER NOT NULL DEFAULT 0`,
 	// Custody return is nullable: NULL means the pipeline still owns any
 	// unpublished head this run produced; a timestamp means an explicit
 	// guarded recovery ended that ownership (internal/branchsync).

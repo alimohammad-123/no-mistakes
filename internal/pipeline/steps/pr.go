@@ -62,6 +62,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		sctx.Log(fmt.Sprintf("skipping PR creation on protected branch %s", branch))
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
+	if err := sctx.ValidateDeliveryCandidate(); err != nil {
+		return nil, err
+	}
 	provider := scm.DetectProviderContext(ctx, sctx.Repo.UpstreamURL)
 	host, skipReason := buildHost(sctx, provider)
 	if host == nil {
@@ -84,6 +87,18 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	existing, err := host.FindPR(ctx, branch, baseBranch)
 	if err != nil {
 		return nil, err
+	}
+	expectedPRURL := ""
+	if sctx.Run.PRURL != nil {
+		expectedPRURL = strings.TrimSpace(*sctx.Run.PRURL)
+	}
+	if expectedPRURL != "" {
+		if existing == nil {
+			return nil, fmt.Errorf("stored pull request %s could not be rediscovered; refusing to create a replacement", expectedPRURL)
+		}
+		if strings.TrimSpace(existing.URL) != expectedPRURL {
+			return nil, fmt.Errorf("rediscovered pull request %s does not match stored identity %s", describePR(existing), expectedPRURL)
+		}
 	}
 	if existing != nil {
 		sctx.Log(fmt.Sprintf("pull request already exists: %s, updating...", describePR(existing)))

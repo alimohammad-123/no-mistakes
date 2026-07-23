@@ -113,6 +113,9 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		sctx.Log("no changes to document")
 		return &pipeline.StepOutcome{}, nil
 	}
+	if err := sctx.PreflightHeadMutation(); err != nil {
+		return nil, err
+	}
 
 	if combinedLint {
 		sctx.Log("housekeeping: updating documentation and linting in one pass...")

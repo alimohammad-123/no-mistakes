@@ -2,11 +2,14 @@ package pipeline
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -70,8 +73,9 @@ func (sctx *StepContext) BaseBranch() string {
 	return sctx.Run.EffectiveBaseBranch(sctx.Repo)
 }
 
-// BindSourceRef verifies the current detached candidate against the durable run
-// head, then advances only the pipeline-local authoritative source ref.
+// BindSourceRef verifies that the stable detached candidate and canonical
+// source ref both still match the durable run head. The no-op compare-and-swap
+// refuses a superseding receive-side ref move instead of rewinding it.
 func (sctx *StepContext) BindSourceRef() (string, error) {
 	if sctx == nil || sctx.Run == nil {
 		return "", fmt.Errorf("pipeline source-ref context is missing")
@@ -80,10 +84,224 @@ func (sctx *StepContext) BindSourceRef() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := sourceprovenance.BindCandidate(sctx.Ctx, sctx.WorkDir, ref, sctx.Run.HeadSHA); err != nil {
+	if err := sourceprovenance.BindCandidateIfUnchanged(sctx.Ctx, sctx.WorkDir, ref, sctx.Run.HeadSHA, sctx.Run.HeadSHA); err != nil {
 		return "", err
 	}
 	return ref, nil
+}
+
+// AdvanceHeadSHA compare-and-swaps the source ref from the run's prior head to
+// candidateSHA before persisting the new durable candidate. A ref already at
+// candidateSHA is an idempotent database-write retry; any third value is a
+// superseding push and is left untouched.
+func (sctx *StepContext) AdvanceHeadSHA(candidateSHA string) error {
+	return sctx.advanceHeadSHA(candidateSHA, db.HeadAdvancePipeline)
+}
+
+func (sctx *StepContext) AdvanceHeadSHAWithPushCustody(candidateSHA string) error {
+	return sctx.advanceHeadSHA(candidateSHA, db.HeadAdvancePush)
+}
+
+func (sctx *StepContext) PreflightHeadMutation() error {
+	if sctx == nil || sctx.Run == nil || sctx.DB == nil {
+		return fmt.Errorf("pipeline head-mutation context is missing")
+	}
+	if sctx.Config == nil || sctx.Config.Commands.Test == "" {
+		return nil
+	}
+	return sctx.DB.CheckHeadValidationMutationCapacity(sctx.Run.ID, maxHeadValidationReplays)
+}
+
+func (sctx *StepContext) advanceHeadSHA(candidateSHA string, phase db.HeadAdvancePhase) error {
+	if sctx == nil || sctx.Run == nil || sctx.DB == nil {
+		return fmt.Errorf("pipeline source-ref context is missing")
+	}
+	previousSHA := sctx.Run.HeadSHA
+	if candidateSHA == previousSHA {
+		if err := sctx.DB.ValidateRunHeadAdvance(sctx.Run.ID, previousSHA, phase); err != nil {
+			return err
+		}
+		ref, err := sctx.Run.FrozenSourceRef()
+		if err != nil {
+			return err
+		}
+		return sourceprovenance.BindCandidateIfUnchanged(sctx.Ctx, sctx.WorkDir, ref, previousSHA, previousSHA)
+	}
+	ref, err := sctx.Run.FrozenSourceRef()
+	if err != nil {
+		return err
+	}
+	requireValidation := sctx.Config != nil && sctx.Config.Commands.Test != "" &&
+		((sctx.Run.TestHeadSHA != nil && *sctx.Run.TestHeadSHA != candidateSHA) ||
+			(sctx.Run.TestHeadSHA == nil && sctx.Run.ValidationTargetSHA != nil &&
+				*sctx.Run.ValidationTargetSHA == previousSHA))
+	transition, err := sctx.DB.BeginRunHeadAdvance(
+		sctx.Run.ID, ref, previousSHA, candidateSHA, requireValidation, maxHeadValidationReplays, phase,
+	)
+	if err != nil {
+		return err
+	}
+	if err := sourceprovenance.AdvanceCandidate(sctx.Ctx, sctx.WorkDir, ref, candidateSHA, previousSHA); err != nil {
+		return err
+	}
+	replayCount, err := sctx.DB.FinalizeRunHeadAdvance(transition, false, maxHeadValidationReplays)
+	if err != nil {
+		return err
+	}
+	sctx.Run.HeadSHA = candidateSHA
+	if requireValidation {
+		target := candidateSHA
+		sctx.Run.ValidationTargetSHA = &target
+		sctx.Run.ValidationReplayCount = replayCount
+		sctx.Run.CIReadyAt = nil
+		if replayCount > maxHeadValidationReplays {
+			return fmt.Errorf("final-head validation did not converge after %d replay attempts", maxHeadValidationReplays)
+		}
+	}
+	return nil
+}
+
+func RecoverRunHeadTransition(ctx context.Context, database *db.DB, run *db.Run, workDir string, steps []Step) (bool, error) {
+	if database == nil || run == nil {
+		return false, fmt.Errorf("recover run head transition: context is missing")
+	}
+	transition, err := database.GetRunHeadTransition(run.ID)
+	if err != nil || transition == nil {
+		return false, err
+	}
+	authoritativeRun, err := database.ValidateRecoverableRunHeadTransition(transition, maxHeadValidationReplays)
+	if err != nil {
+		return false, err
+	}
+	if authoritativeRun.ID != run.ID {
+		return false, fmt.Errorf("recover run head transition: authoritative run identity changed")
+	}
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		return false, fmt.Errorf("recover run head transition: read topology: %w", err)
+	}
+	if len(results) != len(steps) {
+		return false, fmt.Errorf("recover run head transition: topology has %d records for %d steps", len(results), len(steps))
+	}
+	activeStep := types.StepName("")
+	activeIndex := -1
+	testCompleted := false
+	for index, result := range results {
+		if result.StepName != steps[index].Name() || result.StepOrder != result.StepName.Order() {
+			return false, fmt.Errorf("recover run head transition: topology changed at step %d", index)
+		}
+		if result.StepName == types.StepTest && result.Status == types.StepStatusCompleted {
+			testCompleted = true
+		}
+		if result.Status == types.StepStatusRunning || result.Status == types.StepStatusFixing {
+			if activeStep != "" {
+				return false, fmt.Errorf("recover run head transition: topology has multiple active steps")
+			}
+			activeStep = result.StepName
+			activeIndex = index
+		}
+	}
+	replayRetarget := authoritativeRun.TestHeadSHA == nil
+	if !testCompleted && !replayRetarget {
+		return false, fmt.Errorf("recover run head transition: topology lacks completed Test evidence")
+	}
+	validPhase := transition.Phase == db.HeadAdvancePipeline &&
+		(activeStep == types.StepDocument || activeStep == types.StepLint)
+	validReplayRetarget := replayRetarget &&
+		transition.Phase == db.HeadAdvancePipeline &&
+		activeStep == types.StepTest
+	validPushPhase := transition.Phase == db.HeadAdvancePush &&
+		(activeStep == types.StepPush || activeStep == types.StepCI)
+	if !validPhase && !validReplayRetarget && !validPushPhase {
+		return false, fmt.Errorf("recover run head transition: phase does not match active topology")
+	}
+	for index, result := range results {
+		if index < activeIndex && result.Status != types.StepStatusCompleted && result.Status != types.StepStatusSkipped {
+			return false, fmt.Errorf("recover run head transition: predecessor %s is %s", result.StepName, result.Status)
+		}
+		if index > activeIndex && result.Status != types.StepStatusPending {
+			return false, fmt.Errorf("recover run head transition: successor %s is %s", result.StepName, result.Status)
+		}
+	}
+	for _, sha := range []string{transition.PreviousSHA, transition.CandidateSHA} {
+		if (len(sha) != 40 && len(sha) != 64) || strings.ToLower(sha) != sha {
+			return false, fmt.Errorf("recover run head transition: candidate provenance is not an exact commit")
+		}
+		if _, err := hex.DecodeString(sha); err != nil {
+			return false, fmt.Errorf("recover run head transition: candidate provenance is not an exact commit")
+		}
+		resolved, err := git.Run(ctx, workDir, "rev-parse", "--verify", sha+"^{commit}")
+		if err != nil || strings.TrimSpace(resolved) != sha {
+			return false, fmt.Errorf("recover run head transition: candidate provenance is not an exact commit")
+		}
+	}
+	headSHA, err := git.HeadSHA(ctx, workDir)
+	if err != nil {
+		return false, fmt.Errorf("recover run head transition: read worktree head: %w", err)
+	}
+	if headSHA != transition.CandidateSHA {
+		return false, fmt.Errorf("recover run head transition: worktree head does not match candidate")
+	}
+	if err := sourceprovenance.AdvanceCandidate(
+		ctx, workDir, transition.SourceRef, transition.CandidateSHA, transition.PreviousSHA,
+	); err != nil {
+		return false, fmt.Errorf("recover run head transition: %w", err)
+	}
+	replayCount, err := database.FinalizeRecoveredRunHeadAdvance(transition, maxHeadValidationReplays)
+	if err != nil {
+		return false, err
+	}
+	*run = *authoritativeRun
+	run.HeadSHA = transition.CandidateSHA
+	run.ValidationTargetSHA = transition.NextTargetSHA
+	run.ValidationReplayCount = replayCount
+	run.HeadAdvanceGeneration = transition.OwnershipGeneration
+	run.CIReadyAt = nil
+	if transition.ExpectedPushActive {
+		run.PushActive = false
+	}
+	if replayCount > maxHeadValidationReplays {
+		err := fmt.Errorf("final-head validation did not converge after %d replay attempts", maxHeadValidationReplays)
+		run.Status = types.RunFailed
+		errMsg := err.Error()
+		run.Error = &errMsg
+		return false, err
+	}
+	return true, nil
+}
+
+func (sctx *StepContext) AcquirePushCustody() (func(), error) {
+	if sctx == nil || sctx.Run == nil || sctx.DB == nil {
+		return nil, fmt.Errorf("pipeline push custody context is missing")
+	}
+	if sctx.Run.PushActive {
+		return func() {}, nil
+	}
+	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+		return nil, err
+	}
+	sctx.Run.PushActive = true
+	return func() {
+		_ = sctx.DB.SetRunPushActive(sctx.Run.ID, false)
+		sctx.Run.PushActive = false
+	}, nil
+}
+
+// ValidateDeliveryCandidate refuses remote delivery unless the canonical
+// source ref still names this run's exact detached HEAD and, when configured,
+// Test proof names that same candidate.
+func (sctx *StepContext) ValidateDeliveryCandidate() error {
+	if _, err := sctx.BindSourceRef(); err != nil {
+		return fmt.Errorf("verify delivery source ref: %w", err)
+	}
+	if sctx.Config != nil && sctx.Config.Commands.Test != "" {
+		if err := sctx.DB.CheckHeadValidationDeliveryEligibility(
+			sctx.Run.ID, sctx.Run.HeadSHA, maxHeadValidationReplays,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // AuthoritativeEnv removes spoofed source-ref values and appends the frozen
@@ -124,6 +342,16 @@ type StepOutcome struct {
 	// mode so the executor can persist it on the round record and later
 	// rounds can reference what was previously attempted.
 	FixSummary string
+
+	// TestedHeadSHA is positive configured-Test evidence produced by the Test
+	// step for this exact candidate. The executor persists it before any gate
+	// can park; empty means no successful configured command ran this round.
+	TestedHeadSHA string
+	// ReplayValidation asks the executor to restart the bounded Test/Document/
+	// Lint convergence phase. A mutating delivery step uses this only after it
+	// has committed locally and durably advanced the run head, before network
+	// publication.
+	ReplayValidation bool
 
 	// DurationOverrideMS, when positive, replaces the wall-clock duration
 	// reported for this step. Used by demo mode to show realistic durations

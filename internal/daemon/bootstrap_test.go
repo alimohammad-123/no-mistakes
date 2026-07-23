@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -89,7 +90,7 @@ type bootstrapCaptureStep struct {
 func (s *bootstrapCaptureStep) Name() types.StepName { return types.StepTest }
 func (s *bootstrapCaptureStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	s.seen <- sctx.Config
-	return &pipeline.StepOutcome{}, nil
+	return (&steps.TestStep{}).Execute(sctx)
 }
 
 func TestPushReceivedUsesOnlyBootstrapTestCommandFromFeaturePolicy(t *testing.T) {
@@ -119,7 +120,7 @@ func TestPushReceivedUsesOnlyBootstrapTestCommandFromFeaturePolicy(t *testing.T)
 	gitCmd(t, repo.WorkingPath, "commit", "-m", "staging without policy")
 	gitCmd(t, repo.WorkingPath, "push", "gate", "staging")
 	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature/bootstrap")
-	policy := []byte("agent: codex\ncommands:\n  test: go test ./...\n  lint: hostile-feature-lint\n  format: hostile-feature-format\n")
+	policy := []byte("agent: codex\ncommands:\n  test: git status --short\n  lint: hostile-feature-lint\n  format: hostile-feature-format\n")
 	if err := os.WriteFile(filepath.Join(repo.WorkingPath, ".no-mistakes.yaml"), policy, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +137,7 @@ func TestPushReceivedUsesOnlyBootstrapTestCommandFromFeaturePolicy(t *testing.T)
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(policy)
-	configData = append(configData, []byte(fmt.Sprintf("bootstrap:\n  test:\n    - repository: repoid://github.com/test/repo\n      base_branch: staging\n      command: go test ./...\n      policy_sha256: %x\n", digest))...)
+	configData = append(configData, []byte(fmt.Sprintf("bootstrap:\n  test:\n    - repository: repoid://github.com/test/repo\n      base_branch: staging\n      command: git status --short\n      policy_sha256: %x\n", digest))...)
 	if err := os.WriteFile(p.ConfigFile(), configData, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +156,7 @@ func TestPushReceivedUsesOnlyBootstrapTestCommandFromFeaturePolicy(t *testing.T)
 	waitForRunTerminalState(t, database, result.RunID)
 	select {
 	case cfg := <-step.seen:
-		if cfg.Commands.Test != "go test ./..." {
+		if cfg.Commands.Test != "git status --short" {
 			t.Fatalf("test command = %q", cfg.Commands.Test)
 		}
 		if cfg.Commands.Lint != "" || cfg.Commands.Format != "" {
@@ -172,7 +173,7 @@ func TestPushReceivedUsesOnlyBootstrapTestCommandFromFeaturePolicy(t *testing.T)
 		t.Fatal(err)
 	}
 	auth, err := run.FrozenBootstrapTestAuthorization()
-	if err != nil || auth == nil || auth.Command != "go test ./..." {
+	if err != nil || auth == nil || auth.Command != "git status --short" {
 		t.Fatalf("run authorization = %+v, err=%v", auth, err)
 	}
 	if got := <-fetchedSources; got != repo.UpstreamURL {
@@ -188,7 +189,7 @@ func TestPushReceivedTrustedPolicyIgnoresUnrelatedBootstrapBinding(t *testing.T)
 	p, database := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{step} })
 	repo, _ := setupTestGitRepo(t, p, database, "bootstrap-trusted-policy")
 
-	policy := []byte("commands:\n  test: trusted-base-test\n")
+	policy := []byte("commands:\n  test: git status --short\n")
 	if err := os.WriteFile(filepath.Join(repo.WorkingPath, ".no-mistakes.yaml"), policy, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +223,7 @@ func TestPushReceivedTrustedPolicyIgnoresUnrelatedBootstrapBinding(t *testing.T)
 	waitForRunTerminalState(t, database, result.RunID)
 	select {
 	case cfg := <-step.seen:
-		if cfg.Commands.Test != "trusted-base-test" {
+		if cfg.Commands.Test != "git status --short" {
 			t.Fatalf("test command = %q, want trusted base command", cfg.Commands.Test)
 		}
 	case <-time.After(time.Second):
@@ -256,7 +257,7 @@ func TestPushReceivedRetiresBootstrapAfterTrustedPolicyObservation(t *testing.T)
 	t.Cleanup(func() { fetchInitialTrustedRemoteBranch = oldFetch })
 
 	gitCmd(t, repo.WorkingPath, "checkout", "-B", "main")
-	trustedPolicy := []byte("commands:\n  test: trusted-base-test\n")
+	trustedPolicy := []byte("commands:\n  test: git status --short\n")
 	if err := os.WriteFile(filepath.Join(repo.WorkingPath, repoPolicyPath), trustedPolicy, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +298,7 @@ func TestPushReceivedRetiresBootstrapAfterTrustedPolicyObservation(t *testing.T)
 	waitForRunTerminalState(t, database, first.RunID)
 	select {
 	case cfg := <-step.seen:
-		if cfg.Commands.Test != "trusted-base-test" {
+		if cfg.Commands.Test != "git status --short" {
 			t.Fatalf("trusted Test command = %q", cfg.Commands.Test)
 		}
 	case <-time.After(time.Second):
@@ -642,7 +643,7 @@ func TestRecoverOnStartupRunsTestFromFrozenBootstrapAfterBindingRemoval(t *testi
 	baseSHA := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
 	gitCmd(t, repo.WorkingPath, "push", "gate", "staging")
 	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature/bootstrap-recovery")
-	policy := []byte("commands:\n  test: go test ./...\n")
+	policy := []byte("commands:\n  test: git status --short\n")
 	if err := os.WriteFile(filepath.Join(repo.WorkingPath, repoPolicyPath), policy, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -661,7 +662,7 @@ func TestRecoverOnStartupRunsTestFromFrozenBootstrapAfterBindingRemoval(t *testi
 	}
 	digest := sha256.Sum256(policy)
 	if err := database.SetRunBootstrapTestAuthorization(run.ID, db.BootstrapTestAuthorization{
-		Repository: "repoid://github.com/test/repo", BaseBranch: "staging", Command: "go test ./...", PolicySHA256: fmt.Sprintf("%x", digest),
+		Repository: "repoid://github.com/test/repo", BaseBranch: "staging", Command: "git status --short", PolicySHA256: fmt.Sprintf("%x", digest),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -735,7 +736,7 @@ func TestRecoverOnStartupRunsTestFromFrozenBootstrapAfterBindingRemoval(t *testi
 
 	select {
 	case cfg := <-capture.seen:
-		if cfg.Commands.Test != "go test ./..." {
+		if cfg.Commands.Test != "git status --short" {
 			t.Fatalf("recovered Test command = %q, want frozen command", cfg.Commands.Test)
 		}
 	case <-time.After(5 * time.Second):

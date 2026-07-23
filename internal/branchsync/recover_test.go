@@ -135,6 +135,66 @@ func TestTerminalPrePushRunSurfacesGuardedCustodyRecovery(t *testing.T) {
 	}
 }
 
+func TestExhaustedPushTransitionReleasesCustodyForBranchRecovery(t *testing.T) {
+	f := newRecoverFixture(t, types.RunRunning)
+	root := filepath.Dir(f.local)
+	pipeline := filepath.Join(root, "exhausted-pipeline")
+	mustRun(t, root, "-c", "core.autocrlf=false", "clone", f.gate, pipeline)
+	configureIdentity(t, pipeline)
+	mustRun(t, pipeline, "checkout", "feature/recover")
+	mustWrite(t, filepath.Join(pipeline, "exhausted.txt"), "exhausted candidate\n")
+	mustRun(t, pipeline, "add", "exhausted.txt")
+	mustRun(t, pipeline, "commit", "-m", "exhausted candidate")
+	candidate := mustRun(t, pipeline, "rev-parse", "HEAD")
+	mustRun(t, pipeline, "push", "origin", "HEAD:refs/heads/feature/recover")
+
+	for _, headSHA := range []string{"replay-head-1", "replay-head-2", f.preserved} {
+		if err := f.db.UpdateRunHeadSHA(f.run.ID, headSHA); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.db.ScheduleHeadValidationReplay(f.run.ID, 3); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.db.RecordSuccessfulTestHead(f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.CompleteHeadValidation(f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.SetRunPushActive(f.run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	sourceRef, err := f.run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := f.db.BeginRunHeadAdvance(
+		f.run.ID, sourceRef, f.preserved, candidate, true, 3, db.HeadAdvancePush,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.FinalizeRunHeadAdvance(transition, false, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	run, err := f.db.GetRun(f.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PushActive || run.Status != types.RunFailed || run.HeadSHA != candidate {
+		t.Fatalf("exhausted push run = %#v", run)
+	}
+	state := f.service.InspectCached(f.ctx)
+	if state.State != StatePipelineOwned || state.Safety != "blocked_pipeline_owned_recoverable" {
+		t.Fatalf("branch recovery state = %#v", state)
+	}
+	if state.NextAction == nil || state.NextAction.Code != "recover_custody" {
+		t.Fatalf("branch recovery action = %#v", state.NextAction)
+	}
+}
+
 // TestActivePrePushRunStaysBlockedWithoutRecovery pins the other half of the
 // class split: while the run is still active the pre-push block is correct and
 // no custody-return action may be offered.

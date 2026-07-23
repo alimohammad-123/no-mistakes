@@ -18,10 +18,14 @@ import (
 // when the agent produced no changes, or (false, err) on failure.
 func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, failingNames []string, mergeConflict bool) (bool, error) {
 	ctx := sctx.Ctx
-	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+	if err := sctx.PreflightHeadMutation(); err != nil {
 		return false, err
 	}
-	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
+	releaseCustody, err := sctx.AcquirePushCustody()
+	if err != nil {
+		return false, err
+	}
+	defer releaseCustody()
 	baseBranch := sctx.BaseBranch()
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, baseBranch)
 	rebaseBaseSHA, baseResolved := resolvePipelineBaseTip(ctx, sctx.WorkDir, sctx.Repo.UpstreamURL, sctx.Run.BaseSHA, baseBranch)
@@ -106,7 +110,7 @@ CI logs:
 	prompt += userIntentPromptSection(sctx)
 
 	sctx.Log("running agent to fix CI issues...")
-	_, err := sctx.Agent.Run(ctx, agent.RunOpts{
+	_, err = sctx.Agent.Run(ctx, agent.RunOpts{
 		Prompt:  prompt,
 		CWD:     sctx.WorkDir,
 		OnChunk: sctx.LogChunk,
@@ -115,7 +119,46 @@ CI logs:
 		return false, fmt.Errorf("agent CI fix: %w", err)
 	}
 
+	if sctx.Config.Commands.Test != "" {
+		return s.commitForValidation(sctx)
+	}
 	return s.commitAndPush(sctx)
+}
+
+// commitForValidation commits a CI repair and durably advances only the local
+// pipeline candidate. The executor then replays Test/Document/Lint before the
+// ordinary Push step updates the existing remote branch and PR.
+func (s *CIStep) commitForValidation(sctx *pipeline.StepContext) (bool, error) {
+	releaseCustody, err := sctx.AcquirePushCustody()
+	if err != nil {
+		return false, err
+	}
+	defer releaseCustody()
+	status, err := stepGitRun(sctx, "status", "--porcelain")
+	if err != nil {
+		return false, fmt.Errorf("check CI changes: %w", err)
+	}
+	if strings.TrimSpace(status) != "" {
+		if _, err := stepGitRun(sctx, "add", "-A"); err != nil {
+			return false, fmt.Errorf("stage CI changes: %w", err)
+		}
+		if _, err := stepGitRun(sctx, "commit", "-m", "no-mistakes: apply CI fixes"); err != nil {
+			return false, fmt.Errorf("commit: %w", err)
+		}
+	}
+	headSHA, err := stepGitHeadSHA(sctx)
+	if err != nil {
+		return false, fmt.Errorf("resolve head after CI repair: %w", err)
+	}
+	if headSHA == sctx.Run.HeadSHA {
+		sctx.Log("no changes to commit")
+		return false, nil
+	}
+	if err := sctx.AdvanceHeadSHAWithPushCustody(headSHA); err != nil {
+		return false, fmt.Errorf("advance source ref after local CI repair: %w", err)
+	}
+	sctx.Log("committed CI fixes locally; configured Test replay required before push")
+	return true, nil
 }
 
 // commitAndPush commits any uncommitted changes and force-pushes to the
@@ -123,6 +166,11 @@ CI logs:
 // Returns (true, nil) when changes were pushed, (false, nil) when there was
 // nothing to commit, or (false, err) on failure.
 func (s *CIStep) commitAndPush(sctx *pipeline.StepContext) (bool, error) {
+	releaseCustody, err := sctx.AcquirePushCustody()
+	if err != nil {
+		return false, err
+	}
+	defer releaseCustody()
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("check CI changes: %w", err)
@@ -153,6 +201,10 @@ func (s *CIStep) commitAndPush(sctx *pipeline.StepContext) (bool, error) {
 func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA string) (bool, error) {
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	pushURL := resolvePushURL(sctx)
+	previousHeadSHA := sctx.Run.HeadSHA
+	if err := sctx.AdvanceHeadSHAWithPushCustody(newHeadSHA); err != nil {
+		return false, fmt.Errorf("advance source ref before CI push: %w", err)
+	}
 
 	// Anchor the force-with-lease to the head the run last recorded for this
 	// branch (what the pipeline last pushed/observed), NOT to a SHA freshly read
@@ -161,7 +213,7 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 	// commit that reached origin out of band. resolveForcePushDecision refuses
 	// the push when the remote carries commits this run never incorporated.
 	gitRun := func(args ...string) (string, error) { return stepGitRun(sctx, args...) }
-	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, newHeadSHA, sctx.Run.HeadSHA, sctx.Run.BaseSHA)
+	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, newHeadSHA, previousHeadSHA, sctx.Run.BaseSHA)
 	if err != nil {
 		return false, err
 	}
@@ -193,16 +245,6 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		if err := persistBinding(); err != nil {
 			return false, err
 		}
-		if _, err := stepGitRun(sctx, "update-ref", ref, newHeadSHA); err != nil {
-			return false, fmt.Errorf("update local branch ref: %w", err)
-		}
-		sctx.Run.HeadSHA = newHeadSHA
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, newHeadSHA); err != nil {
-			return false, err
-		}
-		if _, err := sctx.BindSourceRef(); err != nil {
-			return false, fmt.Errorf("bind source ref after CI fix: %w", err)
-		}
 		return false, nil
 	}
 	if err := stepGitPush(sctx, pushURL, ref, decision.remoteSHA, !decision.newBranch); err != nil {
@@ -210,17 +252,6 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 	}
 	if err := persistBinding(); err != nil {
 		return false, err
-	}
-
-	if _, err := stepGitRun(sctx, "update-ref", ref, newHeadSHA); err != nil {
-		return false, fmt.Errorf("update local branch ref: %w", err)
-	}
-	sctx.Run.HeadSHA = newHeadSHA
-	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, newHeadSHA); err != nil {
-		return false, err
-	}
-	if _, err := sctx.BindSourceRef(); err != nil {
-		return false, fmt.Errorf("bind source ref after CI fix: %w", err)
 	}
 
 	sctx.Log("committed and pushed fixes")

@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+var ErrHeadValidationMutationExhausted = errors.New("head validation mutation capacity exhausted")
 
 // Run represents a pipeline run.
 type Run struct {
@@ -38,13 +41,25 @@ type Run struct {
 	PRState                   *string
 	PRStateObservedAt         *int64
 	CIReadyAt                 *int64
-	LastPushedSHA             *string
-	PushTargetKind            *string
-	PushTargetFingerprint     *string
-	PushRef                   *string
-	LastPushedAt              *int64
-	PushGeneration            *int64
-	PushActive                bool
+	// TestHeadSHA is the exact candidate on which this run's configured Test
+	// command most recently succeeded. Nil is unknown, including every
+	// pre-upgrade historical row; it is never inferred from mutable HeadSHA.
+	TestHeadSHA *string
+	// ValidationTargetSHA is the stale candidate currently being replayed. A
+	// restart of the same target is idempotent and does not consume another
+	// convergence attempt; only a newly changed target advances the counter.
+	ValidationTargetSHA *string
+	// ValidationReplayCount persists the bounded final-head convergence budget
+	// so a crash or daemon upgrade cannot reset an otherwise non-converging run.
+	ValidationReplayCount int
+	HeadAdvanceGeneration int64
+	LastPushedSHA         *string
+	PushTargetKind        *string
+	PushTargetFingerprint *string
+	PushRef               *string
+	LastPushedAt          *int64
+	PushGeneration        *int64
+	PushActive            bool
 	// CustodyReturnedAt is non-nil once a guarded branch-sync recovery
 	// explicitly ended this run's ownership of an unpublished pipeline head
 	// (terminal run whose head was never successfully pushed, or moved after
@@ -71,7 +86,7 @@ type Run struct {
 	UpdatedAt       int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(base_branch, ''), source_ref, bootstrap_test_repository, bootstrap_test_base_branch, bootstrap_test_command, bootstrap_test_policy_sha256, submitted_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(base_branch, ''), source_ref, bootstrap_test_repository, bootstrap_test_base_branch, bootstrap_test_command, bootstrap_test_policy_sha256, submitted_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, test_head_sha, validation_target_sha, COALESCE(validation_replay_count, 0), COALESCE(head_advance_generation, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -80,7 +95,7 @@ func scanRun(row interface {
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.BaseBranch, &r.SourceRef,
 		&r.BootstrapTestRepository, &r.BootstrapTestBaseBranch, &r.BootstrapTestCommand, &r.BootstrapTestPolicySHA256,
 		&r.SubmittedHeadSHA, &r.Status,
-		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt,
+		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt, &r.TestHeadSHA, &r.ValidationTargetSHA, &r.ValidationReplayCount, &r.HeadAdvanceGeneration,
 		&r.LastPushedSHA, &r.PushTargetKind, &r.PushTargetFingerprint, &r.PushRef,
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive,
 		&r.CustodyReturnedAt, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
@@ -443,6 +458,13 @@ type PushBinding struct {
 	Ref               string
 }
 
+type HeadAdvancePhase string
+
+const (
+	HeadAdvancePipeline HeadAdvancePhase = "pipeline"
+	HeadAdvancePush     HeadAdvancePhase = "push"
+)
+
 // UpdateRunPushBinding advances a run's successful-push provenance and
 // increments its generation. It is called for both a completed push and a
 // freshly verified already-up-to-date push.
@@ -474,9 +496,28 @@ func (d *DB) SetRunCustodyReturned(id string) error {
 // SetRunPushActive marks whether a pipeline phase currently owns a possible
 // branch-head update. Sync refuses while this marker is set.
 func (d *DB) SetRunPushActive(id string, active bool) error {
-	_, err := d.sql.Exec(`UPDATE runs SET push_active = ?, updated_at = ? WHERE id = ?`, active, now(), id)
+	var (
+		result sql.Result
+		err    error
+	)
+	if active {
+		result, err = d.sql.Exec(
+			`UPDATE runs SET push_active = 1, updated_at = ?
+			 WHERE id = ? AND status = ? AND COALESCE(push_active, 0) = 0 AND custody_returned_at IS NULL`,
+			now(), id, types.RunRunning,
+		)
+	} else {
+		result, err = d.sql.Exec(`UPDATE runs SET push_active = 0, updated_at = ? WHERE id = ? AND COALESCE(push_active, 0) = 1`, now(), id)
+	}
 	if err != nil {
 		return fmt.Errorf("set run push active: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set run push active: %w", err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("set run push active: run is unavailable or custody state changed")
 	}
 	return nil
 }
@@ -501,6 +542,734 @@ func (d *DB) SetRunCIReady(id string, ready bool) error {
 	_, err := d.sql.Exec(`UPDATE runs SET ci_ready_at = ?, updated_at = ? WHERE id = ? AND ((ci_ready_at IS NULL AND ? = 1) OR (ci_ready_at IS NOT NULL AND ? = 0))`, readyAt, now(), id, ready, ready)
 	if err != nil {
 		return fmt.Errorf("set run CI ready: %w", err)
+	}
+	return nil
+}
+
+// BeginConfiguredTestAttempt invalidates any prior proof before each configured
+// Test execution. This prevents a failed or approved-failing retry at the same
+// SHA from reusing an older success.
+func (d *DB) BeginConfiguredTestAttempt(id, headSHA string) error {
+	if strings.TrimSpace(headSHA) == "" {
+		return fmt.Errorf("begin configured Test attempt: head SHA is empty")
+	}
+	result, err := d.sql.Exec(
+		`UPDATE runs SET test_head_sha = NULL, updated_at = ?
+		 WHERE id = ? AND status = ? AND head_sha = ? AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = 0`,
+		now(), id, types.RunRunning, headSHA,
+	)
+	if err != nil {
+		return fmt.Errorf("begin configured Test attempt: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("begin configured Test attempt: %w", err)
+	}
+	if count != 1 {
+		return fmt.Errorf("begin configured Test attempt: run is missing, stale, terminal, publishing, or outside pipeline custody")
+	}
+	return nil
+}
+
+// RecordSuccessfulTestHead records positive configured-Test evidence for the
+// exact active candidate. It refuses stale, terminal, custody-returned, or
+// push-active rows rather than inferring proof from mutable run state.
+func (d *DB) RecordSuccessfulTestHead(id, headSHA string) error {
+	if strings.TrimSpace(headSHA) == "" {
+		return fmt.Errorf("record successful Test head: head SHA is empty")
+	}
+	result, err := d.sql.Exec(
+		`UPDATE runs SET test_head_sha = ?, updated_at = ?
+		 WHERE id = ? AND status = ? AND head_sha = ? AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = 0`,
+		headSHA, now(), id, types.RunRunning, headSHA,
+	)
+	if err != nil {
+		return fmt.Errorf("record successful Test head: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("record successful Test head: %w", err)
+	}
+	if count != 1 {
+		return fmt.Errorf("record successful Test head: run is missing, stale, terminal, publishing, or outside pipeline custody")
+	}
+	return nil
+}
+
+// ScheduleHeadValidationReplay atomically consumes one persisted convergence
+// attempt, clears stale CI readiness, and resets the existing Test-through-CI
+// step rows for same-run replay. Round history and run/PR/push identity remain
+// intact. Terminal history and custody-returned branches are never rewritten.
+func (d *DB) ScheduleHeadValidationReplay(id string, maxReplays int) (int, error) {
+	if maxReplays <= 0 {
+		return 0, fmt.Errorf("schedule head validation replay: replay bound must be positive")
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("schedule head validation replay: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var status types.RunStatus
+	var headSHA string
+	var targetSHA *string
+	var replayCount int
+	var custodyReturnedAt *int64
+	var pushActive bool
+	if err := tx.QueryRow(
+		`SELECT status, head_sha, validation_target_sha, COALESCE(validation_replay_count, 0), custody_returned_at, COALESCE(push_active, 0) FROM runs WHERE id = ?`, id,
+	).Scan(&status, &headSHA, &targetSHA, &replayCount, &custodyReturnedAt, &pushActive); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, fmt.Errorf("schedule head validation replay: run is missing")
+		}
+		return 0, fmt.Errorf("schedule head validation replay: read run: %w", err)
+	}
+	if status != types.RunRunning || custodyReturnedAt != nil || pushActive {
+		return replayCount, fmt.Errorf("schedule head validation replay: run is not an active pipeline-owned candidate")
+	}
+	if replayCount > maxReplays {
+		return replayCount, fmt.Errorf("final-head validation did not converge after %d replay attempts", maxReplays)
+	}
+	next := replayCount
+	if targetSHA == nil || *targetSHA != headSHA {
+		if replayCount >= maxReplays {
+			return replayCount, fmt.Errorf("final-head validation did not converge after %d replay attempts", replayCount)
+		}
+		next++
+	}
+	result, err := tx.Exec(
+		`UPDATE runs SET validation_target_sha = ?, validation_replay_count = ?, ci_ready_at = NULL, awaiting_agent_since = NULL, updated_at = ?
+		 WHERE id = ? AND status = ? AND COALESCE(validation_replay_count, 0) = ? AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = 0`,
+		headSHA, next, now(), id, types.RunRunning, replayCount,
+	)
+	if err != nil {
+		return replayCount, fmt.Errorf("schedule head validation replay: update run: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		if err != nil {
+			return replayCount, fmt.Errorf("schedule head validation replay: update run: %w", err)
+		}
+		return replayCount, fmt.Errorf("schedule head validation replay: run changed concurrently")
+	}
+	if _, err := tx.Exec(
+		`UPDATE step_results
+		 SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL, findings_json = NULL, error = NULL,
+		     started_at = NULL, completed_at = NULL, last_activity_at = NULL, last_activity = NULL, agent_pid = NULL, auto_fix_limit = NULL
+		 WHERE run_id = ? AND step_order >= ?`,
+		types.StepStatusPending, id, types.StepTest.Order(),
+	); err != nil {
+		return replayCount, fmt.Errorf("schedule head validation replay: reset steps: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return replayCount, fmt.Errorf("schedule head validation replay: commit: %w", err)
+	}
+	return next, nil
+}
+
+// CompleteHeadValidation clears an in-progress validation target only when the
+// exact active candidate and its configured-Test proof still agree. A stale or
+// concurrently changed run fails closed and keeps the target for recovery.
+func (d *DB) CompleteHeadValidation(id, headSHA string) error {
+	result, err := d.sql.Exec(
+		`UPDATE runs SET validation_target_sha = NULL, updated_at = ?
+		 WHERE id = ? AND status = ? AND head_sha = ? AND test_head_sha = ?
+		   AND (validation_target_sha IS NULL OR validation_target_sha = ?)
+		   AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = 0`,
+		now(), id, types.RunRunning, headSHA, headSHA, headSHA,
+	)
+	if err != nil {
+		return fmt.Errorf("complete head validation: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("complete head validation: %w", err)
+	}
+	if count != 1 {
+		return fmt.Errorf("complete head validation: candidate proof is missing, stale, or outside pipeline custody")
+	}
+	return nil
+}
+
+func (d *DB) CheckHeadValidationMutationCapacity(id string, maxReplays int) error {
+	if maxReplays <= 0 {
+		return fmt.Errorf("check head validation mutation capacity: replay bound must be positive")
+	}
+	var status types.RunStatus
+	var headSHA string
+	var targetSHA *string
+	var replayCount int
+	var custodyReturnedAt *int64
+	var pendingTransition bool
+	if err := d.sql.QueryRow(
+		`SELECT status, head_sha, validation_target_sha, COALESCE(validation_replay_count, 0),
+		        custody_returned_at, EXISTS(SELECT 1 FROM run_head_transitions WHERE run_id = runs.id)
+		 FROM runs WHERE id = ?`, id,
+	).Scan(&status, &headSHA, &targetSHA, &replayCount, &custodyReturnedAt, &pendingTransition); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("check head validation mutation capacity: run is missing")
+		}
+		return fmt.Errorf("check head validation mutation capacity: %w", err)
+	}
+	if status != types.RunRunning || custodyReturnedAt != nil {
+		return fmt.Errorf("check head validation mutation capacity: run is outside active pipeline custody")
+	}
+	if pendingTransition {
+		return fmt.Errorf("check head validation mutation capacity: a head transition is already pending")
+	}
+	if replayCount < 0 {
+		return fmt.Errorf("check head validation mutation capacity: replay state is inconsistent")
+	}
+	if replayCount >= maxReplays {
+		return fmt.Errorf("%w: final-head validation did not converge after %d replay attempts", ErrHeadValidationMutationExhausted, maxReplays)
+	}
+	if targetSHA == nil {
+		return nil
+	}
+	if *targetSHA != headSHA {
+		return fmt.Errorf("check head validation mutation capacity: replay state is inconsistent")
+	}
+	return nil
+}
+
+func (d *DB) CheckHeadValidationDeliveryEligibility(id, headSHA string, maxReplays int) error {
+	if strings.TrimSpace(headSHA) == "" || maxReplays <= 0 {
+		return fmt.Errorf("check head validation delivery eligibility: head and replay bound are required")
+	}
+	var status types.RunStatus
+	var durableHeadSHA string
+	var testHeadSHA *string
+	var targetSHA *string
+	var replayCount int
+	var custodyReturnedAt *int64
+	var pendingTransition bool
+	if err := d.sql.QueryRow(
+		`SELECT status, head_sha, test_head_sha, validation_target_sha,
+		        COALESCE(validation_replay_count, 0), custody_returned_at,
+		        EXISTS(SELECT 1 FROM run_head_transitions WHERE run_id = runs.id)
+		 FROM runs WHERE id = ?`, id,
+	).Scan(
+		&status, &durableHeadSHA, &testHeadSHA, &targetSHA,
+		&replayCount, &custodyReturnedAt, &pendingTransition,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("check head validation delivery eligibility: run is missing")
+		}
+		return fmt.Errorf("check head validation delivery eligibility: %w", err)
+	}
+	if status != types.RunRunning || custodyReturnedAt != nil || durableHeadSHA != headSHA {
+		return fmt.Errorf("check head validation delivery eligibility: run is outside exact active pipeline custody")
+	}
+	if replayCount < 0 || replayCount > maxReplays {
+		return fmt.Errorf("check head validation delivery eligibility: replay state is outside bounded policy")
+	}
+	if testHeadSHA == nil || *testHeadSHA != headSHA || targetSHA != nil || pendingTransition {
+		return fmt.Errorf("configured Test proof is missing, stale, or still active for delivery head %s", headSHA)
+	}
+	return nil
+}
+
+func headAdvancePushActive(phase HeadAdvancePhase) (bool, error) {
+	switch phase {
+	case HeadAdvancePipeline:
+		return false, nil
+	case HeadAdvancePush:
+		return true, nil
+	default:
+		return false, fmt.Errorf("unknown head advance phase %q", phase)
+	}
+}
+
+func (d *DB) ValidateRunHeadAdvance(id, previousSHA string, phase HeadAdvancePhase) error {
+	expectedPushActive, err := headAdvancePushActive(phase)
+	if err != nil {
+		return err
+	}
+	var status types.RunStatus
+	var headSHA string
+	var custodyReturnedAt *int64
+	var pushActive bool
+	if err := d.sql.QueryRow(
+		`SELECT status, head_sha, custody_returned_at, COALESCE(push_active, 0) FROM runs WHERE id = ?`, id,
+	).Scan(&status, &headSHA, &custodyReturnedAt, &pushActive); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("validate run head advance: run is missing")
+		}
+		return fmt.Errorf("validate run head advance: %w", err)
+	}
+	if status != types.RunRunning || custodyReturnedAt != nil || pushActive != expectedPushActive || headSHA != previousSHA {
+		return fmt.Errorf("validate run head advance: run head, custody, or phase changed")
+	}
+	return nil
+}
+
+type RunHeadTransition struct {
+	RunID               string
+	SourceRef           string
+	PreviousSHA         string
+	CandidateSHA        string
+	RequireValidation   bool
+	Phase               HeadAdvancePhase
+	ExpectedPushActive  bool
+	PriorTargetSHA      *string
+	NextTargetSHA       *string
+	PriorReplayCount    int
+	NextReplayCount     int
+	OwnershipGeneration int64
+}
+
+func scanRunHeadTransition(row interface {
+	Scan(...any) error
+}, transition *RunHeadTransition) error {
+	return row.Scan(
+		&transition.RunID, &transition.SourceRef, &transition.PreviousSHA, &transition.CandidateSHA,
+		&transition.RequireValidation, &transition.Phase, &transition.ExpectedPushActive,
+		&transition.PriorTargetSHA, &transition.NextTargetSHA,
+		&transition.PriorReplayCount, &transition.NextReplayCount, &transition.OwnershipGeneration,
+	)
+}
+
+const runHeadTransitionColumns = `run_id, source_ref, previous_sha, candidate_sha, require_validation, phase, expected_push_active, prior_target_sha, next_target_sha, prior_replay_count, next_replay_count, ownership_generation`
+
+func (d *DB) GetRunHeadTransition(runID string) (*RunHeadTransition, error) {
+	transition := &RunHeadTransition{}
+	err := scanRunHeadTransition(d.sql.QueryRow(
+		`SELECT `+runHeadTransitionColumns+` FROM run_head_transitions WHERE run_id = ?`, runID,
+	), transition)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get run head transition: %w", err)
+	}
+	return transition, nil
+}
+
+func (d *DB) ValidateRecoverableRunHeadTransition(transition *RunHeadTransition, maxReplays int) (*Run, error) {
+	if transition == nil || maxReplays <= 0 {
+		return nil, fmt.Errorf("validate recoverable run head transition: transition and replay bound are required")
+	}
+	persisted, err := d.GetRunHeadTransition(transition.RunID)
+	if err != nil {
+		return nil, fmt.Errorf("validate recoverable run head transition: read durable transition: %w", err)
+	}
+	if !sameRunHeadTransition(persisted, transition) {
+		return nil, fmt.Errorf("validate recoverable run head transition: durable transition is missing, corrupt, or changed")
+	}
+	run, err := d.GetRun(transition.RunID)
+	if err != nil {
+		return nil, fmt.Errorf("validate recoverable run head transition: %w", err)
+	}
+	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince != nil || run.CustodyReturnedAt != nil {
+		return nil, fmt.Errorf("validate recoverable run head transition: run is not active pipeline custody")
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		return nil, fmt.Errorf("validate recoverable run head transition: %w", err)
+	}
+	phase := HeadAdvancePipeline
+	if run.PushActive {
+		phase = HeadAdvancePush
+	}
+	replayRetarget := run.TestHeadSHA == nil &&
+		run.ValidationTargetSHA != nil &&
+		*run.ValidationTargetSHA == run.HeadSHA &&
+		transition.Phase == HeadAdvancePipeline
+	staleProof := run.TestHeadSHA != nil && *run.TestHeadSHA == run.HeadSHA
+	if transition.RunID != run.ID ||
+		transition.SourceRef != ref ||
+		transition.PreviousSHA != run.HeadSHA ||
+		transition.CandidateSHA == "" ||
+		transition.CandidateSHA == run.HeadSHA ||
+		(!staleProof && !replayRetarget) ||
+		transition.RequireValidation != true ||
+		transition.Phase != phase ||
+		transition.ExpectedPushActive != run.PushActive ||
+		!sameNullableString(transition.PriorTargetSHA, run.ValidationTargetSHA) ||
+		run.ValidationReplayCount < 0 ||
+		transition.PriorReplayCount != run.ValidationReplayCount ||
+		transition.OwnershipGeneration <= 0 ||
+		transition.OwnershipGeneration != run.HeadAdvanceGeneration {
+		return nil, fmt.Errorf("validate recoverable run head transition: transition claims do not match authoritative run state")
+	}
+	if replayRetarget {
+		var activeTestCount int
+		if err := d.sql.QueryRow(
+			`SELECT COUNT(*) FROM step_results
+			 WHERE run_id = ? AND step_name = ? AND status IN (?, ?)`,
+			run.ID, types.StepTest, types.StepStatusRunning, types.StepStatusFixing,
+		).Scan(&activeTestCount); err != nil {
+			return nil, fmt.Errorf("validate recoverable run head transition: read active Test state: %w", err)
+		}
+		var activeCount int
+		if err := d.sql.QueryRow(
+			`SELECT COUNT(*) FROM step_results WHERE run_id = ? AND status IN (?, ?)`,
+			run.ID, types.StepStatusRunning, types.StepStatusFixing,
+		).Scan(&activeCount); err != nil {
+			return nil, fmt.Errorf("validate recoverable run head transition: read active step state: %w", err)
+		}
+		if activeTestCount != 1 || activeCount != 1 {
+			return nil, fmt.Errorf("validate recoverable run head transition: replay retarget lacks exact active Test state")
+		}
+	}
+	nextReplayCount := run.ValidationReplayCount + 1
+	if run.ValidationReplayCount > maxReplays ||
+		(transition.Phase == HeadAdvancePipeline && nextReplayCount > maxReplays) ||
+		nextReplayCount > maxReplays+1 ||
+		transition.NextReplayCount != nextReplayCount ||
+		transition.NextTargetSHA == nil ||
+		*transition.NextTargetSHA != transition.CandidateSHA {
+		return nil, fmt.Errorf("validate recoverable run head transition: replay claims exceed or contradict bounded policy")
+	}
+	return run, nil
+}
+
+func sameNullableString(left, right *string) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
+func sameRunHeadTransition(left, right *RunHeadTransition) bool {
+	return left != nil && right != nil &&
+		left.RunID == right.RunID &&
+		left.SourceRef == right.SourceRef &&
+		left.PreviousSHA == right.PreviousSHA &&
+		left.CandidateSHA == right.CandidateSHA &&
+		left.RequireValidation == right.RequireValidation &&
+		left.Phase == right.Phase &&
+		left.ExpectedPushActive == right.ExpectedPushActive &&
+		sameNullableString(left.PriorTargetSHA, right.PriorTargetSHA) &&
+		sameNullableString(left.NextTargetSHA, right.NextTargetSHA) &&
+		left.PriorReplayCount == right.PriorReplayCount &&
+		left.NextReplayCount == right.NextReplayCount &&
+		left.OwnershipGeneration == right.OwnershipGeneration
+}
+
+func (d *DB) BeginRunHeadAdvance(id, sourceRef, previousSHA, candidateSHA string, requireValidation bool, maxReplays int, phase HeadAdvancePhase) (*RunHeadTransition, error) {
+	if strings.TrimSpace(sourceRef) == "" || strings.TrimSpace(previousSHA) == "" || strings.TrimSpace(candidateSHA) == "" || maxReplays <= 0 {
+		return nil, fmt.Errorf("begin run head advance: source ref, SHAs, and replay bound are required")
+	}
+	expectedPushActive, err := headAdvancePushActive(phase)
+	if err != nil {
+		return nil, fmt.Errorf("begin run head advance: %w", err)
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin run head advance: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var status types.RunStatus
+	var headSHA string
+	var testHeadSHA *string
+	var targetSHA *string
+	var replayCount int
+	var generation int64
+	var custodyReturnedAt *int64
+	var pushActive bool
+	if err := tx.QueryRow(
+		`SELECT status, head_sha, test_head_sha, validation_target_sha, COALESCE(validation_replay_count, 0),
+		        COALESCE(head_advance_generation, 0), custody_returned_at, COALESCE(push_active, 0)
+		 FROM runs WHERE id = ?`, id,
+	).Scan(&status, &headSHA, &testHeadSHA, &targetSHA, &replayCount, &generation, &custodyReturnedAt, &pushActive); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("begin run head advance: run is missing")
+		}
+		return nil, fmt.Errorf("begin run head advance: read run: %w", err)
+	}
+	if status != types.RunRunning || custodyReturnedAt != nil || pushActive != expectedPushActive || headSHA != previousSHA {
+		return nil, fmt.Errorf("begin run head advance: run head, custody, or phase changed")
+	}
+	if targetSHA != nil && *targetSHA != headSHA {
+		return nil, fmt.Errorf("begin run head advance: active replay target does not match run head")
+	}
+	if replayCount > maxReplays {
+		return nil, fmt.Errorf("final-head validation did not converge after %d replay attempts", maxReplays)
+	}
+	replayRetarget := testHeadSHA == nil && targetSHA != nil && *targetSHA == headSHA
+	staleProof := testHeadSHA != nil && *testHeadSHA == headSHA && *testHeadSHA != candidateSHA
+	if requireValidation != (staleProof || replayRetarget) {
+		return nil, fmt.Errorf("begin run head advance: validation policy does not match authoritative proof state")
+	}
+	if replayRetarget {
+		if phase != HeadAdvancePipeline {
+			return nil, fmt.Errorf("begin run head advance: replay retarget is outside Test pipeline custody")
+		}
+		var activeTestCount int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM step_results
+			 WHERE run_id = ? AND step_name = ? AND status IN (?, ?)`,
+			id, types.StepTest, types.StepStatusRunning, types.StepStatusFixing,
+		).Scan(&activeTestCount); err != nil {
+			return nil, fmt.Errorf("begin run head advance: read active Test state: %w", err)
+		}
+		var activeCount int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM step_results WHERE run_id = ? AND status IN (?, ?)`,
+			id, types.StepStatusRunning, types.StepStatusFixing,
+		).Scan(&activeCount); err != nil {
+			return nil, fmt.Errorf("begin run head advance: read active step state: %w", err)
+		}
+		if activeTestCount != 1 || activeCount != 1 {
+			return nil, fmt.Errorf("begin run head advance: replay retarget lacks exact active Test state")
+		}
+	}
+
+	nextReplayCount := replayCount
+	nextTargetSHA := targetSHA
+	if requireValidation && (targetSHA == nil || *targetSHA != candidateSHA) {
+		nextReplayCount++
+		target := candidateSHA
+		nextTargetSHA = &target
+	}
+	transition := &RunHeadTransition{
+		RunID:               id,
+		SourceRef:           sourceRef,
+		PreviousSHA:         previousSHA,
+		CandidateSHA:        candidateSHA,
+		RequireValidation:   requireValidation,
+		Phase:               phase,
+		ExpectedPushActive:  expectedPushActive,
+		PriorTargetSHA:      targetSHA,
+		NextTargetSHA:       nextTargetSHA,
+		PriorReplayCount:    replayCount,
+		NextReplayCount:     nextReplayCount,
+		OwnershipGeneration: generation + 1,
+	}
+
+	existing := &RunHeadTransition{}
+	err = scanRunHeadTransition(tx.QueryRow(
+		`SELECT `+runHeadTransitionColumns+` FROM run_head_transitions WHERE run_id = ?`, id,
+	), existing)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("begin run head advance: read transition: %w", err)
+	}
+	if err == nil {
+		transition.OwnershipGeneration = existing.OwnershipGeneration
+		if sameRunHeadTransition(existing, transition) && generation == existing.OwnershipGeneration {
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("begin run head advance: commit retry: %w", err)
+			}
+			return existing, nil
+		}
+		return nil, fmt.Errorf("begin run head advance: conflicting durable transition")
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO run_head_transitions
+		 (run_id, source_ref, previous_sha, candidate_sha, require_validation, phase, expected_push_active,
+		  prior_target_sha, next_target_sha, prior_replay_count, next_replay_count, ownership_generation, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, sourceRef, previousSHA, candidateSHA, requireValidation, phase, expectedPushActive,
+		targetSHA, nextTargetSHA, replayCount, nextReplayCount, transition.OwnershipGeneration, now(),
+	); err != nil {
+		return nil, fmt.Errorf("begin run head advance: persist transition: %w", err)
+	}
+	result, err := tx.Exec(
+		`UPDATE runs SET head_advance_generation = ?, updated_at = ?
+		 WHERE id = ? AND status = ? AND head_sha = ? AND COALESCE(head_advance_generation, 0) = ?
+		   AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = ?`,
+		transition.OwnershipGeneration, now(), id, types.RunRunning, previousSHA, generation, expectedPushActive,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("begin run head advance: claim generation: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		if err != nil {
+			return nil, fmt.Errorf("begin run head advance: claim generation: %w", err)
+		}
+		return nil, fmt.Errorf("begin run head advance: run changed concurrently")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("begin run head advance: commit: %w", err)
+	}
+	return transition, nil
+}
+
+func (d *DB) FinalizeRunHeadAdvance(transition *RunHeadTransition, recovering bool, maxReplays int) (int, error) {
+	if transition == nil || maxReplays <= 0 {
+		return 0, fmt.Errorf("finalize run head advance: transition and replay bound are required")
+	}
+	exhausted := transition.RequireValidation && transition.NextReplayCount > maxReplays
+	exhaustionError := fmt.Sprintf("final-head validation did not converge after %d replay attempts", maxReplays)
+	clearPushActive := transition.ExpectedPushActive && (recovering || exhausted)
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("finalize run head advance: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	persisted := &RunHeadTransition{}
+	err = scanRunHeadTransition(tx.QueryRow(
+		`SELECT `+runHeadTransitionColumns+` FROM run_head_transitions WHERE run_id = ?`, transition.RunID,
+	), persisted)
+	if err == sql.ErrNoRows {
+		var headSHA string
+		var targetSHA *string
+		var replayCount int
+		var generation int64
+		var status types.RunStatus
+		var runError *string
+		var pushActive bool
+		if err := tx.QueryRow(
+			`SELECT head_sha, validation_target_sha, COALESCE(validation_replay_count, 0),
+			        COALESCE(head_advance_generation, 0), status, error, COALESCE(push_active, 0)
+			 FROM runs WHERE id = ?`, transition.RunID,
+		).Scan(&headSHA, &targetSHA, &replayCount, &generation, &status, &runError, &pushActive); err != nil {
+			return 0, fmt.Errorf("finalize run head advance: read finalized run: %w", err)
+		}
+		if headSHA == transition.CandidateSHA && sameNullableString(targetSHA, transition.NextTargetSHA) &&
+			replayCount == transition.NextReplayCount && generation == transition.OwnershipGeneration &&
+			(!exhausted || (status == types.RunFailed && runError != nil && *runError == exhaustionError)) &&
+			(!clearPushActive || !pushActive) {
+			return replayCount, nil
+		}
+		return replayCount, fmt.Errorf("finalize run head advance: durable transition is missing")
+	}
+	if err != nil {
+		return 0, fmt.Errorf("finalize run head advance: read transition: %w", err)
+	}
+	if !sameRunHeadTransition(persisted, transition) {
+		return 0, fmt.Errorf("finalize run head advance: durable transition is corrupt or changed")
+	}
+
+	result, err := tx.Exec(
+		`UPDATE runs
+		 SET head_sha = ?, validation_target_sha = ?, validation_replay_count = ?,
+		     ci_ready_at = CASE WHEN ? THEN NULL ELSE ci_ready_at END,
+		     push_active = CASE WHEN ? THEN 0 ELSE push_active END,
+		     status = CASE WHEN ? THEN ? ELSE status END,
+		     error = CASE WHEN ? THEN ? ELSE error END, updated_at = ?
+		 WHERE id = ? AND status = ? AND head_sha = ? AND COALESCE(validation_replay_count, 0) = ?
+		   AND ((validation_target_sha IS NULL AND ? IS NULL) OR validation_target_sha = ?)
+		   AND COALESCE(head_advance_generation, 0) = ?
+		   AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = ?`,
+		transition.CandidateSHA, transition.NextTargetSHA, transition.NextReplayCount,
+		transition.RequireValidation, clearPushActive,
+		exhausted, types.RunFailed, exhausted, exhaustionError, now(),
+		transition.RunID, types.RunRunning, transition.PreviousSHA, transition.PriorReplayCount,
+		transition.PriorTargetSHA, transition.PriorTargetSHA, transition.OwnershipGeneration,
+		transition.ExpectedPushActive,
+	)
+	if err != nil {
+		return transition.PriorReplayCount, fmt.Errorf("finalize run head advance: update: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		if err != nil {
+			return transition.PriorReplayCount, fmt.Errorf("finalize run head advance: update: %w", err)
+		}
+		return transition.PriorReplayCount, fmt.Errorf("finalize run head advance: run changed concurrently")
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM run_head_transitions WHERE run_id = ? AND ownership_generation = ?`,
+		transition.RunID, transition.OwnershipGeneration,
+	); err != nil {
+		return transition.PriorReplayCount, fmt.Errorf("finalize run head advance: clear transition: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return transition.PriorReplayCount, fmt.Errorf("finalize run head advance: commit: %w", err)
+	}
+	return transition.NextReplayCount, nil
+}
+
+func (d *DB) FinalizeRecoveredRunHeadAdvance(transition *RunHeadTransition, maxReplays int) (int, error) {
+	if _, err := d.ValidateRecoverableRunHeadTransition(transition, maxReplays); err != nil {
+		return 0, err
+	}
+	return d.FinalizeRunHeadAdvance(transition, true, maxReplays)
+}
+
+func (d *DB) AdvanceRunHeadSHA(id, previousSHA, candidateSHA string, requireValidation bool, phase HeadAdvancePhase) (int, error) {
+	if strings.TrimSpace(previousSHA) == "" || strings.TrimSpace(candidateSHA) == "" {
+		return 0, fmt.Errorf("advance run head sha: previous and candidate SHAs are required")
+	}
+	expectedPushActive, err := headAdvancePushActive(phase)
+	if err != nil {
+		return 0, fmt.Errorf("advance run head sha: %w", err)
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("advance run head sha: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var status types.RunStatus
+	var headSHA string
+	var targetSHA *string
+	var replayCount int
+	var custodyReturnedAt *int64
+	var pushActive bool
+	if err := tx.QueryRow(
+		`SELECT status, head_sha, validation_target_sha, COALESCE(validation_replay_count, 0), custody_returned_at, COALESCE(push_active, 0)
+		 FROM runs WHERE id = ?`, id,
+	).Scan(&status, &headSHA, &targetSHA, &replayCount, &custodyReturnedAt, &pushActive); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, fmt.Errorf("advance run head sha: run is missing")
+		}
+		return 0, fmt.Errorf("advance run head sha: read run: %w", err)
+	}
+	if status != types.RunRunning || custodyReturnedAt != nil || pushActive != expectedPushActive {
+		return replayCount, fmt.Errorf("advance run head sha: run is not an active pipeline-owned candidate")
+	}
+	if headSHA != previousSHA && headSHA != candidateSHA {
+		return replayCount, fmt.Errorf("advance run head sha: durable head changed from %s to %s", previousSHA, headSHA)
+	}
+
+	nextReplayCount := replayCount
+	nextTargetSHA := targetSHA
+	if requireValidation && (targetSHA == nil || *targetSHA != candidateSHA) {
+		nextReplayCount++
+		target := candidateSHA
+		nextTargetSHA = &target
+	}
+	var targetValue any
+	if nextTargetSHA != nil {
+		targetValue = *nextTargetSHA
+	}
+	result, err := tx.Exec(
+		`UPDATE runs
+		 SET head_sha = ?, validation_target_sha = ?, validation_replay_count = ?,
+		     ci_ready_at = CASE WHEN ? THEN NULL ELSE ci_ready_at END, updated_at = ?
+		 WHERE id = ? AND status = ? AND head_sha = ? AND COALESCE(validation_replay_count, 0) = ?
+		   AND ((validation_target_sha IS NULL AND ? IS NULL) OR validation_target_sha = ?)
+		   AND custody_returned_at IS NULL AND COALESCE(push_active, 0) = ?`,
+		candidateSHA, targetValue, nextReplayCount, requireValidation, now(),
+		id, types.RunRunning, headSHA, replayCount, targetSHA, targetSHA, expectedPushActive,
+	)
+	if err != nil {
+		return replayCount, fmt.Errorf("advance run head sha: update: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return replayCount, fmt.Errorf("advance run head sha: update: %w", err)
+	}
+	if changed != 1 {
+		return replayCount, fmt.Errorf("advance run head sha: run changed concurrently")
+	}
+	if err := tx.Commit(); err != nil {
+		return replayCount, fmt.Errorf("advance run head sha: commit: %w", err)
+	}
+	return nextReplayCount, nil
+}
+
+// ResetActiveStepForRecovery changes one interrupted active step back to
+// pending without altering its round history. It is used only after daemon
+// recovery has independently validated the run/worktree/topology.
+func (d *DB) ResetActiveStepForRecovery(runID string, stepName types.StepName) error {
+	result, err := d.sql.Exec(
+		`UPDATE step_results
+		 SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL, findings_json = NULL, error = NULL,
+		     started_at = NULL, completed_at = NULL, last_activity_at = NULL, last_activity = NULL, agent_pid = NULL, auto_fix_limit = NULL
+		 WHERE run_id = ? AND step_name = ? AND status = ?`,
+		types.StepStatusPending, runID, stepName, types.StepStatusRunning,
+	)
+	if err != nil {
+		return fmt.Errorf("reset active step for recovery: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("reset active step for recovery: %w", err)
+	}
+	if count != 1 {
+		return fmt.Errorf("reset active step for recovery: active step changed or is missing")
 	}
 	return nil
 }

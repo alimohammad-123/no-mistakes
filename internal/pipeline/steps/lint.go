@@ -31,6 +31,9 @@ func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 				return lintOutcomeFromHousekeeping(sctx, stash)
 			}
 		}
+		if err := sctx.PreflightHeadMutation(); err != nil {
+			return nil, err
+		}
 		sctx.Log("no lint command configured, asking agent to lint and fix...")
 		reassessHistory := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
 		prompt := fmt.Sprintf(

@@ -291,6 +291,9 @@ func runHappyPath(t *testing.T, agentName string) {
 	h.Checkout("feature/e2e")
 	assertRootRecentRuns(t, h, rerun)
 	assertConfiguredCommandRun(t, h)
+	if agentName == "claude" {
+		assertFinalHeadConfiguredTestReplay(t, h)
+	}
 	assertSupersededRunCancellation(t, h)
 	assertCancelRunStopsActivePipeline(t, h)
 	assertAbortByRunIDReapsRunFromOutsideWorktree(t, h)
@@ -357,6 +360,14 @@ func cleanReviewScenario(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "scenario.yaml")
 	content := `actions:
+  - match: "report only what you could not resolve.\n\nContext:\n- branch: final-head-document-replay"
+    text: "updated final-head validation docs"
+    edits:
+      - path: "docs/final-head-validation.md"
+        new: "# Final-head validation\n"
+    structured:
+      findings: []
+      summary: "document final-head validation"
   - match: "report only what you could not resolve.\n\nContext:\n- branch: document-agent-error"
     text: "document agent error"
     edits:
@@ -1383,6 +1394,55 @@ func assertConfiguredCommandRun(t *testing.T, h *Harness) {
 	}
 }
 
+func assertFinalHeadConfiguredTestReplay(t *testing.T, h *Harness) {
+	t.Helper()
+	testHeadLog := filepath.Join(h.NMHome, "final-head-configured-test.log")
+	testCommand := filepath.Join(h.BinDir, "nm-final-head-test-e2e")
+	script := "#!/bin/sh\ngit rev-parse HEAD >> " + shellQuote(testHeadLog) + "\n"
+	if err := os.WriteFile(testCommand, []byte(script), 0o755); err != nil {
+		t.Fatalf("write final-head e2e Test command: %v", err)
+	}
+	config := "commands:\n  test: nm-final-head-test-e2e\n  lint: true\n"
+	h.CommitChange("final-head-document-replay", ".no-mistakes.yaml", config, "configure exact final-head validation")
+	h.PushToGate("final-head-document-replay")
+	run := h.WaitForRun("final-head-document-replay", 60*time.Second)
+	if run.Status != types.RunCompleted {
+		t.Fatalf("final-head replay run did not complete: status=%s error=%v", run.Status, deref(run.Error))
+	}
+	data, err := os.ReadFile(testHeadLog)
+	if err != nil {
+		t.Fatalf("read final-head Test log: %v", err)
+	}
+	heads := strings.Fields(string(data))
+	if len(heads) != 2 {
+		t.Fatalf("configured Test executions = %d (%v), want exactly initial + final-head replay", len(heads), heads)
+	}
+	if heads[0] == heads[1] {
+		t.Fatalf("Document commit did not invalidate initial Test head: %v", heads)
+	}
+	if heads[1] != run.HeadSHA {
+		t.Fatalf("last configured Test head = %s, final run head = %s", heads[1], run.HeadSHA)
+	}
+	upstream := h.UpstreamBranchSHA("final-head-document-replay")
+	if upstream != run.HeadSHA {
+		t.Fatalf("pushed head = %s, final run head = %s", upstream, run.HeadSHA)
+	}
+	invs := h.AgentInvocations()
+	documentCalls := 0
+	for _, inv := range invs {
+		if strings.Contains(inv.Prompt, "report only what you could not resolve.") && strings.Contains(inv.Prompt, "branch: final-head-document-replay") {
+			documentCalls++
+		}
+	}
+	if documentCalls != 2 {
+		t.Fatalf("Document convergence calls = %d, want 2", documentCalls)
+	}
+	t.Logf(
+		"final-head proof: initial_test=%s replay_test=%s persisted_final=%s pushed_upstream=%s document_passes=%d",
+		heads[0], heads[1], run.HeadSHA, upstream, documentCalls,
+	)
+}
+
 func assertInvalidConfigPushCleansWorktree(t *testing.T, h *Harness) {
 	t.Helper()
 	configPath := filepath.Join(h.NMHome, "config.yaml")
@@ -1993,18 +2053,35 @@ func waitForStepStatus(t *testing.T, h *Harness, branch string, stepName types.S
 
 func assertSupersededRunCancellation(t *testing.T, h *Harness) {
 	t.Helper()
-	slowCommand := filepath.Join(h.BinDir, "nm-superseded-test-e2e")
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 10\n"), 0o755); err != nil {
+	startedMarker := filepath.Join(h.NMHome, "superseded-test-started")
+	slowCommand := filepath.Join(h.BinDir, "nm-superseded-slow-test-e2e")
+	slowScript := "#!/bin/sh\nprintf started > " + shellQuote(startedMarker) + "\nsleep 30\n"
+	if err := os.WriteFile(slowCommand, []byte(slowScript), 0o755); err != nil {
 		t.Fatalf("write superseded slow test command: %v", err)
 	}
-	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-superseded-test-e2e\n  lint: true\n"
-	h.CommitChange("superseded-run", ".no-mistakes.yaml", config, "configure superseded slow test")
-	h.PushToGate("superseded-run")
-	first := waitForStepStatus(t, h, "superseded-run", types.StepTest, types.StepStatusRunning, 60*time.Second)
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("replace superseded test command with fast version: %v", err)
+	fastCommand := filepath.Join(h.BinDir, "nm-superseded-fast-test-e2e")
+	if err := os.WriteFile(fastCommand, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write superseding fast test command: %v", err)
 	}
-	h.CommitChange("superseded-run", "superseded-run.txt", "second push\n", "supersede active run")
+	slowConfig := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-superseded-slow-test-e2e\n  lint: true\n"
+	h.CommitChange("superseded-run", ".no-mistakes.yaml", slowConfig, "configure superseded slow test")
+	h.PushToGate("superseded-run")
+
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		if data, err := os.ReadFile(startedMarker); err == nil && string(data) == "started" {
+			break
+		}
+		if time.Now().After(deadline) {
+			h.dumpDebugState()
+			t.Fatal("superseded slow Test command did not start")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	first := waitForStepStatus(t, h, "superseded-run", types.StepTest, types.StepStatusRunning, 60*time.Second)
+
+	fastConfig := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-superseded-fast-test-e2e\n  lint: true\n"
+	supersedingHead := h.CommitChange("superseded-run", ".no-mistakes.yaml", fastConfig, "supersede active run")
 	h.PushToGate("superseded-run")
 	cancelled := waitForRunIDStatus(t, h, first.ID, types.RunCancelled, 60*time.Second)
 	if cancelled.Error == nil || !strings.Contains(*cancelled.Error, "superseded by new push") {
@@ -2017,6 +2094,21 @@ func assertSupersededRunCancellation(t *testing.T, h *Harness) {
 	if second.Status != types.RunCompleted {
 		t.Fatalf("superseding run did not complete: status=%s error=%v", second.Status, deref(second.Error))
 	}
+	gateDir := paths.WithRoot(h.NMHome).RepoDir(h.repoID())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	gateHead, err := h.runGit(ctx, gateDir, "rev-parse", "refs/heads/superseded-run")
+	if err != nil {
+		t.Fatalf("resolve superseding gate head: %v", err)
+	}
+	got := strings.TrimSpace(string(gateHead))
+	if got != supersedingHead {
+		t.Fatalf("gate source ref = %s, want superseding submitted head %s", got, supersedingHead)
+	}
+	t.Logf(
+		"superseded source-ref proof: cancelled_run=%s replacement_run=%s replacement_status=%s submitted_head=%s gate_source_ref=%s",
+		first.ID, second.ID, second.Status, supersedingHead, got,
+	)
 }
 
 func assertDifferentBranchDoesNotCancelActiveRun(t *testing.T, h *Harness) {
@@ -2167,32 +2259,26 @@ func assertFailingTestCommandRun(t *testing.T, h *Harness) {
 	time.Sleep(300 * time.Millisecond)
 	h.Respond(run.ID, types.StepTest, types.ActionApprove)
 	completed := h.WaitForRun("failing-test-command", 60*time.Second)
-	if completed.Status != types.RunCompleted {
-		t.Fatalf("failing test command run did not complete after approve: status=%s error=%v", completed.Status, deref(completed.Error))
+	if completed.Status != types.RunFailed || completed.Error == nil || !strings.Contains(*completed.Error, "without successful evidence") {
+		t.Fatalf("approved failing configured Test = status %s error %v, want fail-closed proof error", completed.Status, deref(completed.Error))
 	}
 	completedTestStep, ok := findStep(completed.Steps, types.StepTest)
 	if !ok {
-		t.Fatal("expected completed test step in failing test command run")
+		t.Fatal("expected failed test step in failing test command run")
 	}
-	if completedTestStep.Status != types.StepStatusCompleted {
-		t.Fatalf("expected completed test step after approve, got %s", completedTestStep.Status)
-	}
-	if completedTestStep.ExitCode == nil || *completedTestStep.ExitCode != 1 {
-		t.Fatalf("failing test command exit code = %v, want 1", completedTestStep.ExitCode)
-	}
-	if completedTestStep.DurationMS == nil {
-		t.Fatal("expected completed failing test step to expose execution duration")
+	if completedTestStep.Status != types.StepStatusFailed || completedTestStep.DurationMS == nil {
+		t.Fatalf("configured Test after approve = status %s duration %v, want failed with execution duration", completedTestStep.Status, completedTestStep.DurationMS)
 	}
 	if *completedTestStep.DurationMS > awaitingDurationMS+200 {
-		t.Fatalf("test step duration should exclude approval wait: awaiting=%dms completed=%dms", awaitingDurationMS, *completedTestStep.DurationMS)
+		t.Fatalf("test step duration should exclude approval wait: awaiting=%dms failed=%dms", awaitingDurationMS, *completedTestStep.DurationMS)
 	}
 	for _, stepName := range []types.StepName{types.StepDocument, types.StepLint, types.StepPush} {
 		step, ok := findStep(completed.Steps, stepName)
 		if !ok {
-			t.Fatalf("expected %s step after approving failing test command", stepName)
+			t.Fatalf("expected %s step record after failing configured Test", stepName)
 		}
-		if step.Status != types.StepStatusCompleted {
-			t.Fatalf("expected %s to continue after approved test step, got %s", stepName, step.Status)
+		if step.Status != types.StepStatusPending {
+			t.Fatalf("expected %s to remain pending without Test proof, got %s", stepName, step.Status)
 		}
 	}
 }

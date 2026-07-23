@@ -24,6 +24,9 @@ func (s *RebaseStep) Name() types.StepName { return types.StepRebase }
 const forkBranchRefPrefix = "refs/remotes/no-mistakes-push/"
 
 func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := sctx.PreflightHeadMutation(); err != nil {
+		return nil, err
+	}
 	ctx := sctx.Ctx
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
 	baseBranch := strings.TrimSpace(sctx.BaseBranch())
@@ -493,12 +496,8 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 		return nil, fmt.Errorf("resolve head after rebase: %w", err)
 	}
 	if headSHA != "" && headSHA != sctx.Run.HeadSHA {
-		sctx.Run.HeadSHA = headSHA
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
-			return nil, err
-		}
-		if _, err := sctx.BindSourceRef(); err != nil {
-			return nil, fmt.Errorf("bind source ref after rebase: %w", err)
+		if err := sctx.AdvanceHeadSHA(headSHA); err != nil {
+			return nil, fmt.Errorf("advance source ref after rebase: %w", err)
 		}
 		sctx.Log(fmt.Sprintf("updated head SHA to %s", shortSHA(headSHA)))
 	}

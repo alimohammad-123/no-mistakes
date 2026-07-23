@@ -87,6 +87,55 @@ func TestRecoverOnStartup_DoesNotDeleteActiveRunWorktree(t *testing.T) {
 	}
 }
 
+func TestRecoverOnStartup_PreservesTerminalWorktreeWithPendingHeadTransition(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	repo, err := d.InsertRepoWithID("repo1", "/nonexistent/work", "https://example.com/owner/repo1", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "headsha", "basesha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RecordSuccessfulTestHead(run.ID, "headsha"); err != nil {
+		t.Fatal(err)
+	}
+	sourceRef, err := run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.BeginRunHeadAdvance(
+		run.ID, sourceRef, "headsha", "candidatesha", true, 3, db.HeadAdvancePipeline,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	worktree := p.WorktreeDir(repo.ID, run.ID)
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupOrphanWorktrees(d, p)
+
+	if _, err := os.Stat(worktree); err != nil {
+		t.Fatalf("transition-owned worktree must survive cleanup: %v", err)
+	}
+}
+
 // TestRunWithOptions_RequiresSingletonLockBeforeRecovery proves the ordering
 // the fix depends on: when another process already holds the singleton lock
 // for this root, RunWithOptions must fail before ever calling

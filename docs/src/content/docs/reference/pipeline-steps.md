@@ -17,6 +17,7 @@ The steering still allows requested test evidence under the managed temporary `n
 Configured shell commands and one-shot agent subprocesses are scoped to their step: when the invocation exits, fails, or is cancelled, no-mistakes terminates remaining child processes it spawned so background workers do not outlive the run.
 When configured Test or Lint command output exceeds 64 KiB, the complete output remains in the authoritative step log while findings, IPC responses, and repair prompts receive a valid-UTF-8 head-and-tail projection capped at 64 KiB. The truncation marker reports the exact original and omitted byte counts and points to `no-mistakes axi logs --step <step> --full` for the complete output.
 Commits created by the shared Review, Test, Document, and Lint fix path use the configurable [`commit.fix_message`](/no-mistakes/reference/global-config/#commitfix_message) template.
+When `commands.test` is configured, no-mistakes persists the exact HEAD on which that command most recently succeeded and requires exact equality before Push, PR, or CI readiness, and before completing a run that reached validation. If Rebase proves the branch has no diff and skips the entire remaining pipeline, there is no delivery candidate and no Test proof is claimed. If Document, Lint, Push finalization, or a CI repair changes HEAD, the same run replays Test, Document, and Lint before delivery; unchanged HEAD reuses the existing proof. The loop is limited to three distinct stale heads, survives daemon recovery without resetting its budget, and fails closed on missing or ambiguous provenance. Repositories without a configured Test command retain agent/evidence testing without claiming deterministic command proof.
 
 ## Intent
 
@@ -88,7 +89,7 @@ Follow-up review passes use the history to avoid re-reporting user-ignored findi
 Runs baseline tests and gathers evidence for the intended behavior.
 
 **Behavior:**
-- If `commands.test` is set in trusted repo config: runs it first as a baseline via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows) and captures output. Non-zero exit produces `error` findings.
+- If `commands.test` is set in trusted repo config: invalidates any older proof for that HEAD, runs the command as a baseline via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows), and captures output. Exit zero records exact-HEAD proof; non-zero exit produces `error` findings and cannot be approved or skipped into delivery without a later successful replay.
 - During first policy adoption only, the user-owned global [`bootstrap.test`](/no-mistakes/reference/global-config/#bootstraptest) binding can supply that baseline command when the freshly pinned base proves policy absent. The exact binding is frozen before execution, only Test is authorized, and observing base-owned policy permanently retires bootstrap for that repository/base.
 - If `commands.test` is empty, or user intent is available after the baseline command passes: the agent validates the change with evidence-oriented tests or manual checks, returning structured findings with severity, description, and `action` (`no-op`, `auto-fix`, `ask-user`). For UI, HTML, CSS, browser, visual layout, or copy-placement changes, the agent attempts reviewer-visible visual evidence and explains in `testing_summary` when screenshots, images, videos, GIFs, or rendered HTML artifacts are not captured.
 - The step records the exact tests and checks it exercised in a `tested` array, may include a short natural-language `testing_summary`, and includes an `artifacts` array for reviewer-visible evidence; `path` artifacts may be repository-relative paths or absolute paths under the temporary `no-mistakes-evidence/<runID>` directory, `url` artifacts must be externally visible, and `content` artifacts should be short logs or command output shown directly in the PR.
@@ -146,7 +147,8 @@ Pushes the validated branch to the configured push target.
 **Behavior:**
 - If `commands.format` is set, runs it first
 - Stages in-repo test evidence artifacts when `test.evidence.store_in_repo` is enabled and the evidence directory is not ignored by Git
-- Commits any uncommitted agent changes with message `no-mistakes: apply agent fixes`
+- Commits any uncommitted agent changes with message `no-mistakes: apply agent fixes`; if that advances HEAD after configured Test, yields to the bounded validation replay before any network push
+- Pushes the exact proven object SHA rather than a mutable `HEAD` refspec
 - Without fork routing, the push target is the credentialled upstream URL resolved from the worktree's `origin` remote at run time (the DB stores a redacted copy)
 - With GitHub fork routing, the push target is `repos.fork_url`
 - Re-reads the push target via `git ls-remote` before pushing
@@ -177,7 +179,7 @@ Creates or updates a pull request.
 
 **Behavior:**
 - Checks for an existing PR on the branch
-- If one exists, updates it. If not, creates a new one.
+- If one exists, updates it. If not, creates a new one. When same-run recovery already has a stored PR URL, rediscovery must return that exact identity or the run fails closed instead of creating a replacement.
 - Uses the provider CLI for GitHub/GitLab, the `az` CLI for Azure DevOps, and the Bitbucket API for Bitbucket Cloud
 - For GitHub fork routing, keeps `gh --repo` pointed at the parent repository from `origin`, checks existing PRs with the bare branch name, filters matching PRs by head owner, and creates PRs with `--head <fork-owner>:<branch>`
 - PR title: agent-generated with user intent when available, in conventional commit format (`type(scope): description` or `type: description`); user-facing product impact should use `feat` or `fix` so release automation can pick it up; when a scope is used, it should be the primary affected real module/package from the changed paths and kept broad rather than file-level
@@ -212,7 +214,7 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 - The ready signal clears if checks start running again, new failures appear, provider state becomes uncertain, or the PR is merged, closed, or declined
 - Waits a 60s grace period before trusting empty results (CI checks may not have registered yet)
 - If CI failures or, on GitHub, GitLab, or Azure DevOps, a merge conflict are already known while other checks are still pending: waits for all checks to finish before attempting an auto-fix
-- On CI failure: fetches failed job logs (GitHub via `gh run view --log-failed`, GitLab via `glab ci trace`, Bitbucket Cloud via failed pipeline step logs; Azure DevOps has no first-class build-log command, so the agent fixes from the failing-check list without logs), sends them to the agent with user intent when available, and, if the agent produces changes, commits them and uses the same force-push safety guard as the push step
+- On CI failure: fetches failed job logs (GitHub via `gh run view --log-failed`, GitLab via `glab ci trace`, Bitbucket Cloud via failed pipeline step logs; Azure DevOps has no first-class build-log command, so the agent fixes from the failing-check list without logs), sends them to the agent with user intent when available, and, if the agent produces changes, commits them locally; with configured Test, the run replays validation before the ordinary Push step safely updates the same branch and PR
 - On GitHub, GitLab, or Azure DevOps merge conflict: asks the agent to rebase onto the run's latest frozen pipeline-base tip and make the smallest correct root-cause fix for the conflicts, using user intent when available
 - If both CI failures and a GitHub, GitLab, or Azure DevOps merge conflict are present: fixes both in the same attempt
 - If a fix attempt produces no changes: automatic mode leaves the failure undeduplicated so it can retry until the auto-fix limit, while manual fix mode returns immediately for manual intervention

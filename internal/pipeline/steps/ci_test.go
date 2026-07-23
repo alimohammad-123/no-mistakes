@@ -117,6 +117,24 @@ func TestCIStep_UsesStepEnvForCLIStartupChecks(t *testing.T) {
 	}
 }
 
+func TestCIStep_AllowsExactBoundaryProofToReachNonMutatingDelivery(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(
+		t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"},
+	)
+	sctx.Repo.UpstreamURL = "https://example.com/owner/repo"
+	completeHeadValidationAtCapacity(t, sctx, headSHA)
+
+	outcome, err := (&CIStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.Skipped {
+		t.Fatalf("CI outcome = %#v, want provider skip after eligibility", outcome)
+	}
+}
+
 func TestCIStep_InvalidPRURLReturnsError(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -493,6 +511,44 @@ func TestCIStep_CIWarningClearsPersistedReadiness(t *testing.T) {
 	}
 	if dbRun.CIReadyAt != nil {
 		t.Fatalf("expected CI warning to clear readiness, got %v", *dbRun.CIReadyAt)
+	}
+}
+
+func TestCIMonitorReadinessRefusesSupersededSourceRef(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, testedHead := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", testedHead)
+	if err := os.WriteFile(filepath.Join(dir, "superseding-ci.txt"), []byte("new push\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "superseding-ci.txt")
+	gitCmd(t, dir, "commit", "-m", "superseding CI push")
+	supersedingHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "--detach", testedHead)
+	gitCmd(t, dir, "update-ref", "refs/heads/feature", supersedingHead)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, testedHead, config.Commands{Test: "true"})
+	recordSuccessfulTestProof(t, sctx, testedHead)
+	var logs []string
+	sctx.Log = func(message string) { logs = append(logs, message) }
+
+	if got := logCIMonitorStatus(sctx, ciChecksPassedMsg, ""); got != "" {
+		t.Fatalf("monitor status = %q, want readiness withheld", got)
+	}
+	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.CIReadyAt != nil {
+		t.Fatalf("superseded run retained CI readiness at %d", *persisted.CIReadyAt)
+	}
+	for _, line := range logs {
+		if line == ciChecksPassedMsg {
+			t.Fatalf("superseded run reported checks passed: %v", logs)
+		}
+	}
+	if got := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); got != supersedingHead {
+		t.Fatalf("source ref = %s, want superseding head %s", got, supersedingHead)
 	}
 }
 

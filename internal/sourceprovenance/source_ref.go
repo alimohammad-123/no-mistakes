@@ -105,6 +105,25 @@ func BindCandidateIfUnchanged(ctx context.Context, workDir, ref, candidateSHA, e
 	return VerifyCandidateBinding(ctx, workDir, ref, candidateSHA)
 }
 
+// AdvanceCandidate moves a stable pipeline source ref from the run's previous
+// candidate to its new detached HEAD. A candidate already bound before a
+// durable-state retry is accepted idempotently; every other ref value is a
+// superseding receive-side move and is refused without being overwritten.
+func AdvanceCandidate(ctx context.Context, workDir, ref, candidateSHA, previousSHA string) error {
+	resolved, err := gitpkg.ResolveRef(ctx, workDir, ref)
+	if err != nil {
+		return fmt.Errorf("resolve pipeline source ref before advance: %w", err)
+	}
+	switch resolved {
+	case candidateSHA:
+		return BindCandidateIfUnchanged(ctx, workDir, ref, candidateSHA, candidateSHA)
+	case previousSHA:
+		return BindCandidateIfUnchanged(ctx, workDir, ref, candidateSHA, previousSHA)
+	default:
+		return fmt.Errorf("pipeline source ref binding mismatch: %s resolves to %s, want previous %s or candidate %s", ref, resolved, previousSHA, candidateSHA)
+	}
+}
+
 func VerifyCandidateBinding(ctx context.Context, workDir, ref, candidateSHA string) error {
 	if !strings.HasPrefix(ref, headsPrefix) {
 		return fmt.Errorf("source ref %q is not a local branch ref", ref)

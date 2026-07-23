@@ -2,12 +2,14 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -269,12 +271,43 @@ func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdSt
 		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
 	}
 	shellenv.ConfigureShellCommand(cmd)
+	var leaderKillApplied atomic.Bool
+	cancelCommand := cmd.Cancel
+	cmd.Cancel = func() error {
+		leaderErr := os.ErrProcessDone
+		if cmd.Process != nil {
+			leaderErr = cmd.Process.Kill()
+			if leaderErr == nil {
+				leaderKillApplied.Store(true)
+			}
+		}
+		groupErr := cancelCommand()
+		switch {
+		case groupErr == nil:
+			return nil
+		case leaderErr == nil && errors.Is(groupErr, os.ErrProcessDone):
+			return nil
+		case errors.Is(leaderErr, os.ErrProcessDone):
+			return groupErr
+		default:
+			return fmt.Errorf("kill command leader: %v; kill command group: %w", leaderErr, groupErr)
+		}
+	}
 	cmd.Dir = dir
 	if len(env) > 0 {
 		cmd.Env = mergeEnv(env)
 	}
 	out, err := shellenv.CombinedOutputShellCommand(cmd)
+	return classifyShellCommandResult(ctx, cmdStr, out, cmd, err, leaderKillApplied.Load())
+}
+
+func classifyShellCommandResult(ctx context.Context, cmdStr string, out []byte, cmd *exec.Cmd, err error, leaderKillApplied bool) (string, int, error) {
 	if err != nil {
+		if shellenv.CommandLeaderCanceled(cmd, err, leaderKillApplied) {
+			if cause := context.Cause(ctx); cause != nil {
+				return string(out), -1, fmt.Errorf("run command %q: %w", cmdStr, cause)
+			}
+		}
 		if ee, ok := err.(*exec.ExitError); ok {
 			return string(out), ee.ExitCode(), nil
 		}

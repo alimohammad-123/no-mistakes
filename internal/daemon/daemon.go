@@ -259,12 +259,13 @@ func writeDaemonPIDFile(path string, record daemonPIDFile) error {
 	return nil
 }
 
-// recoverOnStartup cleans up after a previous daemon crash by marking stale
-// runs/steps as failed, killing orphaned managed-server subprocesses
-// (opencode, rovodev), and removing orphaned worktree directories. It also
-// best-effort migrates gate bare repos in place so older installs pick up
-// the per-worktree hookspath isolation introduced for issue #122 when Git
-// supports config --worktree.
+// recoverOnStartup cleans up after a previous daemon crash by preserving only
+// validated parked gates and final-head validation runs, marking other stale
+// runs/steps as failed, killing orphaned managed-server subprocesses (opencode,
+// rovodev), and removing orphaned worktree directories. It also best-effort
+// migrates gate bare repos in place so older installs pick up the per-worktree
+// hookspath isolation introduced for issue #122 when Git supports config
+// --worktree.
 func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	reapOrphanedServers(p)
 	migrateGateConfigs(context.Background(), p)
@@ -367,6 +368,13 @@ func skipWorktreeCleanup(d *db.DB, runID string) (bool, string) {
 	}
 	if run != nil && (run.Status == types.RunPending || run.Status == types.RunRunning) {
 		return true, fmt.Sprintf("run %s is %s", runID, run.Status)
+	}
+	transition, transitionErr := d.GetRunHeadTransition(runID)
+	if transitionErr != nil {
+		return true, fmt.Sprintf("failed to look up run %s head transition: %v", runID, transitionErr)
+	}
+	if transition != nil {
+		return true, fmt.Sprintf("run %s has a pending head transition", runID)
 	}
 	// Preserve only a fully coherent legacy graceful-shutdown gate long enough
 	// for ordinary branch-matched AXI recovery to inspect its pipeline copy.

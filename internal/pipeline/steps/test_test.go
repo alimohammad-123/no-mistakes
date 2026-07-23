@@ -36,12 +36,37 @@ func TestTestStep_ConfiguredCommandSeesAuthoritativeSourceRef(t *testing.T) {
 	if outcome.NeedsApproval {
 		t.Fatalf("configured command failed: %s", outcome.Findings)
 	}
+	if outcome.TestedHeadSHA != headSHA {
+		t.Fatalf("configured Test proof = %q, want %q", outcome.TestedHeadSHA, headSHA)
+	}
 	data, err := os.ReadFile(observed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(data) != "refs/heads/feature" {
 		t.Fatalf("child saw %q", data)
+	}
+}
+
+func TestTestStep_ExactBoundaryProofSkipsMutationCapableEvidenceAgent(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(
+		t, ag, dir, baseSHA, headSHA, config.Commands{Test: "true"},
+	)
+	sctx.UserIntent = "prove the exact final candidate"
+	exhaustHeadValidationCapacity(t, sctx, headSHA)
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.TestedHeadSHA != headSHA {
+		t.Fatalf("tested head = %q, want %q", outcome.TestedHeadSHA, headSHA)
+	}
+	if len(ag.calls) != 0 {
+		t.Fatalf("evidence agent calls = %d, want 0", len(ag.calls))
 	}
 }
 
@@ -75,6 +100,7 @@ func TestTestStep_RefusesCandidateMismatchBeforeConfiguredCommand(t *testing.T) 
 	marker := filepath.Join(dir, "must-not-run")
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "echo ran > must-not-run"})
 	sctx.Run.HeadSHA = baseSHA
+	gitCmd(t, dir, "update-ref", "refs/heads/feature", baseSHA)
 	_, err := (&TestStep{}).Execute(sctx)
 	if err == nil || !strings.Contains(err.Error(), "pipeline candidate mismatch") {
 		t.Fatalf("error = %v", err)
@@ -119,6 +145,7 @@ func TestTestStep_ResumeRunsExactCommandWithCurrentPipelineCandidate(t *testing.
 	if err := database.UpdateRunHeadSHA(run.ID, candidate); err != nil {
 		t.Fatal(err)
 	}
+	gitCmd(t, dir, "update-ref", "refs/heads/fm/arena/source-ref", candidate)
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
