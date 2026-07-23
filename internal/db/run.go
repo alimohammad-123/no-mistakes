@@ -763,6 +763,52 @@ func (d *DB) GetRunHeadTransition(runID string) (*RunHeadTransition, error) {
 	return transition, nil
 }
 
+func (d *DB) ValidateRecoverableRunHeadTransition(transition *RunHeadTransition, maxReplays int) (*Run, error) {
+	if transition == nil || maxReplays <= 0 {
+		return nil, fmt.Errorf("validate recoverable run head transition: transition and replay bound are required")
+	}
+	run, err := d.GetRun(transition.RunID)
+	if err != nil {
+		return nil, fmt.Errorf("validate recoverable run head transition: %w", err)
+	}
+	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince != nil || run.CustodyReturnedAt != nil {
+		return nil, fmt.Errorf("validate recoverable run head transition: run is not active pipeline custody")
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		return nil, fmt.Errorf("validate recoverable run head transition: %w", err)
+	}
+	phase := HeadAdvancePipeline
+	if run.PushActive {
+		phase = HeadAdvancePush
+	}
+	if transition.RunID != run.ID ||
+		transition.SourceRef != ref ||
+		transition.PreviousSHA != run.HeadSHA ||
+		transition.CandidateSHA == "" ||
+		transition.CandidateSHA == run.HeadSHA ||
+		run.TestHeadSHA == nil ||
+		*run.TestHeadSHA != run.HeadSHA ||
+		transition.RequireValidation != true ||
+		transition.Phase != phase ||
+		transition.ExpectedPushActive != run.PushActive ||
+		!sameNullableString(transition.PriorTargetSHA, run.ValidationTargetSHA) ||
+		run.ValidationReplayCount < 0 ||
+		transition.PriorReplayCount != run.ValidationReplayCount ||
+		transition.OwnershipGeneration <= 0 ||
+		transition.OwnershipGeneration != run.HeadAdvanceGeneration {
+		return nil, fmt.Errorf("validate recoverable run head transition: transition claims do not match authoritative run state")
+	}
+	nextReplayCount := run.ValidationReplayCount + 1
+	if nextReplayCount > maxReplays ||
+		transition.NextReplayCount != nextReplayCount ||
+		transition.NextTargetSHA == nil ||
+		*transition.NextTargetSHA != transition.CandidateSHA {
+		return nil, fmt.Errorf("validate recoverable run head transition: replay claims exceed or contradict bounded policy")
+	}
+	return run, nil
+}
+
 func sameNullableString(left, right *string) bool {
 	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }
@@ -962,6 +1008,13 @@ func (d *DB) FinalizeRunHeadAdvance(transition *RunHeadTransition, recovering bo
 		return transition.PriorReplayCount, fmt.Errorf("finalize run head advance: commit: %w", err)
 	}
 	return transition.NextReplayCount, nil
+}
+
+func (d *DB) FinalizeRecoveredRunHeadAdvance(transition *RunHeadTransition, maxReplays int) (int, error) {
+	if _, err := d.ValidateRecoverableRunHeadTransition(transition, maxReplays); err != nil {
+		return 0, err
+	}
+	return d.FinalizeRunHeadAdvance(transition, true)
 }
 
 func (d *DB) AdvanceRunHeadSHA(id, previousSHA, candidateSHA string, requireValidation bool, phase HeadAdvancePhase) (int, error) {

@@ -272,6 +272,9 @@ func TestFinalizeRunHeadAdvanceRejectsCorruptDurableIntent(t *testing.T) {
 	if _, err := d.FinalizeRunHeadAdvance(transition, false); err == nil {
 		t.Fatal("finalized a corrupt durable transition")
 	}
+	if _, err := d.ValidateRecoverableRunHeadTransition(transition, 3); err == nil {
+		t.Fatal("validated a transition that no longer matches durable intent")
+	}
 	got, err := d.GetRun(run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -281,5 +284,119 @@ func TestFinalizeRunHeadAdvanceRejectsCorruptDurableIntent(t *testing.T) {
 	}
 	if pending, err := d.GetRunHeadTransition(run.ID); err != nil || pending == nil {
 		t.Fatalf("corrupt transition was cleared: %#v, err %v", pending, err)
+	}
+}
+
+func TestValidateRecoverableRunHeadTransitionRejectsEveryDerivedClaim(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate string
+	}{
+		{name: "source ref", mutate: `source_ref = 'refs/heads/other'`},
+		{name: "previous head", mutate: `previous_sha = 'other-head'`},
+		{name: "candidate head", mutate: `candidate_sha = 'head-1'`},
+		{name: "validation requirement", mutate: `require_validation = 0`},
+		{name: "phase", mutate: `phase = 'push'`},
+		{name: "push expectation", mutate: `expected_push_active = 1`},
+		{name: "prior target", mutate: `prior_target_sha = 'other-target'`},
+		{name: "next target", mutate: `next_target_sha = 'other-target'`},
+		{name: "prior replay count", mutate: `prior_replay_count = 2`},
+		{name: "next replay count", mutate: `next_replay_count = 2`},
+		{name: "ownership generation", mutate: `ownership_generation = ownership_generation + 1`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := openTestDB(t)
+			repo, _ := d.InsertRepo("/home/user/transition-"+tc.name, "git@github.com:user/project.git", "main")
+			run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+			if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.RecordSuccessfulTestHead(run.ID, "head-1"); err != nil {
+				t.Fatal(err)
+			}
+			ref, err := run.FrozenSourceRef()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, HeadAdvancePipeline); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.sql.Exec(`UPDATE run_head_transitions SET `+tc.mutate+` WHERE run_id = ?`, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			transition, err := d.GetRunHeadTransition(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.ValidateRecoverableRunHeadTransition(transition, 3); err == nil {
+				t.Fatal("validated corrupt derived transition claim")
+			}
+			got, err := d.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.HeadSHA != "head-1" || got.ValidationTargetSHA != nil {
+				t.Fatalf("corrupt claim changed run state: %#v", got)
+			}
+		})
+	}
+}
+
+func TestValidateRecoverableRunHeadTransitionEnforcesReplayBoundary(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/transition-replay-boundary", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RecordSuccessfulTestHead(run.ID, "head-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`UPDATE runs SET validation_replay_count = 3 WHERE id = ?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, HeadAdvancePipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ValidateRecoverableRunHeadTransition(transition, 3); err == nil {
+		t.Fatal("validated transition beyond bounded replay policy")
+	}
+}
+
+func TestValidateRecoverableRunHeadTransitionDerivesPushPhaseAndTestProof(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/transition-push-phase", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RecordSuccessfulTestHead(run.ID, "head-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunPushActive(run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, HeadAdvancePush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ValidateRecoverableRunHeadTransition(transition, 3); err != nil {
+		t.Fatalf("validate exact push transition: %v", err)
+	}
+	if _, err := d.sql.Exec(`UPDATE runs SET test_head_sha = NULL WHERE id = ?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ValidateRecoverableRunHeadTransition(transition, 3); err == nil {
+		t.Fatal("validated transition without authoritative Test proof")
 	}
 }

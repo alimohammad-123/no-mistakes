@@ -235,7 +235,8 @@ func (m *RunManager) prepareRecoveredHeadValidationRun(ctx context.Context, run 
 	if !samePath(resolveGitPath(workDir, commonDir), gateDir) {
 		return nil, fmt.Errorf("worktree does not belong to its gate repository")
 	}
-	if _, err := pipeline.RecoverRunHeadTransition(ctx, m.db, run, workDir); err != nil {
+	execSteps := m.steps()
+	if _, err := pipeline.RecoverRunHeadTransition(ctx, m.db, run, workDir, execSteps); err != nil {
 		return nil, err
 	}
 	headSHA, err := git.HeadSHA(ctx, workDir)
@@ -245,7 +246,6 @@ func (m *RunManager) prepareRecoveredHeadValidationRun(ctx context.Context, run 
 	if err := sourceprovenance.VerifyCandidateBinding(ctx, workDir, sourceRef, run.HeadSHA); err != nil {
 		return nil, fmt.Errorf("worktree source ref does not match run head: %w", err)
 	}
-	execSteps := m.steps()
 	if err := pipeline.ValidateHeadValidationRecovery(m.db, run, execSteps); err != nil {
 		return nil, err
 	}

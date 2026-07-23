@@ -214,6 +214,20 @@ func TestRecoverRunHeadTransitionFinalizesExactMovedRefOnce(t *testing.T) {
 	if err := database.RecordSuccessfulTestHead(run.ID, first); err != nil {
 		t.Fatal(err)
 	}
+	testResult, err := database.InsertStepResult(run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStep(testResult.ID, 0, 1, "test.log"); err != nil {
+		t.Fatal(err)
+	}
+	documentResult, err := database.InsertStepResult(run.ID, types.StepDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(documentResult.ID); err != nil {
+		t.Fatal(err)
+	}
 	ref, err := run.FrozenSourceRef()
 	if err != nil {
 		t.Fatal(err)
@@ -235,11 +249,23 @@ func TestRecoverRunHeadTransitionFinalizesExactMovedRefOnce(t *testing.T) {
 		t.Fatalf("run generation = %d, want %d", run.HeadAdvanceGeneration, transition.OwnershipGeneration)
 	}
 
-	recovered, err := RecoverRunHeadTransition(context.Background(), database, run, dir)
+	driftedSteps := []Step{newPassStep(types.StepTest), newPassStep(types.StepLint)}
+	if recovered, err := RecoverRunHeadTransition(context.Background(), database, run, dir, driftedSteps); err == nil || recovered {
+		t.Fatalf("drifted topology recovery = %v, err %v", recovered, err)
+	}
+	beforeRecovery, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeRecovery.HeadSHA != first || beforeRecovery.ValidationTargetSHA != nil {
+		t.Fatalf("drifted topology changed run state: %#v", beforeRecovery)
+	}
+	steps := []Step{newPassStep(types.StepTest), newPassStep(types.StepDocument)}
+	recovered, err := RecoverRunHeadTransition(context.Background(), database, run, dir, steps)
 	if err != nil || !recovered {
 		t.Fatalf("recover moved-ref boundary = %v, err %v", recovered, err)
 	}
-	recovered, err = RecoverRunHeadTransition(context.Background(), database, run, dir)
+	recovered, err = RecoverRunHeadTransition(context.Background(), database, run, dir, steps)
 	if err != nil || recovered {
 		t.Fatalf("repeat recovery = %v, err %v", recovered, err)
 	}
@@ -292,6 +318,23 @@ func TestRecoverRunHeadTransitionNeverRewindsSupersedingRef(t *testing.T) {
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
+	if err := database.RecordSuccessfulTestHead(run.ID, first); err != nil {
+		t.Fatal(err)
+	}
+	testResult, err := database.InsertStepResult(run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStep(testResult.ID, 0, 1, "test.log"); err != nil {
+		t.Fatal(err)
+	}
+	documentResult, err := database.InsertStepResult(run.ID, types.StepDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(documentResult.ID); err != nil {
+		t.Fatal(err)
+	}
 	ref, err := run.FrozenSourceRef()
 	if err != nil {
 		t.Fatal(err)
@@ -304,7 +347,8 @@ func TestRecoverRunHeadTransitionNeverRewindsSupersedingRef(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if recovered, err := RecoverRunHeadTransition(context.Background(), database, run, dir); err == nil || recovered {
+	steps := []Step{newPassStep(types.StepTest), newPassStep(types.StepDocument)}
+	if recovered, err := RecoverRunHeadTransition(context.Background(), database, run, dir, steps); err == nil || recovered {
 		t.Fatalf("superseding ref recovery = %v, err %v", recovered, err)
 	}
 	if gotRef := gitOutput(t, dir, "rev-parse", ref); gotRef != superseding {
@@ -319,6 +363,71 @@ func TestRecoverRunHeadTransitionNeverRewindsSupersedingRef(t *testing.T) {
 	}
 	if pending, err := database.GetRunHeadTransition(run.ID); err != nil || pending == nil {
 		t.Fatalf("superseding recovery cleared transition: %#v, err %v", pending, err)
+	}
+}
+
+func TestRecoverRunHeadTransitionRejectsInvalidCandidateBeforeRefMovement(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "user.name", "test"}, {"config", "user.email", "test@example.com"}} {
+		gitOutput(t, dir, args...)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "candidate"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOutput(t, dir, "add", "candidate")
+	gitOutput(t, dir, "commit", "-m", "first")
+	first := gitOutput(t, dir, "rev-parse", "HEAD")
+	gitOutput(t, dir, "checkout", "--detach")
+	ref := "refs/heads/fm/feature"
+	gitOutput(t, dir, "update-ref", ref, first)
+
+	database, err := db.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepo(dir, "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "fm/feature", first, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.RecordSuccessfulTestHead(run.ID, first); err != nil {
+		t.Fatal(err)
+	}
+	testResult, err := database.InsertStepResult(run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStep(testResult.ID, 0, 1, "test.log"); err != nil {
+		t.Fatal(err)
+	}
+	documentResult, err := database.InsertStepResult(run.ID, types.StepDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(documentResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BeginRunHeadAdvance(run.ID, ref, first, "not-a-commit", true, db.HeadAdvancePipeline); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	steps := []Step{newPassStep(types.StepTest), newPassStep(types.StepDocument)}
+	if recovered, err := RecoverRunHeadTransition(context.Background(), database, run, dir, steps); err == nil || recovered {
+		t.Fatalf("invalid candidate recovery = %v, err %v", recovered, err)
+	}
+	if got := gitOutput(t, dir, "rev-parse", ref); got != first {
+		t.Fatalf("invalid candidate moved source ref to %s", got)
 	}
 }
 

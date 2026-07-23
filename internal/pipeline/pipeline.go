@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -137,7 +139,7 @@ func (sctx *StepContext) advanceHeadSHA(candidateSHA string, phase db.HeadAdvanc
 	return nil
 }
 
-func RecoverRunHeadTransition(ctx context.Context, database *db.DB, run *db.Run, workDir string) (bool, error) {
+func RecoverRunHeadTransition(ctx context.Context, database *db.DB, run *db.Run, workDir string, steps []Step) (bool, error) {
 	if database == nil || run == nil {
 		return false, fmt.Errorf("recover run head transition: context is missing")
 	}
@@ -145,13 +147,67 @@ func RecoverRunHeadTransition(ctx context.Context, database *db.DB, run *db.Run,
 	if err != nil || transition == nil {
 		return false, err
 	}
-	ref, err := run.FrozenSourceRef()
+	authoritativeRun, err := database.ValidateRecoverableRunHeadTransition(transition, maxHeadValidationReplays)
 	if err != nil {
 		return false, err
 	}
-	if transition.SourceRef != ref || transition.PreviousSHA != run.HeadSHA ||
-		transition.OwnershipGeneration != run.HeadAdvanceGeneration || !transition.RequireValidation {
-		return false, fmt.Errorf("recover run head transition: durable transition does not match active run")
+	if authoritativeRun.ID != run.ID {
+		return false, fmt.Errorf("recover run head transition: authoritative run identity changed")
+	}
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		return false, fmt.Errorf("recover run head transition: read topology: %w", err)
+	}
+	if len(results) != len(steps) {
+		return false, fmt.Errorf("recover run head transition: topology has %d records for %d steps", len(results), len(steps))
+	}
+	activeStep := types.StepName("")
+	activeIndex := -1
+	testCompleted := false
+	for index, result := range results {
+		if result.StepName != steps[index].Name() || result.StepOrder != result.StepName.Order() {
+			return false, fmt.Errorf("recover run head transition: topology changed at step %d", index)
+		}
+		if result.StepName == types.StepTest && result.Status == types.StepStatusCompleted {
+			testCompleted = true
+		}
+		if result.Status == types.StepStatusRunning {
+			if activeStep != "" {
+				return false, fmt.Errorf("recover run head transition: topology has multiple active steps")
+			}
+			activeStep = result.StepName
+			activeIndex = index
+		}
+	}
+	if !testCompleted {
+		return false, fmt.Errorf("recover run head transition: topology lacks completed Test evidence")
+	}
+	validPhase := transition.Phase == db.HeadAdvancePipeline &&
+		(activeStep == types.StepDocument || activeStep == types.StepLint)
+	validPushPhase := transition.Phase == db.HeadAdvancePush &&
+		(activeStep == types.StepPush || activeStep == types.StepCI)
+	if !validPhase && !validPushPhase {
+		return false, fmt.Errorf("recover run head transition: phase does not match active topology")
+	}
+	for index, result := range results {
+		if index < activeIndex && result.Status != types.StepStatusCompleted && result.Status != types.StepStatusSkipped {
+			return false, fmt.Errorf("recover run head transition: predecessor %s is %s", result.StepName, result.Status)
+		}
+		if index > activeIndex && result.Status != types.StepStatusPending {
+			return false, fmt.Errorf("recover run head transition: successor %s is %s", result.StepName, result.Status)
+		}
+	}
+	for _, sha := range []string{transition.PreviousSHA, transition.CandidateSHA} {
+		if (len(sha) != 40 && len(sha) != 64) || strings.ToLower(sha) != sha {
+			return false, fmt.Errorf("recover run head transition: candidate provenance is not an exact commit")
+		}
+		if _, err := hex.DecodeString(sha); err != nil {
+			return false, fmt.Errorf("recover run head transition: candidate provenance is not an exact commit")
+		}
+		resolved, err := git.Run(ctx, workDir, "rev-parse", "--verify", sha+"^{commit}")
+		if err != nil || strings.TrimSpace(resolved) != sha {
+			return false, fmt.Errorf("recover run head transition: candidate provenance is not an exact commit")
+		}
 	}
 	headSHA, err := git.HeadSHA(ctx, workDir)
 	if err != nil {
@@ -165,10 +221,11 @@ func RecoverRunHeadTransition(ctx context.Context, database *db.DB, run *db.Run,
 	); err != nil {
 		return false, fmt.Errorf("recover run head transition: %w", err)
 	}
-	replayCount, err := database.FinalizeRunHeadAdvance(transition, true)
+	replayCount, err := database.FinalizeRecoveredRunHeadAdvance(transition, maxHeadValidationReplays)
 	if err != nil {
 		return false, err
 	}
+	*run = *authoritativeRun
 	run.HeadSHA = transition.CandidateSHA
 	run.ValidationTargetSHA = transition.NextTargetSHA
 	run.ValidationReplayCount = replayCount
