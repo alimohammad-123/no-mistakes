@@ -649,7 +649,7 @@ func TestPRStep_AppendsTestingSectionFromTestStep(t *testing.T) {
 			return &agent.Result{Output: payload}, nil
 		},
 	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "configured-test-command"})
 	sctx.Env = env
 
 	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
@@ -679,6 +679,7 @@ func TestPRStep_AppendsTestingSectionFromTestStep(t *testing.T) {
 	if _, err := sctx.DB.InsertStepRound(testStep.ID, 2, "auto_fix", nil, nil, 600); err != nil {
 		t.Fatal(err)
 	}
+	recordSuccessfulTestProof(t, sctx, headSHA)
 
 	step := &PRStep{}
 	if _, err := step.Execute(sctx); err != nil {
@@ -694,6 +695,35 @@ func TestPRStep_AppendsTestingSectionFromTestStep(t *testing.T) {
 	wantOrder := "## Risk Assessment\n\n⚠️ Medium: touches critical error handling\n\n## Testing\n\n- 🔧 **Test** - 1 issue found → auto-fixed ✅\n\n## Pipeline"
 	if !strings.Contains(ghLog, wantOrder) {
 		t.Fatalf("expected testing section between risk assessment and pipeline, got:\n%s", ghLog)
+	}
+}
+
+func TestPRStep_ConfiguredTestWithoutExactHeadProofNeverCallsGitHub(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	env, logFile := fakeGH(t, "")
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "configured-test-command"})
+	sctx.Env = env
+
+	testStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(testStep.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+
+	step := &PRStep{}
+	if _, err := step.Execute(sctx); err == nil || !strings.Contains(err.Error(), "configured Test proof is missing") {
+		t.Fatalf("expected missing exact-head proof rejection, got %v", err)
+	}
+	if len(ag.calls) != 0 {
+		t.Fatalf("PR content agent called %d times without exact-head proof", len(ag.calls))
+	}
+	if _, err := os.Stat(logFile); !os.IsNotExist(err) {
+		t.Fatalf("GitHub CLI log exists without exact-head proof: %v", err)
 	}
 }
 

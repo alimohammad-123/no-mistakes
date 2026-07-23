@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -45,8 +46,11 @@ func TestExecutor_ContextCancellation(t *testing.T) {
 	}
 
 	updated, _ := database.GetRun(run.ID)
-	if updated.Status != types.RunFailed {
-		t.Errorf("expected run status %q, got %q", types.RunFailed, updated.Status)
+	if updated.Status != types.RunCancelled {
+		t.Errorf("expected run status %q, got %q", types.RunCancelled, updated.Status)
+	}
+	if updated.Error == nil || *updated.Error != context.Canceled.Error() {
+		t.Errorf("expected ordinary cancellation error, got %v", updated.Error)
 	}
 }
 
@@ -154,5 +158,78 @@ func TestExecutor_ContextCancelCauseBetweenSteps(t *testing.T) {
 			got = *updated.Error
 		}
 		t.Errorf("expected run error to contain 'superseded by new push', got %q", got)
+	}
+}
+
+func TestExecutor_IndependentFailureWinsCancellationRace(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	stepErr := fmt.Errorf("independent test failure")
+	step := &adaptiveCallStep{
+		name: types.StepTest,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			close(started)
+			<-release
+			return nil, stepErr
+		},
+	}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Execute(ctx, run, repo, workDir)
+	}()
+
+	<-started
+	cancel()
+	close(release)
+
+	err := <-done
+	if err == nil || !strings.Contains(err.Error(), stepErr.Error()) {
+		t.Fatalf("expected independent failure, got %v", err)
+	}
+	updated, getErr := database.GetRun(run.ID)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if updated.Status != types.RunFailed {
+		t.Fatalf("expected run status %q, got %q", types.RunFailed, updated.Status)
+	}
+	if updated.Error == nil || *updated.Error != "step test failed: "+stepErr.Error() {
+		t.Fatalf("expected independent run error, got %v", updated.Error)
+	}
+}
+
+func TestExecutor_DeadlineRemainsFailure(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	step := &adaptiveCallStep{
+		name: types.StepTest,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			<-sctx.Ctx.Done()
+			return nil, sctx.Ctx.Err()
+		},
+	}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := exec.Execute(ctx, run, repo, workDir); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline error, got %v", err)
+	}
+	updated, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != types.RunFailed {
+		t.Fatalf("expected run status %q, got %q", types.RunFailed, updated.Status)
+	}
+	if updated.Error == nil || *updated.Error != context.DeadlineExceeded.Error() {
+		t.Fatalf("expected deadline run error, got %v", updated.Error)
 	}
 }

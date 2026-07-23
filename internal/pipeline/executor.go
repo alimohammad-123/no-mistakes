@@ -1123,8 +1123,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
 			}
 			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", redactedErr, &durationMS)
-			if errors.Is(err, context.Canceled) {
-				return false, fmt.Errorf("step %s failed: %w", stepName, context.Canceled)
+			if cause := authoritativeContextCause(ctx, err); cause != nil {
+				return false, fmt.Errorf("step %s failed: %w", stepName, cause)
 			}
 			return false, fmt.Errorf("step %s failed: %s", stepName, redactedErr)
 		}
@@ -1628,16 +1628,18 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		}
 	}
 	errMsg := err.Error()
-	if errors.Is(err, context.Canceled) {
-		for _, ctx := range ctxs {
-			if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
-				errMsg = cause.Error()
-				break
-			}
+	var cancellationCause error
+	for _, ctx := range ctxs {
+		if cause := authoritativeContextCause(ctx, err); cause != nil {
+			cancellationCause = cause
+			errMsg = cause.Error()
+			break
 		}
 	}
 	runStatus := types.RunFailed
-	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded {
+	if errors.Is(cancellationCause, context.Canceled) ||
+		errMsg == types.RunCancelReasonAbortedByUser ||
+		errMsg == types.RunCancelReasonSuperseded {
 		runStatus = types.RunCancelled
 	}
 	if dbErr := e.db.UpdateRunErrorStatus(run.ID, errMsg, runStatus); dbErr != nil {
@@ -1647,6 +1649,30 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	run.Error = &errMsg
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	return err
+}
+
+// authoritativeContextCause returns a context cause only when the step error
+// proves it came from that context. An unrelated failure that races with
+// cancellation remains the step failure, while direct and wrapped command
+// cancellation retain the caller's typed cause.
+func authoritativeContextCause(ctx context.Context, err error) error {
+	if ctx == nil || err == nil || ctx.Err() == nil {
+		return nil
+	}
+	cause := context.Cause(ctx)
+	if cause == nil {
+		return nil
+	}
+	if errors.Is(err, cause) {
+		return cause
+	}
+	if errors.Is(err, context.Canceled) && errors.Is(ctx.Err(), context.Canceled) {
+		return cause
+	}
+	if errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return cause
+	}
+	return nil
 }
 
 func daemonShutdownCancellation(ctx context.Context, err error) bool {
