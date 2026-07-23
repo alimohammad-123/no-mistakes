@@ -514,42 +514,97 @@ func CommitAll(ctx context.Context, dir, message string) error {
 	return err
 }
 
-// CopyLocalUserIdentity copies local user.name and user.email from srcDir into
-// dstDir. Missing values in srcDir are ignored.
-//
-// The write into dstDir uses per-worktree scope (`git config --worktree`) when
-// the repository has worktree config enabled. dstDir is typically a linked
-// worktree of the shared gate bare repo, where an unscoped `git config --local`
-// write lands in the bare's shared config and takes <bare>/config.lock. Two
-// runs starting concurrently on different branches of the same repo then race
-// on that single lock and one fails with "could not lock config file ...
-// config: File exists". Writing per-worktree puts each run's identity in its own
-// <bare>/worktrees/<id>/config.worktree, so concurrent startups never contend.
-// Older Git without `--worktree` support falls back to `--local`.
-func CopyLocalUserIdentity(ctx context.Context, srcDir, dstDir string) error {
-	for _, key := range []string{"user.name", "user.email"} {
-		value, err := Run(ctx, srcDir, "config", "--local", "--get", "--default", "", key)
+// LocalUserIdentity is the complete local commit identity copied into a
+// pipeline worktree. Empty values mean the registered source has no local
+// override; callers must not invent values from global config or commit data.
+type LocalUserIdentity struct {
+	Name  string
+	Email string
+}
+
+// ReadLocalUserIdentity snapshots user.name and user.email from local scope.
+func ReadLocalUserIdentity(ctx context.Context, srcDir string) (LocalUserIdentity, error) {
+	var identity LocalUserIdentity
+	for _, item := range []struct {
+		key string
+		dst *string
+	}{{"user.name", &identity.Name}, {"user.email", &identity.Email}} {
+		value, err := Run(ctx, srcDir, "config", "--local", "--get", "--default", "", item.key)
 		if err != nil {
-			return err
+			return LocalUserIdentity{}, err
 		}
-		if value == "" {
+		*item.dst = value
+	}
+	return identity, nil
+}
+
+// ReadWorktreeUserIdentity reads only per-worktree identity scope. It is used
+// by recovery to verify that no identity other than the registered source's
+// local values was introduced.
+func ReadWorktreeUserIdentity(ctx context.Context, dir string) (LocalUserIdentity, error) {
+	var identity LocalUserIdentity
+	for _, item := range []struct {
+		key string
+		dst *string
+	}{{"user.name", &identity.Name}, {"user.email", &identity.Email}} {
+		value, err := Run(ctx, dir, "config", "--worktree", "--get", "--default", "", item.key)
+		if err != nil {
+			return LocalUserIdentity{}, err
+		}
+		*item.dst = value
+	}
+	return identity, nil
+}
+
+// ApplyWorktreeUserIdentity writes only per-worktree identity. Recovery uses
+// this strict form so it can never fall back to changing the shared gate
+// configuration when the incident's isolated worktree configuration is absent.
+func ApplyWorktreeUserIdentity(ctx context.Context, dstDir string, identity LocalUserIdentity) error {
+	for _, item := range []struct {
+		key   string
+		value string
+	}{{"user.name", identity.Name}, {"user.email", identity.Email}} {
+		if item.value == "" {
 			continue
 		}
-		if _, err := Run(ctx, dstDir, "config", "--worktree", key, value); err != nil {
+		if _, err := Run(ctx, dstDir, "config", "--worktree", item.key, item.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ApplyLocalUserIdentity writes exactly the supplied non-empty values. The
+// write uses per-worktree scope when available so linked runs do not contend on
+// the shared gate config. Older Git retains the existing local-scope fallback.
+func ApplyLocalUserIdentity(ctx context.Context, dstDir string, identity LocalUserIdentity) error {
+	for _, item := range []struct {
+		key   string
+		value string
+	}{{"user.name", identity.Name}, {"user.email", identity.Email}} {
+		if item.value == "" {
+			continue
+		}
+		if _, err := Run(ctx, dstDir, "config", "--worktree", item.key, item.value); err != nil {
 			if !isWorktreeConfigWriteUnavailable(err) {
 				return err
 			}
-			// Per-worktree config is not usable here (Git too old for the
-			// flag, or the repo has multiple worktrees without
-			// extensions.worktreeConfig enabled). Fall back to the shared
-			// local config. Such gates also lack per-worktree isolation, so
-			// this matches the legacy behavior.
-			if _, err := Run(ctx, dstDir, "config", "--local", key, value); err != nil {
+			if _, err := Run(ctx, dstDir, "config", "--local", item.key, item.value); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// CopyLocalUserIdentity snapshots the source identity once and applies it to
+// dstDir. Missing values in srcDir are ignored.
+func CopyLocalUserIdentity(ctx context.Context, srcDir, dstDir string) error {
+	identity, err := ReadLocalUserIdentity(ctx, srcDir)
+	if err != nil {
+		return err
+	}
+	return ApplyLocalUserIdentity(ctx, dstDir, identity)
 }
 
 // isWorktreeConfigWriteUnavailable reports whether a `git config --worktree`

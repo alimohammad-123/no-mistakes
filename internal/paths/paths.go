@@ -67,6 +67,17 @@ func (p *Paths) WorktreeDir(repoID, runID string) string {
 	return filepath.Join(p.root, "worktrees", repoID, runID)
 }
 
+// InterruptedWorktreeRecoveryRoot holds privacy-safe ownership journals for
+// the one bounded legacy missing-worktree compatibility path. It is created
+// only after every read-only incident invariant passes, never by EnsureDirs.
+func (p *Paths) InterruptedWorktreeRecoveryRoot() string {
+	return filepath.Join(p.root, "recovery", "interrupted-worktrees")
+}
+
+func (p *Paths) InterruptedWorktreeRecoveryDir(repoID, runID string) string {
+	return filepath.Join(p.InterruptedWorktreeRecoveryRoot(), repoID, runID)
+}
+
 func (p *Paths) LogsDir() string { return filepath.Join(p.root, "logs") }
 func (p *Paths) RunLogDir(runID string) string {
 	return filepath.Join(p.root, "logs", runID)

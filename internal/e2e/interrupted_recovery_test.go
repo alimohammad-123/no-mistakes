@@ -96,6 +96,234 @@ func interruptedRecoveryScenario(t *testing.T) string {
 // TestAxiRunRecoversLegacyGracefulShutdownGate exercises the user-visible
 // upgrade path with the real binary and isolated daemon. The daemon is stopped
 // only inside this test's private NM_HOME.
+func TestAxiRunReconstructsAllowlistedMissingLegacyWorktree(t *testing.T) {
+	t.Setenv("NM_E2E_SYNTHETIC_INTERRUPTED_RECONSTRUCTION", "1")
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: interruptedRecoveryScenario(t)})
+	h.CommitChange("init-missing-interrupted", "seed.txt", "seed\n", "seed interrupted reconstruction")
+	initWorktree := h.AddWorktree("init-missing-interrupted")
+	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	if out, err := h.RunInDir(initWorktree, "daemon", "stop"); err != nil {
+		t.Fatalf("stop private daemon before repo-id fixture migration: %v\n%s", err, out)
+	}
+
+	oldRepoID := h.repoID()
+	p := paths.WithRoot(h.NMHome)
+	oldGate := p.RepoDir(oldRepoID)
+	newGate := p.RepoDir(arenaEvidenceRepoID)
+	if err := os.Rename(oldGate, newGate); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		_ = sqlDB.Close()
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.Exec(`UPDATE repos SET id = ? WHERE id = ?`, arenaEvidenceRepoID, oldRepoID); err != nil {
+		_ = sqlDB.Close()
+		t.Fatal(err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := h.runGit(context.Background(), h.WorkDir, "remote", "set-url", "no-mistakes", newGate); err != nil {
+		t.Fatalf("retarget synthetic gate remote: %v\n%s", err, out)
+	}
+
+	branch := "feature/interrupted-reconstruction"
+	intent := "preserve the same run while reconstructing only its missing pipeline worktree"
+	h.CommitChange(branch, "feature.txt", "unsafe\n", "add unsafe feature")
+	operator := h.AddWorktree(branch)
+	initialOut, err := h.RunInDir(operator, "axi", "run", "--intent", intent)
+	if err != nil || !strings.Contains(initialOut, "review-1") {
+		t.Fatalf("initial Review gate: %v\n%s", err, initialOut)
+	}
+	fixOut, err := h.RunInDir(operator, "axi", "respond", "--action", "fix", "--findings", "review-1")
+	if err != nil || !strings.Contains(fixOut, "status: fix_review") {
+		t.Fatalf("Review fix gate: %v\n%s", err, fixOut)
+	}
+	testOut, err := h.RunInDir(operator, "axi", "respond", "--action", "approve")
+	if err != nil || !strings.Contains(testOut, "step: test") || !strings.Contains(testOut, "test-1") {
+		t.Fatalf("Test gate: %v\n%s", err, testOut)
+	}
+
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs, err := database.GetRunsByRepo(arenaEvidenceRepoID)
+	if err != nil || len(runs) != 1 {
+		_ = database.Close()
+		t.Fatalf("synthetic incident runs = %d, %v", len(runs), err)
+	}
+	original := runs[0]
+	steps, err := database.GetStepsByRun(original.ID)
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	var testStep *db.StepResult
+	for _, step := range steps {
+		if step.StepName == types.StepTest {
+			testStep = step
+			break
+		}
+	}
+	if testStep == nil || testStep.Status != types.StepStatusAwaitingApproval {
+		_ = database.Close()
+		t.Fatalf("synthetic Test gate = %#v", testStep)
+	}
+	roundsBefore, _ := database.GetRoundsByStep(testStep.ID)
+	sessionsBefore, _ := database.GetRunAgentSessions(original.ID)
+	invocationsBefore := len(h.AgentInvocations())
+	operatorBefore := strings.TrimSpace(h.WorktreeRefSHA(branch))
+	gateBeforeBytes, gateErr := h.runGit(context.Background(), newGate, "rev-parse", "refs/heads/"+branch)
+	if gateErr != nil {
+		_ = database.Close()
+		t.Fatalf("read gate ref before reconstruction: %v\n%s", gateErr, gateBeforeBytes)
+	}
+	gateBefore := strings.TrimSpace(string(gateBeforeBytes))
+	remoteBeforeBytes, remoteErr := h.runGit(context.Background(), operator, "ls-remote", "origin", "refs/heads/"+branch)
+	if remoteErr != nil {
+		_ = database.Close()
+		t.Fatalf("read remote before reconstruction: %v\n%s", remoteErr, remoteBeforeBytes)
+	}
+	remoteBefore := strings.TrimSpace(string(remoteBeforeBytes))
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := h.RunInDir(operator, "daemon", "stop", "--force"); err != nil {
+		t.Fatalf("stop isolated daemon: %v\n%s", err, out)
+	}
+	oldWorktree := p.WorktreeDir(arenaEvidenceRepoID, original.ID)
+	if out, err := h.runGit(context.Background(), newGate, "worktree", "remove", "--force", oldWorktree); err != nil {
+		t.Fatalf("remove synthetic pipeline worktree: %v\n%s", err, out)
+	}
+
+	sqlDB, err = sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		_ = sqlDB.Close()
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE runs SET id = ? WHERE id = ?`, []any{arenaEvidenceRunID, original.ID}},
+		{`UPDATE step_results SET run_id = ? WHERE run_id = ?`, []any{arenaEvidenceRunID, original.ID}},
+		{`UPDATE run_agent_sessions SET run_id = ? WHERE run_id = ?`, []any{arenaEvidenceRunID, original.ID}},
+		{`UPDATE agent_invocations SET run_id = ? WHERE run_id = ?`, []any{arenaEvidenceRunID, original.ID}},
+		{`UPDATE runs SET status = 'failed', error = ?, awaiting_agent_since = NULL, source_ref = NULL, updated_at = ? WHERE id = ?`, []any{db.LegacyDaemonShutdownError, now, arenaEvidenceRunID}},
+		{`UPDATE step_results SET status = 'failed', error = ?, completed_at = ?, last_activity_at = ?, last_activity = 'step failed: daemon shutting down', agent_pid = NULL WHERE id = ?`, []any{db.LegacyDaemonShutdownError, now, now, testStep.ID}},
+	}
+	for _, statement := range statements {
+		if _, err := sqlDB.Exec(statement.query, statement.args...); err != nil {
+			_ = sqlDB.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reconstructedOut, err := h.RunInDir(operator, "axi", "run", "--intent", intent)
+	if err != nil {
+		t.Fatalf("reconstruct missing interrupted Test gate: %v\n%s", err, reconstructedOut)
+	}
+	for _, want := range []string{arenaEvidenceRunID, "step: test", "status: awaiting_approval", "test-1"} {
+		if !strings.Contains(reconstructedOut, want) {
+			t.Errorf("reconstructed output missing %q:\n%s", want, reconstructedOut)
+		}
+	}
+	reconstructedWorktree := p.WorktreeDir(arenaEvidenceRepoID, arenaEvidenceRunID)
+	if out, err := h.runGit(context.Background(), reconstructedWorktree, "rev-parse", "HEAD"); err != nil || strings.TrimSpace(string(out)) != original.HeadSHA {
+		t.Fatalf("reconstructed worktree HEAD = %s, %v, want %s", strings.TrimSpace(string(out)), err, original.HeadSHA)
+	}
+	commonBytes, commonErr := h.runGit(context.Background(), reconstructedWorktree, "rev-parse", "--git-common-dir")
+	if commonErr != nil {
+		t.Fatalf("reconstructed common dir: %v\n%s", commonErr, commonBytes)
+	}
+	common := strings.TrimSpace(string(commonBytes))
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(reconstructedWorktree, common)
+	}
+	resolvedCommon, _ := filepath.EvalSymlinks(common)
+	resolvedGate, _ := filepath.EvalSymlinks(newGate)
+	if filepath.Clean(resolvedCommon) != filepath.Clean(resolvedGate) {
+		t.Fatalf("reconstructed common dir = %q, want %q", resolvedCommon, resolvedGate)
+	}
+	statusBytes, statusErr := h.runGit(context.Background(), reconstructedWorktree, "status", "--porcelain=v1")
+	if statusErr != nil || strings.TrimSpace(string(statusBytes)) != "" {
+		t.Fatalf("reconstructed worktree is dirty: %v\n%s", statusErr, statusBytes)
+	}
+	gateAfterBytes, gateErr := h.runGit(context.Background(), newGate, "rev-parse", "refs/heads/"+branch)
+	remoteAfterBytes, remoteErr := h.runGit(context.Background(), operator, "ls-remote", "origin", "refs/heads/"+branch)
+	if gateErr != nil || strings.TrimSpace(string(gateAfterBytes)) != gateBefore || strings.TrimSpace(h.WorktreeRefSHA(branch)) != operatorBefore ||
+		remoteErr != nil || strings.TrimSpace(string(remoteAfterBytes)) != remoteBefore {
+		t.Fatalf("reconstruction moved refs: gate=%q/%q operator=%q/%q remote=%q/%q errors=%v/%v",
+			strings.TrimSpace(string(gateAfterBytes)), gateBefore, strings.TrimSpace(h.WorktreeRefSHA(branch)), operatorBefore,
+			strings.TrimSpace(string(remoteAfterBytes)), remoteBefore, gateErr, remoteErr)
+	}
+	database, err = db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs, _ = database.GetRunsByRepo(arenaEvidenceRepoID)
+	roundsAfter, _ := database.GetRoundsByStep(testStep.ID)
+	sessionsAfter, _ := database.GetRunAgentSessions(arenaEvidenceRunID)
+	if len(runs) != 1 || runs[0].ID != arenaEvidenceRunID || len(roundsAfter) != len(roundsBefore) || len(sessionsAfter) != len(sessionsBefore) {
+		_ = database.Close()
+		t.Fatalf("reconstruction changed durable identity: runs=%d rounds=%d/%d sessions=%d/%d", len(runs), len(roundsAfter), len(roundsBefore), len(sessionsAfter), len(sessionsBefore))
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(h.AgentInvocations()); got != invocationsBefore {
+		t.Fatalf("reconstruction invoked an agent before response: %d -> %d", invocationsBefore, got)
+	}
+
+	resumeOut, err := h.RunInDir(operator, "axi", "respond", "--action", "fix", "--findings", "test-1")
+	if err != nil {
+		t.Fatalf("respond to reconstructed Test gate: %v\n%s", err, resumeOut)
+	}
+	for i := 0; i < 4 && strings.Contains(resumeOut, "gate:"); i++ {
+		resumeOut, err = h.RunInDir(operator, "axi", "respond", "--action", "approve")
+		if err != nil {
+			t.Fatalf("approve post-reconstruction gate: %v\n%s", err, resumeOut)
+		}
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		database, openErr := db.Open(p.DB())
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		finished, getErr := database.GetRun(arenaEvidenceRunID)
+		_ = database.Close()
+		if getErr == nil && finished != nil && finished.Status == types.RunCompleted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("same reconstructed run did not complete; last output:\n%s", resumeOut)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+const (
+	arenaEvidenceRepoID = "935b6bc75a9a"
+	arenaEvidenceRunID  = "01KY4FMNYM4AX8PA9MY92QMHN4"
+)
+
 func TestAxiRunRecoversLegacyGracefulShutdownGate(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: interruptedRecoveryScenario(t)})
 	h.CommitChange("init-interrupted", "seed.txt", "seed\n", "seed interrupted recovery")
