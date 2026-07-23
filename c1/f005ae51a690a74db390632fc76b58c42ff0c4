@@ -1,0 +1,61 @@
+internal/pipeline/steps/ci_commit_test.go
+  s_bca92e9b5fd908::t_afae85357a0972 107
+internal/pipeline/steps/push.go
+  s_bca92e9b5fd908::t_1b96d5e26cda82 32-34,50-52,168-169
+  s_bca92e9b5fd908::t_74298cdd06d9eb 170
+internal/pipeline/steps/test.go
+  s_bca92e9b5fd908::t_8d0e2254666284 6,13,146-150,153-154
+internal/pipeline/executor_head_validation_test.go
+  s_bca92e9b5fd908::t_0b94316009fbaf 41,48,303-330
+  s_bca92e9b5fd908::t_0f7435f095e9bb 331-332
+internal/pipeline/steps/test_test.go
+  s_bca92e9b5fd908::t_35eafc20ef2bfa 51-72
+internal/pipeline/steps/helpers_test.go
+  s_bca92e9b5fd908::t_1f620b5c06fb44 435-449
+  s_bca92e9b5fd908::t_afae85357a0972 450-458
+internal/pipeline/steps/pr_test.go
+  s_bca92e9b5fd908::t_1f620b5c06fb44 48,51-52,56,62,64-65,74-80
+  s_bca92e9b5fd908::t_0236a3f359fc05 57-58
+internal/pipeline/steps/lint.go
+  s_bca92e9b5fd908::t_1b96d5e26cda82 34-35
+  s_bca92e9b5fd908::t_d5c1d715bfd679 36
+internal/db/head_validation_test.go
+  s_bca92e9b5fd908::t_e438caac2094a2 584-586
+  s_bca92e9b5fd908::t_0236a3f359fc05 4
+  s_bca92e9b5fd908::t_1f620b5c06fb44 499-510,547-574,583,587-641
+  s_bca92e9b5fd908::t_daebb054d63a32 520-546
+  s_bca92e9b5fd908::t_8d096c0a2fb734 496-498,575-582
+  s_bca92e9b5fd908::t_a4ad554dd75b7c 642
+internal/pipeline/pipeline.go
+  s_bca92e9b5fd908::t_1b96d5e26cda82 287-292
+internal/pipeline/steps/push_test.go
+  s_bca92e9b5fd908::t_afae85357a0972 106,224
+  s_bca92e9b5fd908::t_1f620b5c06fb44 149,172-200
+  s_bca92e9b5fd908::t_cb03af249dbac5 201-202
+internal/pipeline/steps/ci_test.go
+  s_bca92e9b5fd908::t_41ec5ff7e72d3f 120-137
+  s_bca92e9b5fd908::t_afae85357a0972 531
+internal/db/run.go
+  s_bca92e9b5fd908::t_8d0e2254666284 6,15-16,723
+  s_bca92e9b5fd908::t_29391ba0b2ffbc 702,704-705,707,716-718,744,747-748,750-753,765
+  s_bca92e9b5fd908::t_1b96d5e26cda82 734-743,745-746,749,754-764,766-770
+  s_bca92e9b5fd908::t_e438caac2094a2 1085,1103,1106,1108,1113-1114
+internal/branchsync/recover_test.go
+  s_bca92e9b5fd908::t_41ec5ff7e72d3f 138-197
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "c1f005ae51a690a74db390632fc76b58c42ff0c4",
+  "prompts": {},
+  "sessions": {
+    "s_bca92e9b5fd908": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8e5a-c081-7871-9b60-ad7062e8ebbd",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
