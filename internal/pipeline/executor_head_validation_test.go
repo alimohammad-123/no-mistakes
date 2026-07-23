@@ -66,6 +66,120 @@ func (s *headMutatingStep) Execute(sctx *StepContext) (*StepOutcome, error) {
 	return &StepOutcome{}, nil
 }
 
+type testFixHeadStep struct {
+	calls        int
+	mutateOnCall int
+	failOnMutate bool
+}
+
+func (s *testFixHeadStep) Name() types.StepName { return types.StepTest }
+
+func (s *testFixHeadStep) Execute(sctx *StepContext) (*StepOutcome, error) {
+	s.calls++
+	if s.calls == s.mutateOnCall {
+		if err := sctx.DB.UpdateStepStatus(sctx.StepResultID, types.StepStatusFixing); err != nil {
+			return nil, err
+		}
+		path := filepath.Join(sctx.WorkDir, fmt.Sprintf("test-fix-%d", s.calls))
+		if err := os.WriteFile(path, []byte("test fix"), 0o644); err != nil {
+			return nil, err
+		}
+		if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "add", filepath.Base(path)); err != nil {
+			return nil, err
+		}
+		if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "commit", "-m", "fix configured test"); err != nil {
+			return nil, err
+		}
+		head, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+		if err != nil {
+			return nil, err
+		}
+		if err := sctx.AdvanceHeadSHA(head); err != nil {
+			return nil, err
+		}
+		if s.failOnMutate {
+			return nil, errors.New("configured Test still fails")
+		}
+	}
+	return &StepOutcome{TestedHeadSHA: sctx.Run.HeadSHA}, nil
+}
+
+func TestExecutor_InitialTestFixCommitNeedsNoReplay(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := initExecutorGitRepo(t, database, run)
+	testStep := &testFixHeadStep{mutateOnCall: 1}
+	cfg := &config.Config{}
+	cfg.Commands.Test = "configured-test-command"
+	exec := NewExecutor(database, p, cfg, nil, []Step{
+		testStep, newPassStep(types.StepDocument), newPassStep(types.StepLint),
+	}, nil)
+
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	got, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunCompleted || got.ValidationReplayCount != 0 ||
+		got.ValidationTargetSHA != nil || got.TestHeadSHA == nil || *got.TestHeadSHA != got.HeadSHA {
+		t.Fatalf("initial Test fix state = %#v", got)
+	}
+}
+
+func TestExecutor_TestFixCommitRetargetsActiveReplay(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := initExecutorGitRepo(t, database, run)
+	testStep := &testFixHeadStep{mutateOnCall: 2}
+	document := &headMutatingStep{name: types.StepDocument, mutateFirst: true}
+	cfg := &config.Config{}
+	cfg.Commands.Test = "configured-test-command"
+	exec := NewExecutor(database, p, cfg, nil, []Step{
+		testStep, document, newPassStep(types.StepLint), newPassStep(types.StepPush),
+	}, nil)
+
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	got, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunCompleted || got.ValidationReplayCount != 2 ||
+		got.ValidationTargetSHA != nil || got.TestHeadSHA == nil || *got.TestHeadSHA != got.HeadSHA {
+		t.Fatalf("replay Test fix state = %#v", got)
+	}
+	if testStep.calls != 2 || document.calls != 2 {
+		t.Fatalf("calls = Test %d Document %d, want 2/2", testStep.calls, document.calls)
+	}
+}
+
+func TestExecutor_TestFixFailureKeepsRetargetedProofStale(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := initExecutorGitRepo(t, database, run)
+	testStep := &testFixHeadStep{mutateOnCall: 2, failOnMutate: true}
+	document := &headMutatingStep{name: types.StepDocument, mutateFirst: true}
+	push := newPassStep(types.StepPush)
+	cfg := &config.Config{}
+	cfg.Commands.Test = "configured-test-command"
+	exec := NewExecutor(database, p, cfg, nil, []Step{
+		testStep, document, newPassStep(types.StepLint), push,
+	}, nil)
+
+	if err := exec.Execute(context.Background(), run, repo, workDir); err == nil {
+		t.Fatal("Execute() succeeded after configured Test fix failure")
+	}
+	got, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunFailed || got.ValidationTargetSHA == nil ||
+		*got.ValidationTargetSHA != got.HeadSHA || got.ValidationReplayCount != 2 ||
+		got.TestHeadSHA != nil || push.callCount() != 0 {
+		t.Fatalf("failed Test retarget state = %#v, push calls %d", got, push.callCount())
+	}
+}
+
 func TestExecutor_DocumentCommitReplaysConfiguredTestAtFinalHead(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := initExecutorGitRepo(t, database, run)

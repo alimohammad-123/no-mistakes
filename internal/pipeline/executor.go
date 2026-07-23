@@ -485,7 +485,7 @@ func ValidateHeadValidationRecovery(database *db.DB, run *db.Run, steps []Step) 
 			if pendingSeen || runningSeen {
 				return fmt.Errorf("head-validation recovery has completed step %s after an interrupted suffix", results[index].StepName)
 			}
-		case types.StepStatusRunning:
+		case types.StepStatusRunning, types.StepStatusFixing:
 			if pendingSeen || runningSeen {
 				return fmt.Errorf("head-validation recovery has multiple active suffix steps")
 			}

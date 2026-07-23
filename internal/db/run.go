@@ -782,13 +782,17 @@ func (d *DB) ValidateRecoverableRunHeadTransition(transition *RunHeadTransition,
 	if run.PushActive {
 		phase = HeadAdvancePush
 	}
+	replayRetarget := run.TestHeadSHA == nil &&
+		run.ValidationTargetSHA != nil &&
+		*run.ValidationTargetSHA == run.HeadSHA &&
+		transition.Phase == HeadAdvancePipeline
+	staleProof := run.TestHeadSHA != nil && *run.TestHeadSHA == run.HeadSHA
 	if transition.RunID != run.ID ||
 		transition.SourceRef != ref ||
 		transition.PreviousSHA != run.HeadSHA ||
 		transition.CandidateSHA == "" ||
 		transition.CandidateSHA == run.HeadSHA ||
-		run.TestHeadSHA == nil ||
-		*run.TestHeadSHA != run.HeadSHA ||
+		(!staleProof && !replayRetarget) ||
 		transition.RequireValidation != true ||
 		transition.Phase != phase ||
 		transition.ExpectedPushActive != run.PushActive ||
@@ -798,6 +802,26 @@ func (d *DB) ValidateRecoverableRunHeadTransition(transition *RunHeadTransition,
 		transition.OwnershipGeneration <= 0 ||
 		transition.OwnershipGeneration != run.HeadAdvanceGeneration {
 		return nil, fmt.Errorf("validate recoverable run head transition: transition claims do not match authoritative run state")
+	}
+	if replayRetarget {
+		var activeTestCount int
+		if err := d.sql.QueryRow(
+			`SELECT COUNT(*) FROM step_results
+			 WHERE run_id = ? AND step_name = ? AND status IN (?, ?)`,
+			run.ID, types.StepTest, types.StepStatusRunning, types.StepStatusFixing,
+		).Scan(&activeTestCount); err != nil {
+			return nil, fmt.Errorf("validate recoverable run head transition: read active Test state: %w", err)
+		}
+		var activeCount int
+		if err := d.sql.QueryRow(
+			`SELECT COUNT(*) FROM step_results WHERE run_id = ? AND status IN (?, ?)`,
+			run.ID, types.StepStatusRunning, types.StepStatusFixing,
+		).Scan(&activeCount); err != nil {
+			return nil, fmt.Errorf("validate recoverable run head transition: read active step state: %w", err)
+		}
+		if activeTestCount != 1 || activeCount != 1 {
+			return nil, fmt.Errorf("validate recoverable run head transition: replay retarget lacks exact active Test state")
+		}
 	}
 	nextReplayCount := run.ValidationReplayCount + 1
 	if nextReplayCount > maxReplays ||
@@ -829,9 +853,9 @@ func sameRunHeadTransition(left, right *RunHeadTransition) bool {
 		left.OwnershipGeneration == right.OwnershipGeneration
 }
 
-func (d *DB) BeginRunHeadAdvance(id, sourceRef, previousSHA, candidateSHA string, requireValidation bool, phase HeadAdvancePhase) (*RunHeadTransition, error) {
-	if strings.TrimSpace(sourceRef) == "" || strings.TrimSpace(previousSHA) == "" || strings.TrimSpace(candidateSHA) == "" {
-		return nil, fmt.Errorf("begin run head advance: source ref, previous SHA, and candidate SHA are required")
+func (d *DB) BeginRunHeadAdvance(id, sourceRef, previousSHA, candidateSHA string, requireValidation bool, maxReplays int, phase HeadAdvancePhase) (*RunHeadTransition, error) {
+	if strings.TrimSpace(sourceRef) == "" || strings.TrimSpace(previousSHA) == "" || strings.TrimSpace(candidateSHA) == "" || maxReplays <= 0 {
+		return nil, fmt.Errorf("begin run head advance: source ref, SHAs, and replay bound are required")
 	}
 	expectedPushActive, err := headAdvancePushActive(phase)
 	if err != nil {
@@ -845,16 +869,17 @@ func (d *DB) BeginRunHeadAdvance(id, sourceRef, previousSHA, candidateSHA string
 
 	var status types.RunStatus
 	var headSHA string
+	var testHeadSHA *string
 	var targetSHA *string
 	var replayCount int
 	var generation int64
 	var custodyReturnedAt *int64
 	var pushActive bool
 	if err := tx.QueryRow(
-		`SELECT status, head_sha, validation_target_sha, COALESCE(validation_replay_count, 0),
+		`SELECT status, head_sha, test_head_sha, validation_target_sha, COALESCE(validation_replay_count, 0),
 		        COALESCE(head_advance_generation, 0), custody_returned_at, COALESCE(push_active, 0)
 		 FROM runs WHERE id = ?`, id,
-	).Scan(&status, &headSHA, &targetSHA, &replayCount, &generation, &custodyReturnedAt, &pushActive); err != nil {
+	).Scan(&status, &headSHA, &testHeadSHA, &targetSHA, &replayCount, &generation, &custodyReturnedAt, &pushActive); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("begin run head advance: run is missing")
 		}
@@ -863,6 +888,37 @@ func (d *DB) BeginRunHeadAdvance(id, sourceRef, previousSHA, candidateSHA string
 	if status != types.RunRunning || custodyReturnedAt != nil || pushActive != expectedPushActive || headSHA != previousSHA {
 		return nil, fmt.Errorf("begin run head advance: run head, custody, or phase changed")
 	}
+	if targetSHA != nil && *targetSHA != headSHA {
+		return nil, fmt.Errorf("begin run head advance: active replay target does not match run head")
+	}
+	replayRetarget := testHeadSHA == nil && targetSHA != nil && *targetSHA == headSHA
+	staleProof := testHeadSHA != nil && *testHeadSHA == headSHA && *testHeadSHA != candidateSHA
+	if requireValidation != (staleProof || replayRetarget) {
+		return nil, fmt.Errorf("begin run head advance: validation policy does not match authoritative proof state")
+	}
+	if replayRetarget {
+		if phase != HeadAdvancePipeline {
+			return nil, fmt.Errorf("begin run head advance: replay retarget is outside Test pipeline custody")
+		}
+		var activeTestCount int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM step_results
+			 WHERE run_id = ? AND step_name = ? AND status IN (?, ?)`,
+			id, types.StepTest, types.StepStatusRunning, types.StepStatusFixing,
+		).Scan(&activeTestCount); err != nil {
+			return nil, fmt.Errorf("begin run head advance: read active Test state: %w", err)
+		}
+		var activeCount int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM step_results WHERE run_id = ? AND status IN (?, ?)`,
+			id, types.StepStatusRunning, types.StepStatusFixing,
+		).Scan(&activeCount); err != nil {
+			return nil, fmt.Errorf("begin run head advance: read active step state: %w", err)
+		}
+		if activeTestCount != 1 || activeCount != 1 {
+			return nil, fmt.Errorf("begin run head advance: replay retarget lacks exact active Test state")
+		}
+	}
 
 	nextReplayCount := replayCount
 	nextTargetSHA := targetSHA
@@ -870,6 +926,9 @@ func (d *DB) BeginRunHeadAdvance(id, sourceRef, previousSHA, candidateSHA string
 		nextReplayCount++
 		target := candidateSHA
 		nextTargetSHA = &target
+	}
+	if nextReplayCount > maxReplays {
+		return nil, fmt.Errorf("final-head validation did not converge after %d replay attempts", maxReplays)
 	}
 	transition := &RunHeadTransition{
 		RunID:               id,

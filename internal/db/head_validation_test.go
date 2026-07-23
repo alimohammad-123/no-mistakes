@@ -216,11 +216,11 @@ func TestRunHeadTransitionPersistsBeforeFinalizationAndIsIdempotent(t *testing.T
 		t.Fatal(err)
 	}
 
-	transition, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, HeadAdvancePipeline)
+	transition, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, 3, HeadAdvancePipeline)
 	if err != nil {
 		t.Fatal(err)
 	}
-	retry, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, HeadAdvancePipeline)
+	retry, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, 3, HeadAdvancePipeline)
 	if err != nil {
 		t.Fatalf("repeat begin: %v", err)
 	}
@@ -256,11 +256,14 @@ func TestFinalizeRunHeadAdvanceRejectsCorruptDurableIntent(t *testing.T) {
 	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
+	if err := d.RecordSuccessfulTestHead(run.ID, "head-1"); err != nil {
+		t.Fatal(err)
+	}
 	ref, err := run.FrozenSourceRef()
 	if err != nil {
 		t.Fatal(err)
 	}
-	transition, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, HeadAdvancePipeline)
+	transition, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, 3, HeadAdvancePipeline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +322,7 @@ func TestValidateRecoverableRunHeadTransitionRejectsEveryDerivedClaim(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, HeadAdvancePipeline); err != nil {
+			if _, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, 3, HeadAdvancePipeline); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := d.sql.Exec(`UPDATE run_head_transitions SET `+tc.mutate+` WHERE run_id = ?`, run.ID); err != nil {
@@ -360,7 +363,7 @@ func TestValidateRecoverableRunHeadTransitionEnforcesReplayBoundary(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	transition, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, HeadAdvancePipeline)
+	transition, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, 3, HeadAdvancePipeline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +389,7 @@ func TestValidateRecoverableRunHeadTransitionDerivesPushPhaseAndTestProof(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	transition, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, HeadAdvancePush)
+	transition, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, 3, HeadAdvancePush)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,5 +401,89 @@ func TestValidateRecoverableRunHeadTransitionDerivesPushPhaseAndTestProof(t *tes
 	}
 	if _, err := d.ValidateRecoverableRunHeadTransition(transition, 3); err == nil {
 		t.Fatal("validated transition without authoritative Test proof")
+	}
+}
+
+func TestRunHeadTransitionBoundsActiveTestReplayRetargets(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/test-replay-retargets", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	testResult, err := d.InsertStepResult(run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateStepStatus(testResult.ID, types.StepStatusFixing); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(
+		`UPDATE runs SET validation_target_sha = head_sha, validation_replay_count = 1, test_head_sha = NULL WHERE id = ?`,
+		run.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, 3, HeadAdvancePipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count, err := d.FinalizeRunHeadAdvance(first, false); err != nil || count != 2 {
+		t.Fatalf("first retarget = count %d, err %v", count, err)
+	}
+	second, err := d.BeginRunHeadAdvance(run.ID, ref, "head-2", "head-3", true, 3, HeadAdvancePipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count, err := d.FinalizeRunHeadAdvance(second, false); err != nil || count != 3 {
+		t.Fatalf("second retarget = count %d, err %v", count, err)
+	}
+	if _, err := d.BeginRunHeadAdvance(run.ID, ref, "head-3", "head-4", true, 3, HeadAdvancePipeline); err == nil {
+		t.Fatal("authorized replay retarget beyond convergence bound")
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HeadSHA != "head-3" || got.ValidationTargetSHA == nil || *got.ValidationTargetSHA != "head-3" ||
+		got.ValidationReplayCount != 3 || got.TestHeadSHA != nil {
+		t.Fatalf("bounded retarget state = %#v", got)
+	}
+	if pending, err := d.GetRunHeadTransition(run.ID); err != nil || pending != nil {
+		t.Fatalf("exhausted retarget persisted transition = %#v, err %v", pending, err)
+	}
+}
+
+func TestRunHeadTransitionRejectsReplayRetargetOutsideActiveTest(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/test-replay-retarget-ownership", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(
+		`UPDATE runs SET validation_target_sha = head_sha, validation_replay_count = 1, test_head_sha = NULL WHERE id = ?`,
+		run.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	lintResult, err := d.InsertStepResult(run.ID, types.StepLint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.StartStep(lintResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.BeginRunHeadAdvance(run.ID, ref, "head-1", "head-2", true, 3, HeadAdvancePipeline); err == nil {
+		t.Fatal("authorized replay retarget outside active Test")
 	}
 }

@@ -112,9 +112,11 @@ func (sctx *StepContext) advanceHeadSHA(candidateSHA string, phase db.HeadAdvanc
 		return err
 	}
 	requireValidation := sctx.Config != nil && sctx.Config.Commands.Test != "" &&
-		sctx.Run.TestHeadSHA != nil && *sctx.Run.TestHeadSHA != candidateSHA
+		((sctx.Run.TestHeadSHA != nil && *sctx.Run.TestHeadSHA != candidateSHA) ||
+			(sctx.Run.TestHeadSHA == nil && sctx.Run.ValidationTargetSHA != nil &&
+				*sctx.Run.ValidationTargetSHA == previousSHA))
 	transition, err := sctx.DB.BeginRunHeadAdvance(
-		sctx.Run.ID, ref, previousSHA, candidateSHA, requireValidation, phase,
+		sctx.Run.ID, ref, previousSHA, candidateSHA, requireValidation, maxHeadValidationReplays, phase,
 	)
 	if err != nil {
 		return err
@@ -171,7 +173,7 @@ func RecoverRunHeadTransition(ctx context.Context, database *db.DB, run *db.Run,
 		if result.StepName == types.StepTest && result.Status == types.StepStatusCompleted {
 			testCompleted = true
 		}
-		if result.Status == types.StepStatusRunning {
+		if result.Status == types.StepStatusRunning || result.Status == types.StepStatusFixing {
 			if activeStep != "" {
 				return false, fmt.Errorf("recover run head transition: topology has multiple active steps")
 			}
@@ -179,14 +181,18 @@ func RecoverRunHeadTransition(ctx context.Context, database *db.DB, run *db.Run,
 			activeIndex = index
 		}
 	}
-	if !testCompleted {
+	replayRetarget := authoritativeRun.TestHeadSHA == nil
+	if !testCompleted && !replayRetarget {
 		return false, fmt.Errorf("recover run head transition: topology lacks completed Test evidence")
 	}
 	validPhase := transition.Phase == db.HeadAdvancePipeline &&
 		(activeStep == types.StepDocument || activeStep == types.StepLint)
+	validReplayRetarget := replayRetarget &&
+		transition.Phase == db.HeadAdvancePipeline &&
+		activeStep == types.StepTest
 	validPushPhase := transition.Phase == db.HeadAdvancePush &&
 		(activeStep == types.StepPush || activeStep == types.StepCI)
-	if !validPhase && !validPushPhase {
+	if !validPhase && !validReplayRetarget && !validPushPhase {
 		return false, fmt.Errorf("recover run head transition: phase does not match active topology")
 	}
 	for index, result := range results {
