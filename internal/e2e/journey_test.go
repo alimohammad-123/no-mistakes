@@ -1423,7 +1423,8 @@ func assertFinalHeadConfiguredTestReplay(t *testing.T, h *Harness) {
 	if heads[1] != run.HeadSHA {
 		t.Fatalf("last configured Test head = %s, final run head = %s", heads[1], run.HeadSHA)
 	}
-	if upstream := h.UpstreamBranchSHA("final-head-document-replay"); upstream != run.HeadSHA {
+	upstream := h.UpstreamBranchSHA("final-head-document-replay")
+	if upstream != run.HeadSHA {
 		t.Fatalf("pushed head = %s, final run head = %s", upstream, run.HeadSHA)
 	}
 	invs := h.AgentInvocations()
@@ -1436,6 +1437,10 @@ func assertFinalHeadConfiguredTestReplay(t *testing.T, h *Harness) {
 	if documentCalls != 2 {
 		t.Fatalf("Document convergence calls = %d, want 2", documentCalls)
 	}
+	t.Logf(
+		"final-head proof: initial_test=%s replay_test=%s persisted_final=%s pushed_upstream=%s document_passes=%d",
+		heads[0], heads[1], run.HeadSHA, upstream, documentCalls,
+	)
 }
 
 func assertInvalidConfigPushCleansWorktree(t *testing.T, h *Harness) {
@@ -2096,9 +2101,14 @@ func assertSupersededRunCancellation(t *testing.T, h *Harness) {
 	if err != nil {
 		t.Fatalf("resolve superseding gate head: %v", err)
 	}
-	if got := strings.TrimSpace(string(gateHead)); got != supersedingHead {
+	got := strings.TrimSpace(string(gateHead))
+	if got != supersedingHead {
 		t.Fatalf("gate source ref = %s, want superseding submitted head %s", got, supersedingHead)
 	}
+	t.Logf(
+		"superseded source-ref proof: cancelled_run=%s replacement_run=%s replacement_status=%s submitted_head=%s gate_source_ref=%s",
+		first.ID, second.ID, second.Status, supersedingHead, got,
+	)
 }
 
 func assertDifferentBranchDoesNotCancelActiveRun(t *testing.T, h *Harness) {
