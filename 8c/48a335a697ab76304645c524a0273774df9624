@@ -1,0 +1,24 @@
+internal/git/git_test.go
+  s_47dd97bf3d53b7::t_5062e3106fa01d 5,14-58
+  s_47dd97bf3d53b7::t_d39c1a1e908d7d 11
+  s_47dd97bf3d53b7::t_ff47528923d3b4 59
+internal/git/git.go
+  s_47dd97bf3d53b7::t_f95179906d1588 63-65
+  s_47dd97bf3d53b7::t_5d1502973b1a07 12,16,66-74,81-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "8c48a335a697ab76304645c524a0273774df9624",
+  "prompts": {},
+  "sessions": {
+    "s_47dd97bf3d53b7": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019f90f9-18ed-7539-ada0-237035190feb",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
