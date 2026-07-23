@@ -1,0 +1,36 @@
+internal/pipeline/pipeline.go
+  s_bca92e9b5fd908::t_80942a161700ef 7
+  s_bca92e9b5fd908::t_181611f7935da2 5,142,161-163,167-170,201-206
+  s_bca92e9b5fd908::t_c922668c9368b6 165,179,191-198
+  s_bca92e9b5fd908::t_b00da022cd9dd5 150,154-160,164,166,171-178,180-190,199-200,207-210,224,228
+internal/daemon/manager.go
+  s_bca92e9b5fd908::t_181611f7935da2 238-239
+internal/db/head_validation_test.go
+  s_bca92e9b5fd908::t_eeb10adec3fc4a 369-402
+  s_bca92e9b5fd908::t_175d46d00e0ac0 275-277,289-368
+internal/db/run.go
+  s_bca92e9b5fd908::t_c922668c9368b6 796
+  s_bca92e9b5fd908::t_b00da022cd9dd5 766-795,797-811,1013-1018
+  s_bca92e9b5fd908::t_efb9d23e8ba11d 1019
+internal/pipeline/source_ref_test.go
+  s_bca92e9b5fd908::t_f824ffaec08fb4 252-262
+  s_bca92e9b5fd908::t_181611f7935da2 263-264,268,350-351,425-426
+  s_bca92e9b5fd908::t_175d46d00e0ac0 217-230,321-337,369-424,427-431
+  s_bca92e9b5fd908::t_1fc20c178b0ca6 432-433
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "21e95567c0539850cf47be8508b6502217123494",
+  "prompts": {},
+  "sessions": {
+    "s_bca92e9b5fd908": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8e5a-c081-7871-9b60-ad7062e8ebbd",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
