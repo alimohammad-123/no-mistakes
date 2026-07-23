@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
@@ -58,11 +60,28 @@ func Run(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd.Dir = dir
 	cmd.Env = NonInteractiveEnv(dir)
 	winproc.Harden(cmd)
+	// exec.Cmd reports a context-driven SIGKILL as an ExitError. Record only a
+	// successful CommandContext leader kill so callers can distinguish it from
+	// an unrelated Git failure that merely raced with cancellation.
+	var leaderKillApplied atomic.Bool
+	cancelCommand := cmd.Cancel
+	cmd.Cancel = func() error {
+		err := cancelCommand()
+		if err == nil {
+			leaderKillApplied.Store(true)
+		}
+		return err
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""
 		if ee, ok := err.(*exec.ExitError); ok {
 			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		if shellenv.CommandLeaderCanceled(cmd, err, leaderKillApplied.Load()) {
+			if cause := context.Cause(ctx); cause != nil {
+				return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), cause, safeurl.RedactText(stderr))
+			}
 		}
 		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
 	}

@@ -2,12 +2,60 @@ package git
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestRun_ContextCancellationPreservesCause(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "started")
+	t.Setenv("NM_GIT_CANCEL_HELPER", "1")
+	t.Setenv("NM_GIT_CANCEL_MARKER", marker)
+	priorExecutable := trustedGitExecutable
+	priorExecutableErr := trustedGitExecutableErr
+	trustedGitExecutable = os.Args[0]
+	trustedGitExecutableErr = nil
+	t.Cleanup(func() {
+		trustedGitExecutable = priorExecutable
+		trustedGitExecutableErr = priorExecutableErr
+	})
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancelCause := errors.New("test cancellation cause")
+	result := make(chan error, 1)
+	go func() {
+		_, err := Run(ctx, t.TempDir(), "-test.run=^TestGitRunCancellationHelper$")
+		result <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("git cancellation helper did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel(cancelCause)
+	if err := <-result; !errors.Is(err, cancelCause) {
+		t.Fatalf("Run cancellation error = %v, want cause %v", err, cancelCause)
+	}
+}
+
+func TestGitRunCancellationHelper(t *testing.T) {
+	if os.Getenv("NM_GIT_CANCEL_HELPER") != "1" {
+		return
+	}
+	if err := os.WriteFile(os.Getenv("NM_GIT_CANCEL_MARKER"), []byte("started"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Second)
+}
 
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "no-mistakes-git-tests-")
