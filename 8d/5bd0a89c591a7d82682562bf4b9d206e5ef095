@@ -1,0 +1,42 @@
+internal/db/schema.go
+  s_7b0dcaa05c2128::t_08e293f7a91cab 152,163-165,185,198-200,387-394
+internal/db/exact_recovery_push_operation.go
+  s_7b0dcaa05c2128::t_86cd8f2f355d43 251-254,257-259
+  s_7b0dcaa05c2128::t_cec02212cdd514 487-489,658-659
+  s_7b0dcaa05c2128::t_08e293f7a91cab 25,36-38,57,70-72,115,117-118,123,127-128,214-215,222,263-264,271-273,276-278,288-292,296-299,301,304,307,316,322,324-325,327,330,349,351-352,354,357,366,368-369,382,386-387,515,519-520,524,540-542
+  s_7b0dcaa05c2128::t_5f4b16e3439b57 260,571-572,585-586,593-595,597-599,695-756,769-770,810-811,825-826
+internal/db/exact_final_head_recovery_test.go
+  s_7b0dcaa05c2128::t_fde7a5baa1b312 664-668,844,856-859,883-888
+  s_7b0dcaa05c2128::t_6895c09888d696 889
+internal/git/git.go
+  s_7b0dcaa05c2128::t_fcceeea0ad44b5 576-581,583-587,589-594
+  s_7b0dcaa05c2128::t_cec02212cdd514 582
+  s_7b0dcaa05c2128::t_babf9e15a79173 588
+internal/db/exact_recovery_ref_observation.go
+  s_7b0dcaa05c2128::t_08e293f7a91cab 249
+internal/db/exact_final_head_delivery.go
+  s_7b0dcaa05c2128::t_2c4a112d0268c2 412-415,418,420,432-434
+  s_7b0dcaa05c2128::t_8110ac2015d3d1 435
+internal/git/git_branch_worktree_test.go
+  s_7b0dcaa05c2128::t_e2495af00f4d9b 289-320
+internal/pipeline/steps/pr_test.go
+  s_7b0dcaa05c2128::t_e9edc5a4024baf 303-307,506-510,546,565-566,575-581,638-640,647-650,668,673,676-686
+internal/pipeline/steps/push.go
+  s_7b0dcaa05c2128::t_f739956a49ea87 27,162,169,174-177,185,189-191,210-214,231-257,261-263,266-283,366,371-373,375-384,386,390,394,401,406-420
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "8d5bd0a89c591a7d82682562bf4b9d206e5ef095",
+  "prompts": {},
+  "sessions": {
+    "s_7b0dcaa05c2128": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f916c-3947-7023-9409-782a9434f33e",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
