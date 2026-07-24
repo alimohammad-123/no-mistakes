@@ -326,6 +326,10 @@ func (sctx *StepContext) ValidateDeliveryCandidate() error {
 	if _, err := sctx.BindSourceRef(); err != nil {
 		return fmt.Errorf("verify delivery source ref: %w", err)
 	}
+	return sctx.checkDeliveryProof()
+}
+
+func (sctx *StepContext) checkDeliveryProof() error {
 	if sctx.Config != nil && sctx.Config.Commands.Test != "" {
 		if err := sctx.DB.CheckHeadValidationDeliveryEligibility(
 			sctx.Run.ID, sctx.Run.HeadSHA, maxHeadValidationReplays,
@@ -334,6 +338,49 @@ func (sctx *StepContext) ValidateDeliveryCandidate() error {
 		}
 	}
 	return nil
+}
+
+func (sctx *StepContext) WithDeliverySourceOwnership(fn func() error) error {
+	if sctx == nil || sctx.Run == nil || sctx.DB == nil || fn == nil {
+		return fmt.Errorf("delivery source ownership context is incomplete")
+	}
+	event, err := sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		return err
+	}
+	if event == nil {
+		if err := sctx.ValidateDeliveryCandidate(); err != nil {
+			return err
+		}
+		return fn()
+	}
+	ref, err := sctx.Run.FrozenSourceRef()
+	if err != nil {
+		return err
+	}
+	if event.DeliveryProtocol != db.ExactRecoveryDeliveryProtocol ||
+		event.SourceRef != ref || event.HeadSHA != sctx.Run.HeadSHA {
+		return fmt.Errorf("exact recovery delivery ownership identity changed")
+	}
+	if err := sourceprovenance.VerifyExactRecoveryAnchor(sctx.Ctx, sctx.WorkDir, event.AnchorRef, event.HeadSHA); err != nil {
+		return err
+	}
+	err = sourceprovenance.WithExactRecoveryOwnership(sctx.Ctx, sctx.WorkDir, ref, event.HeadSHA, func() error {
+		if err := sourceprovenance.VerifyExactRecoveryAnchor(sctx.Ctx, sctx.WorkDir, event.AnchorRef, event.HeadSHA); err != nil {
+			return err
+		}
+		if err := sctx.checkDeliveryProof(); err != nil {
+			return err
+		}
+		return fn()
+	})
+	if err != nil {
+		resolved, resolveErr := git.ResolveRef(sctx.Ctx, sctx.WorkDir, ref)
+		if resolveErr == nil && resolved != event.HeadSHA {
+			return fmt.Errorf("%w: source ref %s resolves to %s, want %s", ErrSourceRefSuperseded, ref, resolved, event.HeadSHA)
+		}
+	}
+	return err
 }
 
 // AuthoritativeEnv removes spoofed source-ref values and appends the frozen

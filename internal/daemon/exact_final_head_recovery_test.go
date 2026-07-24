@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -358,6 +359,16 @@ func TestExactFinalHeadRecoveryRefMoveAtAdmissionMarksSuperseded(t *testing.T) {
 	}
 	if ref := gitOutput(t, f.gate, "rev-parse", "refs/heads/feature"); ref != superseding {
 		t.Fatalf("source ref = %s, want superseding %s", ref, superseding)
+	}
+	event, err := f.d.GetRunRecoveryEvent(f.run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event == nil || event.AnchorRef == "" {
+		t.Fatalf("superseded recovery anchor provenance = %#v", event)
+	}
+	if err := sourceprovenance.VerifyExactRecoveryAnchor(context.Background(), f.gate, event.AnchorRef, f.run.HeadSHA); err != nil {
+		t.Fatalf("superseded candidate lost its private anchor: %v", err)
 	}
 }
 

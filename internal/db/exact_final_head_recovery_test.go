@@ -154,7 +154,8 @@ func TestRestoreExactFinalHeadCapacityFailureAppendsProvenanceAndPreservesIdenti
 		t.Fatal(err)
 	}
 	if event == nil || event.RunID != f.run.ID || event.HeadSHA != f.head || event.PriorStatus != types.RunFailed ||
-		event.PriorError != ExactFinalHeadCapacityRunError(3) || event.PRURL != "https://github.com/user/project/pull/42" || event.LastPushedSHA != f.pushed {
+		event.PriorError != ExactFinalHeadCapacityRunError(3) || event.PRURL != "https://github.com/user/project/pull/42" ||
+		event.LastPushedSHA != f.pushed || event.DeliveryProtocol != ExactRecoveryDeliveryProtocol || event.AnchorRef == "" {
 		t.Fatalf("recovery provenance = %#v", event)
 	}
 	if _, err := f.d.RestoreExactFinalHeadCapacityFailure(f.run.ID, failure.EvidenceToken, 3, types.AllSteps()); err == nil {

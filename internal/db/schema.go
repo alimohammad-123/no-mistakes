@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS run_recovery_events (
     prior_step_status     TEXT NOT NULL,
     prior_step_error      TEXT NOT NULL,
     delivery_protocol_version INTEGER NOT NULL DEFAULT 0,
+    anchor_ref            TEXT,
     UNIQUE (run_id, kind)
 );
 
@@ -264,6 +265,7 @@ var migrationStatements = []string{
 	`ALTER TABLE step_results ADD COLUMN agent_pid INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN auto_fix_limit INTEGER`,
 	`ALTER TABLE run_recovery_events ADD COLUMN delivery_protocol_version INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE run_recovery_events ADD COLUMN anchor_ref TEXT`,
 	// Session-fidelity telemetry columns (all nullable so pre-existing rows read
 	// back as unknown, never a fabricated zero).
 	`ALTER TABLE agent_invocations ADD COLUMN model_provider TEXT`,

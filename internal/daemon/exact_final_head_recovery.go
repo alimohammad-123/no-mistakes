@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,10 +63,41 @@ func (m *RunManager) reconcileRecoveredPushCustody(ctx context.Context, run *db.
 
 func (m *RunManager) validateRecoveredSourceOwnership(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	sctx := &pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: workDir, DB: m.db}
+	event, err := m.db.GetRunRecoveryEvent(run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		return err
+	}
+	if event != nil {
+		if event.DeliveryProtocol != db.ExactRecoveryDeliveryProtocol || event.HeadSHA != run.HeadSHA {
+			return fmt.Errorf("exact recovery anchor provenance is incompatible")
+		}
+		if err := sourceprovenance.VerifyExactRecoveryAnchor(ctx, workDir, event.AnchorRef, event.HeadSHA); err != nil {
+			return err
+		}
+	}
 	if _, err := sctx.BindSourceRef(); err != nil {
 		return m.markRecoveredSourceSuperseded(run, err)
 	}
 	return nil
+}
+
+func (m *RunManager) retireCompletedExactRecoveryAnchor(runID, gateDir string) {
+	run, err := m.db.GetRun(runID)
+	if err != nil || run == nil || run.Status != types.RunCompleted {
+		return
+	}
+	event, err := m.db.GetRunRecoveryEvent(runID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil || event == nil {
+		return
+	}
+	retired, err := sourceprovenance.RetireExactRecoveryAnchor(
+		context.Background(), gateDir, event.AnchorRef, event.HeadSHA, event.SourceRef,
+	)
+	if err != nil {
+		slog.Warn("failed to retire completed exact recovery anchor", "run_id", runID, "error", err)
+	} else if retired {
+		slog.Info("retired completed exact recovery anchor", "run_id", runID)
+	}
 }
 
 func (m *RunManager) markRecoveredSourceSuperseded(run *db.Run, err error) error {
@@ -249,7 +281,21 @@ func (m *RunManager) handleRecoverExactFinalHeadCapacityLocked(ctx context.Conte
 	if err := m.validateRecoveredSourceOwnership(ctx, run, repo, workDir); err != nil {
 		return cleanupCreated(fmt.Errorf("source ownership changed before claim: %w", err))
 	}
-	restored, err := m.db.RestoreExactFinalHeadCapacityFailure(run.ID, failure.EvidenceToken, pipeline.MaxHeadValidationReplays, stepNames(m.steps()))
+	anchorRef, err := sourceprovenance.ExactRecoveryAnchorRef(run.ID)
+	if err != nil {
+		return cleanupCreated(err)
+	}
+	var restored *db.Run
+	err = sourceprovenance.WithExactRecoveryOwnership(ctx, workDir, failure.CanonicalRef, run.HeadSHA, func() error {
+		if err := sourceprovenance.EnsureExactRecoveryAnchor(ctx, gateDir, anchorRef, run.HeadSHA); err != nil {
+			return err
+		}
+		var restoreErr error
+		restored, restoreErr = m.db.RestoreExactFinalHeadCapacityFailure(
+			run.ID, failure.EvidenceToken, pipeline.MaxHeadValidationReplays, stepNames(m.steps()),
+		)
+		return restoreErr
+	})
 	if err != nil {
 		return cleanupCreated(err)
 	}

@@ -65,6 +65,9 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if !hasColumn(t, d, "run_recovery_events", "delivery_protocol_version") {
 		t.Fatal("run_recovery_events.delivery_protocol_version column missing from fresh schema")
 	}
+	if !hasColumn(t, d, "run_recovery_events", "anchor_ref") {
+		t.Fatal("run_recovery_events.anchor_ref column missing from fresh schema")
+	}
 }
 
 func TestOpenMigratesRunSyncProvenanceWithoutBackfillingMutableHead(t *testing.T) {

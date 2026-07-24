@@ -18,6 +18,7 @@ import (
 type PushStep struct {
 	afterEvidenceClassification func(bool)
 	beforeRemoteMutation        func()
+	ownershipClaimed            func()
 }
 
 func (s *PushStep) Name() types.StepName { return types.StepPush }
@@ -35,19 +36,18 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 	if alreadyBound {
-		if err := sctx.ValidateDeliveryCandidate(); err != nil {
-			return nil, err
-		}
 		ref := normalizedBranchRef(sctx.Run.Branch)
 		pushURL := resolvePushURL(sctx)
-		remoteHead, err := git.LsRemote(ctx, sctx.WorkDir, pushURL, ref)
-		if err != nil {
-			return nil, fmt.Errorf("verify recovered exact push binding: %w", err)
-		}
-		if remoteHead != sctx.Run.HeadSHA {
-			return nil, fmt.Errorf("verify recovered exact push binding: remote head %s does not equal candidate %s", remoteHead, sctx.Run.HeadSHA)
-		}
-		if err := sctx.ValidateDeliveryCandidate(); err != nil {
+		if err := sctx.WithDeliverySourceOwnership(func() error {
+			remoteHead, err := git.LsRemote(ctx, sctx.WorkDir, pushURL, ref)
+			if err != nil {
+				return fmt.Errorf("verify recovered exact push binding: %w", err)
+			}
+			if remoteHead != sctx.Run.HeadSHA {
+				return fmt.Errorf("verify recovered exact push binding: remote head %s does not equal candidate %s", remoteHead, sctx.Run.HeadSHA)
+			}
+			return nil
+		}); err != nil {
 			return nil, err
 		}
 		sctx.Log("exact candidate already has its durable push binding")
@@ -138,39 +138,34 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if s.beforeRemoteMutation != nil {
 		s.beforeRemoteMutation()
 	}
-	if err := sctx.ValidateDeliveryCandidate(); err != nil {
-		return nil, err
-	}
-	switch {
-	case decision.newBranch:
-		// New branch: regular push (no force needed).
-		if err := git.PushSHA(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, "", false); err != nil {
-			return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
+	if err := sctx.WithDeliverySourceOwnership(func() error {
+		if s.ownershipClaimed != nil {
+			s.ownershipClaimed()
 		}
-	case decision.upToDate:
-		// Remote already at this exact head. This freshly verified equality is a
-		// successful binding even though no objects needed to move.
-	default:
-		// Existing branch: force-with-lease anchored to the verified remote head.
-		if err := git.PushSHA(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, decision.remoteSHA, true); err != nil {
-			return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
+		switch {
+		case decision.newBranch:
+			if err := git.PushSHA(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, "", false); err != nil {
+				return fmt.Errorf("push to %s: %w", pushTarget, err)
+			}
+		case decision.upToDate:
+		default:
+			if err := git.PushSHA(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, decision.remoteSHA, true); err != nil {
+				return fmt.Errorf("push to %s: %w", pushTarget, err)
+			}
 		}
-	}
-	verifiedRemote, err := git.LsRemote(ctx, sctx.WorkDir, pushURL, ref)
-	if err != nil || verifiedRemote != headBeingPushed {
-		if err != nil {
-			return nil, fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
+		verifiedRemote, err := git.LsRemote(ctx, sctx.WorkDir, pushURL, ref)
+		if err != nil || verifiedRemote != headBeingPushed {
+			if err != nil {
+				return fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
+			}
+			return fmt.Errorf("verify successful push to %s: remote head %s does not equal pushed head %s", pushTarget, verifiedRemote, headBeingPushed)
 		}
-		return nil, fmt.Errorf("verify successful push to %s: remote head %s does not equal pushed head %s", pushTarget, verifiedRemote, headBeingPushed)
-	}
-	if err := sctx.ValidateDeliveryCandidate(); err != nil {
-		return nil, err
-	}
-	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
-		HeadSHA:           headBeingPushed,
-		TargetKind:        pushTarget,
-		TargetFingerprint: branchsync.TargetFingerprint(pushURL),
-		Ref:               ref,
+		return sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
+			HeadSHA:           headBeingPushed,
+			TargetKind:        pushTarget,
+			TargetFingerprint: branchsync.TargetFingerprint(pushURL),
+			Ref:               ref,
+		})
 	}); err != nil {
 		return nil, err
 	}

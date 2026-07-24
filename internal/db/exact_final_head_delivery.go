@@ -81,7 +81,7 @@ func (d *DB) PrepareExactRecoveryPRUpdate(runID, stepResultID, targetURL, headSH
 	if err != nil {
 		return nil, err
 	}
-	if event == nil || event.DeliveryProtocol != 1 || event.HeadSHA != headSHA || event.PRURL != targetURL {
+	if event == nil || event.DeliveryProtocol != ExactRecoveryDeliveryProtocol || event.HeadSHA != headSHA || event.PRURL != targetURL {
 		return nil, fmt.Errorf("prepare exact recovery PR update: recovery identity is inconsistent")
 	}
 	var run Run
@@ -162,6 +162,9 @@ func (d *DB) ExactRecoveryPushAlreadyBound(runID, headSHA string) (bool, error) 
 	if err != nil || event == nil {
 		return false, err
 	}
+	if event.DeliveryProtocol != ExactRecoveryDeliveryProtocol || strings.TrimSpace(event.AnchorRef) == "" {
+		return false, fmt.Errorf("exact recovery push binding provenance is incompatible")
+	}
 	run, err := d.GetRun(runID)
 	if err != nil {
 		return false, err
@@ -212,7 +215,7 @@ func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef
 	if err != nil {
 		return false, err
 	}
-	if event == nil || event.DeliveryProtocol != 1 ||
+	if event == nil || event.DeliveryProtocol != ExactRecoveryDeliveryProtocol ||
 		event.PriorStatus != types.RunFailed || event.PriorError != ExactFinalHeadCapacityRunError(maxReplays) ||
 		event.PriorStepStatus != types.StepStatusFailed || event.PriorStepError != ExactFinalHeadCapacityStepError(maxReplays) ||
 		event.HeadSHA == "" || event.TestHeadSHA != event.HeadSHA || event.ValidationTargetSHA != event.HeadSHA ||
@@ -355,6 +358,9 @@ func (d *DB) CancelExactRecoveryAsSuperseded(runID string) error {
 	}
 	if event == nil {
 		return fmt.Errorf("cancel superseded exact recovery: recovery provenance is missing")
+	}
+	if event.DeliveryProtocol != ExactRecoveryDeliveryProtocol || strings.TrimSpace(event.AnchorRef) == "" {
+		return fmt.Errorf("cancel superseded exact recovery: recovery provenance is incompatible")
 	}
 	var status types.RunStatus
 	var runError *string

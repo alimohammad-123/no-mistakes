@@ -512,6 +512,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			cancel(nil)
 			_ = plan.agent.Close()
 			m.closeSubscribers(plan.run.ID)
+			if plan.exactRecovery {
+				m.retireCompletedExactRecoveryAnchor(plan.run.ID, plan.gateDir)
+			}
 			if !preserveWorktree {
 				transition, err := m.db.GetRunHeadTransition(plan.run.ID)
 				preserveWorktree = err != nil || transition != nil

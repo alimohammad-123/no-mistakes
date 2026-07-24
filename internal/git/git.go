@@ -1,9 +1,12 @@
 package git
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,6 +89,102 @@ func Run(ctx context.Context, dir string, args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func WithPreparedRefLock(ctx context.Context, dir, ref, expectedOID string, fn func() error) error {
+	if trustedGitExecutableErr != nil {
+		return trustedGitExecutableErr
+	}
+	ref = strings.TrimSpace(ref)
+	expectedOID = strings.TrimSpace(expectedOID)
+	if ref == "" || expectedOID == "" || fn == nil {
+		return fmt.Errorf("prepared ref lock requires a ref, expected object, and operation")
+	}
+	args := []string{"update-ref", "--stdin"}
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	cmd := exec.CommandContext(ctx, trustedGitExecutable, args...)
+	cmd.Dir = dir
+	cmd.Env = NonInteractiveEnv(dir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("prepare ref lock stdin: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("prepare ref lock stdout: %w", err)
+	}
+	shellenv.ConfigureShellCommand(cmd)
+	if err := shellenv.StartShellCommand(cmd); err != nil {
+		return fmt.Errorf("start prepared ref lock: %w", err)
+	}
+	defer shellenv.TerminateShellCommandGroup(cmd)
+	reader := bufio.NewReader(stdout)
+	write := func(value string) error {
+		if _, err := io.WriteString(stdin, value); err != nil {
+			return err
+		}
+		return nil
+	}
+	expect := func(want string) error {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(line) != want {
+			return fmt.Errorf("unexpected update-ref response %q", strings.TrimSpace(line))
+		}
+		return nil
+	}
+	finish := func(command, response string) error {
+		if err := write(command + "\n"); err != nil {
+			return err
+		}
+		if err := expect(response); err != nil {
+			return err
+		}
+		if err := stdin.Close(); err != nil {
+			return err
+		}
+		if err := cmd.Wait(); err != nil {
+			return fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		}
+		return nil
+	}
+	abort := true
+	defer func() {
+		if abort {
+			_ = stdin.Close()
+			_ = cmd.Wait()
+		}
+	}()
+	if err := write("start\n"); err != nil {
+		return fmt.Errorf("start ref transaction: %w", err)
+	}
+	if err := expect("start: ok"); err != nil {
+		return fmt.Errorf("start ref transaction: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if err := write(fmt.Sprintf("update %s %s %s\nprepare\n", ref, expectedOID, expectedOID)); err != nil {
+		return fmt.Errorf("prepare ref transaction: %w", err)
+	}
+	if err := expect("prepare: ok"); err != nil {
+		return fmt.Errorf("prepare ref transaction: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if err := fn(); err != nil {
+		if abortErr := finish("abort", "abort: ok"); abortErr != nil {
+			return fmt.Errorf("%w; release prepared ref lock: %v", err, abortErr)
+		}
+		abort = false
+		return err
+	}
+	if err := finish("commit", "commit: ok"); err != nil {
+		return fmt.Errorf("commit prepared ref lock: %w", err)
+	}
+	abort = false
+	return nil
 }
 
 // isBareGitDir reports whether dir is itself a git directory (a bare repo),

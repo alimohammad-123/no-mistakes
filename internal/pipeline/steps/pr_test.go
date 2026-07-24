@@ -20,6 +20,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -228,6 +229,13 @@ func exactRecoveryDeliveryStepContext(t *testing.T, remote scm.PRContent, stopAt
 	}
 	failure, err := sctx.DB.InspectExactFinalHeadCapacityFailure(sctx.Run.ID, 3, types.AllSteps())
 	if err != nil {
+		t.Fatal(err)
+	}
+	anchorRef, err := sourceprovenance.ExactRecoveryAnchorRef(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceprovenance.EnsureExactRecoveryAnchor(context.Background(), dir, anchorRef, headSHA); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := sctx.DB.RestoreExactFinalHeadCapacityFailure(sctx.Run.ID, failure.EvidenceToken, 3, types.AllSteps()); err != nil {

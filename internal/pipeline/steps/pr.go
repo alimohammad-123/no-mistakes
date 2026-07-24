@@ -20,6 +20,7 @@ import (
 type PRStep struct {
 	hostFactory          func(*pipeline.StepContext, scm.Provider) (scm.Host, string)
 	beforeRemoteMutation func()
+	ownershipClaimed     func()
 }
 
 type prContent struct {
@@ -120,7 +121,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			return nil, err
 		}
 		if recoveryEvent != nil {
-			if recoveryEvent.DeliveryProtocol != 1 {
+			if recoveryEvent.DeliveryProtocol != db.ExactRecoveryDeliveryProtocol {
 				return nil, fmt.Errorf("exact recovery PR update lacks durable delivery protocol")
 			}
 			reader, ok := host.(scm.PRContentReader)
@@ -193,49 +194,47 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 	if !ok {
 		return nil, fmt.Errorf("provider %s cannot verify exact recovery PR content", host.Provider())
 	}
-	current, err := reader.GetPRContent(sctx.Ctx, existing)
-	if err != nil {
-		return nil, fmt.Errorf("read exact recovery PR content: %w", err)
+	if s.beforeRemoteMutation != nil {
+		s.beforeRemoteMutation()
 	}
-	currentHash := db.ExactRecoveryPRContentHash(current.Title, current.Body)
-	switch {
-	case currentHash == update.IntendedContentHash:
-		if err := s.validateRemoteMutationOwnership(sctx); err != nil {
-			return nil, err
+	err := sctx.WithDeliverySourceOwnership(func() error {
+		if s.ownershipClaimed != nil {
+			s.ownershipClaimed()
 		}
-		if err := sctx.DB.MarkExactRecoveryPRUpdateApplied(sctx.Run.ID, current.Title, current.Body); err != nil {
-			return nil, err
-		}
-	case currentHash == update.PriorContentHash && update.State == db.ExactRecoveryPRUpdatePrepared:
-		sctx.Log(fmt.Sprintf("pull request already exists: %s, applying guarded update...", describePR(existing)))
-		if err := s.validateRemoteMutationOwnership(sctx); err != nil {
-			return nil, err
-		}
-		updated, err := host.UpdatePR(sctx.Ctx, existing, scm.PRContent{Title: update.IntendedTitle, Body: update.IntendedBody})
+		current, err := reader.GetPRContent(sctx.Ctx, existing)
 		if err != nil {
-			return nil, fmt.Errorf("apply exact recovery PR update: %w", err)
+			return fmt.Errorf("read exact recovery PR content: %w", err)
 		}
-		if updated == nil {
-			updated = existing
+		currentHash := db.ExactRecoveryPRContentHash(current.Title, current.Body)
+		switch {
+		case currentHash == update.IntendedContentHash:
+			return sctx.DB.MarkExactRecoveryPRUpdateApplied(sctx.Run.ID, current.Title, current.Body)
+		case currentHash == update.PriorContentHash && update.State == db.ExactRecoveryPRUpdatePrepared:
+			sctx.Log(fmt.Sprintf("pull request already exists: %s, applying guarded update...", describePR(existing)))
+			updated, err := host.UpdatePR(sctx.Ctx, existing, scm.PRContent{Title: update.IntendedTitle, Body: update.IntendedBody})
+			if err != nil {
+				return fmt.Errorf("apply exact recovery PR update: %w", err)
+			}
+			if updated == nil {
+				updated = existing
+			}
+			if strings.TrimSpace(updated.URL) != update.TargetURL {
+				return fmt.Errorf("exact recovery PR identity changed after update")
+			}
+			verified, err := reader.GetPRContent(sctx.Ctx, updated)
+			if err != nil {
+				return fmt.Errorf("verify exact recovery PR update: %w", err)
+			}
+			if db.ExactRecoveryPRContentHash(verified.Title, verified.Body) != update.IntendedContentHash {
+				return fmt.Errorf("verify exact recovery PR update: remote content differs from durable intent")
+			}
+			return sctx.DB.MarkExactRecoveryPRUpdateApplied(sctx.Run.ID, verified.Title, verified.Body)
+		default:
+			return fmt.Errorf("exact recovery PR content is stale, partial, or superseded")
 		}
-		if strings.TrimSpace(updated.URL) != update.TargetURL {
-			return nil, fmt.Errorf("exact recovery PR identity changed after update")
-		}
-		verified, err := reader.GetPRContent(sctx.Ctx, updated)
-		if err != nil {
-			return nil, fmt.Errorf("verify exact recovery PR update: %w", err)
-		}
-		if db.ExactRecoveryPRContentHash(verified.Title, verified.Body) != update.IntendedContentHash {
-			return nil, fmt.Errorf("verify exact recovery PR update: remote content differs from durable intent")
-		}
-		if err := sctx.ValidateDeliveryCandidate(); err != nil {
-			return nil, err
-		}
-		if err := sctx.DB.MarkExactRecoveryPRUpdateApplied(sctx.Run.ID, verified.Title, verified.Body); err != nil {
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf("exact recovery PR content is stale, partial, or superseded")
+	})
+	if err != nil {
+		return nil, err
 	}
 	return &pipeline.StepOutcome{PRURL: update.TargetURL}, nil
 }
