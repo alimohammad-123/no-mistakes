@@ -1,0 +1,27 @@
+docs/src/content/docs/concepts/daemon.md
+  s_7b0dcaa05c2128::t_60239643973622 130
+docs/src/content/docs/reference/cli.md
+  s_7b0dcaa05c2128::t_60239643973622 158
+internal/pipeline/steps/ci.go
+  s_7b0dcaa05c2128::t_5fdc18878534c3 20-22,63,78,95,146-148,216,239-242,310,330-331,377,410-416,418,441-447,595-596,601-619
+internal/pipeline/steps/exact_final_head_recovery.go
+  s_7b0dcaa05c2128::t_4e05b8f8851213 75-77
+internal/pipeline/steps/pr_test.go
+  s_7b0dcaa05c2128::t_0ed9f330c6c1d7 104,136
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "c119102349ad184cf4e0605232c0854f072568d8",
+  "prompts": {},
+  "sessions": {
+    "s_7b0dcaa05c2128": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f916c-3947-7023-9409-782a9434f33e",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
