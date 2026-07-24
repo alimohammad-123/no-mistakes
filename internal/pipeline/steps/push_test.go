@@ -269,6 +269,119 @@ func TestPushStep_ExactRecoveryPersistsRemoteAmbiguityWithoutProviderOperation(t
 	}
 }
 
+func TestPersistExactRecoveryUnexpectedRemoteOIDHonorsPhaseAllowance(t *testing.T) {
+	tests := []struct {
+		name      string
+		observed  func(*pipeline.StepContext) string
+		allow     bool
+		wantBlock bool
+	}{
+		{
+			name:     "stale-allowed",
+			observed: func(sctx *pipeline.StepContext) string { return sctx.Run.BaseSHA },
+			allow:    true,
+		},
+		{
+			name:     "target-allowed",
+			observed: func(sctx *pipeline.StepContext) string { return sctx.Run.HeadSHA },
+			allow:    true,
+		},
+		{
+			name:      "stale-wrong-phase",
+			observed:  func(sctx *pipeline.StepContext) string { return sctx.Run.BaseSHA },
+			wantBlock: true,
+		},
+		{
+			name:      "target-wrong-phase",
+			observed:  func(sctx *pipeline.StepContext) string { return sctx.Run.HeadSHA },
+			wantBlock: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
+			observed := test.observed(sctx)
+			var allowed []string
+			if test.allow {
+				allowed = append(allowed, observed)
+			}
+			err := persistExactRecoveryUnexpectedRemoteOID(
+				sctx.DB, sctx.Run, "refs/heads/feature", observed, allowed...,
+			)
+			if test.wantBlock && err == nil {
+				t.Fatal("wrong-phase OID was accepted")
+			}
+			if !test.wantBlock && err != nil {
+				t.Fatalf("allowed phase OID failed: %v", err)
+			}
+			ambiguity, getErr := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			if test.wantBlock {
+				if ambiguity == nil ||
+					ambiguity.Classification != db.ExactRecoveryRemoteRefUnexpectedOID ||
+					ambiguity.ObservedOID != observed {
+					t.Fatalf("wrong-phase OID ambiguity = %#v", ambiguity)
+				}
+			} else if ambiguity != nil {
+				t.Fatalf("allowed phase OID became ambiguous: %#v", ambiguity)
+			}
+		})
+	}
+}
+
+func TestPushStep_ExactRecoveryPersistsUnexpectedRemoteOIDBeforeMutation(t *testing.T) {
+	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
+	thirdOID := supersedingExactRecoveryCommit(t, sctx)
+	gitCmd(t, sctx.WorkDir, "push", "--force", sctx.Repo.UpstreamURL, thirdOID+":refs/heads/feature")
+	if operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID); err != nil || operation != nil {
+		t.Fatalf("provider-neutral recovery unexpectedly has operation %#v, %v", operation, err)
+	}
+	if _, err := (&PushStep{}).Execute(sctx); err == nil {
+		t.Fatal("unexpected remote OID was accepted before Push")
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity == nil ||
+		ambiguity.Classification != db.ExactRecoveryRemoteRefUnexpectedOID ||
+		ambiguity.ObservedOID != thirdOID ||
+		ambiguity.SourceRef != "refs/heads/feature" {
+		t.Fatalf("pre-Push unexpected OID ambiguity = %#v", ambiguity)
+	}
+	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != thirdOID {
+		t.Fatalf("recovered Push changed unexpected remote OID to %s", got)
+	}
+}
+
+func TestPushStep_ExactRecoveryPersistsUnexpectedRemoteOIDAfterLeaseRace(t *testing.T) {
+	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
+	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+	thirdOID := supersedingExactRecoveryCommit(t, sctx)
+	gitCmd(t, sctx.WorkDir, "push", sctx.Repo.UpstreamURL, thirdOID+":refs/heads/third")
+	step := &PushStep{beforeRemoteMutation: func() {
+		gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", thirdOID, sctx.Run.BaseSHA)
+	}}
+	if _, err := step.Execute(sctx); err == nil {
+		t.Fatal("lease-racing unexpected remote OID was accepted")
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity == nil ||
+		ambiguity.Classification != db.ExactRecoveryRemoteRefUnexpectedOID ||
+		ambiguity.ObservedOID != thirdOID ||
+		ambiguity.SourceRef != "refs/heads/feature" {
+		t.Fatalf("lease-racing unexpected OID ambiguity = %#v", ambiguity)
+	}
+	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != thirdOID {
+		t.Fatalf("failed recovered Push changed unexpected remote OID to %s", got)
+	}
+}
+
 func TestPushStep_ExactRecoveryRefMoveBeforePushPreventsPublication(t *testing.T) {
 	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"}, true)
 	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)

@@ -85,12 +85,12 @@ func resolveForcePushDecision(gitRun gitRunner, pushURL, ref, newHeadSHA, lastSe
 	// refuse rather than discard it.
 	dropped, err := remoteCommitsNotIncorporated(gitRun, pushURL, ref, newHeadSHA, current, baseSHA)
 	if err != nil {
-		return forcePushDecision{}, fmt.Errorf("verify force-push safety for %s: %w", ref, err)
+		return forcePushDecision{remoteSHA: current}, fmt.Errorf("verify force-push safety for %s: %w", ref, err)
 	}
 	if len(dropped) == 0 {
 		return forcePushDecision{remoteSHA: current}, nil
 	}
-	return forcePushDecision{}, &forcePushWouldDiscardError{ref: ref, remoteSHA: current, dropped: dropped}
+	return forcePushDecision{remoteSHA: current}, &forcePushWouldDiscardError{ref: ref, remoteSHA: current, dropped: dropped}
 }
 
 // lsRemoteSHA returns the SHA a ref resolves to on a remote, or "" when the ref

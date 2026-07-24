@@ -326,7 +326,7 @@ func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef
 		return false, err
 	}
 	if validExactRecoveryRemoteRefClassification(remoteHead) {
-		if err := recordExactRecoveryRemoteRefAmbiguity(tx, event, &run, remoteHead); err != nil {
+		if err := recordExactRecoveryRemoteRefAmbiguity(tx, event, &run, sourceRef, remoteHead, ""); err != nil {
 			return false, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -353,18 +353,39 @@ func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef
 			return false, fmt.Errorf("reconcile stale exact recovery Push custody: observation state is not stale")
 		}
 	}
+	if remoteHead != event.LastPushedSHA && remoteHead != event.HeadSHA {
+		if !validExactRecoveryObservedOID(remoteHead, event.HeadSHA) {
+			if operation != nil {
+				recordErr := recordExactRecoveryRefObservation(tx, observation, operation, &run, remoteHead)
+				if commitErr := tx.Commit(); commitErr != nil {
+					return false, fmt.Errorf("%v; commit provider remote ambiguity: %w", recordErr, commitErr)
+				}
+				return false, fmt.Errorf("reconcile stale exact recovery Push custody: remote head is ambiguous")
+			}
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: remote head is invalid")
+		}
+		if err := recordExactRecoveryRemoteRefAmbiguity(
+			tx, event, &run, sourceRef, ExactRecoveryRemoteRefUnexpectedOID, remoteHead,
+		); err != nil {
+			return false, err
+		}
+		var providerRecordErr error
+		if operation != nil {
+			providerRecordErr = recordExactRecoveryRefObservation(tx, observation, operation, &run, remoteHead)
+		}
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: commit unexpected remote OID: %w", err)
+		}
+		if providerRecordErr != nil {
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: %w", providerRecordErr)
+		}
+		return false, fmt.Errorf("reconcile stale exact recovery Push custody: remote head is terminally ambiguous")
+	}
 
 	priorBinding := *run.LastPushedSHA == event.LastPushedSHA &&
 		*run.PushGeneration == event.PushGeneration && *run.LastPushedAt == event.LastPushedAt
 	exactBinding := *run.LastPushedSHA == event.HeadSHA &&
 		*run.PushGeneration == event.PushGeneration+1 && *run.LastPushedAt >= event.LastPushedAt
-	if operation != nil && remoteHead != operation.StaleOID && remoteHead != operation.TargetOID {
-		recordErr := recordExactRecoveryRefObservation(tx, observation, operation, &run, remoteHead)
-		if commitErr := tx.Commit(); commitErr != nil {
-			return false, fmt.Errorf("%v; commit remote ambiguity: %w", recordErr, commitErr)
-		}
-		return false, fmt.Errorf("reconcile stale exact recovery Push custody: remote head is ambiguous")
-	}
 	switch {
 	case priorBinding && pushStatus == types.StepStatusRunning && remoteHead == event.LastPushedSHA:
 		if operation != nil {

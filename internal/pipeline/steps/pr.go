@@ -261,10 +261,22 @@ func validateExactRecoveryPRSnapshot(sctx *pipeline.StepContext, pr *scm.PR, exp
 	if snapshot.State != scm.PRStateOpen || snapshot.Merged {
 		return fmt.Errorf("exact recovery PR is no longer open and unmerged")
 	}
-	if strings.TrimSpace(snapshot.HeadSHA) == "" || strings.TrimSpace(snapshot.HeadSHA) != strings.TrimSpace(expectedHead) ||
-		strings.TrimSpace(snapshot.HeadRef) != branch ||
-		strings.TrimSpace(snapshot.BaseRef) != sctx.BaseBranch() {
-		return fmt.Errorf("exact recovery PR head or base changed")
+	if strings.TrimSpace(snapshot.HeadRef) != branch || strings.TrimSpace(snapshot.BaseRef) != sctx.BaseBranch() {
+		return fmt.Errorf("exact recovery PR source or base changed")
+	}
+	observedHead := strings.TrimSpace(snapshot.HeadSHA)
+	if observedHead == "" {
+		return fmt.Errorf("exact recovery PR head is missing")
+	}
+	if observedHead != strings.TrimSpace(expectedHead) {
+		ref, err := sctx.Run.FrozenSourceRef()
+		if err != nil {
+			return err
+		}
+		if err := persistExactRecoveryUnexpectedRemoteOID(sctx.DB, sctx.Run, ref, observedHead, expectedHead); err != nil {
+			return fmt.Errorf("exact recovery PR head changed; persist unexpected OID: %w", err)
+		}
+		return fmt.Errorf("exact recovery PR head changed")
 	}
 	if strings.TrimSpace(snapshot.Title) == "" || strings.TrimSpace(snapshot.Body) == "" {
 		return fmt.Errorf("exact recovery PR snapshot is incomplete")

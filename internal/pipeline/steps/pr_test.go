@@ -649,6 +649,17 @@ func TestPRStep_ExactRecoveryRefusesLifecycleIdentityAndHeadDrift(t *testing.T) 
 			if host.updateCalls != 0 {
 				t.Fatalf("stale PR was mutated %d times", host.updateCalls)
 			}
+			if tc.name == "head drift" {
+				ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ambiguity == nil ||
+					ambiguity.Classification != db.ExactRecoveryRemoteRefUnexpectedOID ||
+					ambiguity.ObservedOID != host.headSHA {
+					t.Fatalf("PR head drift ambiguity = %#v", ambiguity)
+				}
+			}
 		})
 	}
 }
@@ -976,6 +987,59 @@ func TestExactRecoveryReconciliationPersistsProviderIndependentRemoteAmbiguity(t
 	}
 	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
 		t.Fatalf("ambiguous recovery published %s, want unchanged %s", got, sctx.Run.BaseSHA)
+	}
+}
+
+func TestExactRecoveryReconciliationPersistsUnexpectedOIDAcrossRestart(t *testing.T) {
+	oldLsRemote := exactRecoveryLsRemote
+	t.Cleanup(func() {
+		exactRecoveryLsRemote = oldLsRemote
+	})
+	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
+	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+	thirdOID := supersedingExactRecoveryCommit(t, sctx)
+	exactRecoveryLsRemote = func(context.Context, string, string, string) (git.RemoteRefObservation, error) {
+		return git.RemoteRefObservation{OID: thirdOID}, nil
+	}
+	if _, err := ReconcileStaleExactFinalHeadPushCustody(
+		context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir, 3, types.AllSteps(),
+	); err == nil {
+		t.Fatal("unexpected remote OID was accepted")
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity == nil ||
+		ambiguity.Classification != db.ExactRecoveryRemoteRefUnexpectedOID ||
+		ambiguity.ObservedOID != thirdOID ||
+		ambiguity.SourceRef != "refs/heads/feature" {
+		t.Fatalf("unexpected remote OID was not durably recorded: %#v", ambiguity)
+	}
+	restarted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run = restarted
+	for _, later := range []string{sctx.Run.BaseSHA, sctx.Run.HeadSHA} {
+		exactRecoveryLsRemote = func(context.Context, string, string, string) (git.RemoteRefObservation, error) {
+			return git.RemoteRefObservation{OID: later}, nil
+		}
+		if _, err := ReconcileStaleExactFinalHeadPushCustody(
+			context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir, 3, types.AllSteps(),
+		); err == nil {
+			t.Fatalf("later OID %s erased unexpected remote OID", later)
+		}
+	}
+	after, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after == nil || *after != *ambiguity {
+		t.Fatalf("restart changed terminal unexpected OID: before=%#v after=%#v", ambiguity, after)
+	}
+	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+		t.Fatalf("unexpected OID recovery published %s, want unchanged %s", got, sctx.Run.BaseSHA)
 	}
 }
 

@@ -37,6 +37,28 @@ const (
 	exactRecoveryRefReconcilePollInterval = 100 * time.Millisecond
 )
 
+func persistExactRecoveryUnexpectedRemoteOID(database *db.DB, run *db.Run, sourceRef, observedOID string, allowedOIDs ...string) error {
+	if database == nil || run == nil {
+		return fmt.Errorf("persist exact recovery unexpected remote OID: recovery context is incomplete")
+	}
+	event, err := database.GetRunRecoveryEvent(run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		return err
+	}
+	if event == nil {
+		return nil
+	}
+	for _, allowedOID := range allowedOIDs {
+		if observedOID == allowedOID {
+			return nil
+		}
+	}
+	if err := database.RecordExactRecoveryUnexpectedRemoteOID(run.ID, sourceRef, observedOID); err != nil {
+		return err
+	}
+	return fmt.Errorf("exact recovery remote ref observed unexpected OID %s", observedOID)
+}
+
 // ValidateExactFinalHeadRecoveryExternalState proves that the previously
 // published branch and PR still have the identities frozen on the failed run.
 // Recovery may then resume the unpublished exact candidate without replacing
@@ -72,14 +94,16 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, database *
 		run.PushTargetFingerprint == nil || *run.PushTargetFingerprint != branchsync.TargetFingerprint(pushURL) {
 		return fmt.Errorf("recorded push target no longer matches repository routing")
 	}
+	event, err := database.GetRunRecoveryEvent(run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		return err
+	}
 	publishedObservation, err := exactRecoveryLsRemote(ctx, workDir, pushURL, ref)
 	if err != nil {
 		return fmt.Errorf("read exact final-head recovery published head: %w", err)
 	}
 	if publishedObservation.Invalid != "" {
-		if event, eventErr := database.GetRunRecoveryEvent(run.ID, db.RunRecoveryExactFinalHeadCapacity); eventErr != nil {
-			return eventErr
-		} else if event != nil {
+		if event != nil {
 			if persistErr := database.RecordExactRecoveryRemoteRefAmbiguity(run.ID, publishedObservation.Invalid); persistErr != nil {
 				return fmt.Errorf(
 					"read exact final-head recovery published head: %w; persist remote ambiguity: %v",
@@ -114,6 +138,11 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, database *
 	publishedMatchesExact := allowExactPublished && publishedHead == run.HeadSHA &&
 		(*run.LastPushedSHA == run.HeadSHA || pushRunning)
 	if !publishedMatchesRecorded && !publishedMatchesExact {
+		if event != nil {
+			if persistErr := persistExactRecoveryUnexpectedRemoteOID(database, run, ref, publishedHead); persistErr != nil {
+				return fmt.Errorf("published branch head matches neither recorded delivery phase; persist unexpected OID: %w", persistErr)
+			}
+		}
 		return fmt.Errorf("published branch head matches neither recorded delivery phase")
 	}
 

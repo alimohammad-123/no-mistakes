@@ -136,6 +136,11 @@ CREATE TABLE IF NOT EXISTS run_recovery_remote_ref_ambiguities (
     observed_last_pushed_sha   TEXT NOT NULL,
     observed_push_generation   INTEGER NOT NULL,
     classification             TEXT NOT NULL,
+    observed_oid               TEXT NOT NULL DEFAULT '',
+    observed_push_active       INTEGER NOT NULL DEFAULT 0,
+    observed_push_step_status  TEXT NOT NULL DEFAULT '',
+    observed_operation_id      TEXT NOT NULL DEFAULT '',
+    observed_operation_phase   TEXT NOT NULL DEFAULT '',
     observed_at                INTEGER NOT NULL
 );
 
@@ -366,6 +371,11 @@ var migrationStatements = []string{
 	`ALTER TABLE step_results ADD COLUMN auto_fix_limit INTEGER`,
 	`ALTER TABLE run_recovery_events ADD COLUMN delivery_protocol_version INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE run_recovery_events ADD COLUMN anchor_ref TEXT`,
+	`ALTER TABLE run_recovery_remote_ref_ambiguities ADD COLUMN observed_oid TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_remote_ref_ambiguities ADD COLUMN observed_push_active INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE run_recovery_remote_ref_ambiguities ADD COLUMN observed_push_step_status TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_remote_ref_ambiguities ADD COLUMN observed_operation_id TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_remote_ref_ambiguities ADD COLUMN observed_operation_phase TEXT NOT NULL DEFAULT ''`,
 	// Session-fidelity telemetry columns (all nullable so pre-existing rows read
 	// back as unknown, never a fabricated zero).
 	`ALTER TABLE agent_invocations ADD COLUMN model_provider TEXT`,

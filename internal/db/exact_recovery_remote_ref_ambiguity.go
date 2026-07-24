@@ -14,6 +14,7 @@ const (
 	ExactRecoveryRemoteRefPeeled           = "peeled"
 	ExactRecoveryRemoteRefIdentityMismatch = "identity-mismatch"
 	ExactRecoveryRemoteRefMalformed        = "malformed"
+	ExactRecoveryRemoteRefUnexpectedOID    = "unexpected-oid"
 )
 
 type ExactRecoveryRemoteRefAmbiguity struct {
@@ -27,6 +28,11 @@ type ExactRecoveryRemoteRefAmbiguity struct {
 	ObservedLastPushedSHA  string
 	ObservedPushGeneration int64
 	Classification         string
+	ObservedOID            string
+	ObservedPushActive     bool
+	ObservedPushStepStatus types.StepStatus
+	ObservedOperationID    string
+	ObservedOperationPhase string
 	ObservedAt             int64
 }
 
@@ -36,7 +42,8 @@ func validExactRecoveryRemoteRefClassification(classification string) bool {
 		ExactRecoveryRemoteRefDuplicate,
 		ExactRecoveryRemoteRefPeeled,
 		ExactRecoveryRemoteRefIdentityMismatch,
-		ExactRecoveryRemoteRefMalformed:
+		ExactRecoveryRemoteRefMalformed,
+		ExactRecoveryRemoteRefUnexpectedOID:
 		return true
 	default:
 		return false
@@ -48,7 +55,9 @@ func getExactRecoveryRemoteRefAmbiguity(q queryRower, runID string) (*ExactRecov
 	err := q.QueryRow(
 		`SELECT run_id, recovery_event_id, source_ref, stale_oid, target_oid,
 		        target_kind, target_fingerprint, observed_last_pushed_sha,
-		        observed_push_generation, classification, observed_at
+		        observed_push_generation, classification, observed_oid,
+		        observed_push_active, observed_push_step_status,
+		        observed_operation_id, observed_operation_phase, observed_at
 		 FROM run_recovery_remote_ref_ambiguities WHERE run_id = ?`,
 		runID,
 	).Scan(
@@ -56,7 +65,9 @@ func getExactRecoveryRemoteRefAmbiguity(q queryRower, runID string) (*ExactRecov
 		&ambiguity.StaleOID, &ambiguity.TargetOID, &ambiguity.TargetKind,
 		&ambiguity.TargetFingerprint, &ambiguity.ObservedLastPushedSHA,
 		&ambiguity.ObservedPushGeneration, &ambiguity.Classification,
-		&ambiguity.ObservedAt,
+		&ambiguity.ObservedOID, &ambiguity.ObservedPushActive,
+		&ambiguity.ObservedPushStepStatus, &ambiguity.ObservedOperationID,
+		&ambiguity.ObservedOperationPhase, &ambiguity.ObservedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -86,10 +97,35 @@ func (d *DB) CheckExactRecoveryRemoteRefAmbiguity(runID string) error {
 	return ensureNoExactRecoveryRemoteRefAmbiguity(d.sql, runID)
 }
 
-func recordExactRecoveryRemoteRefAmbiguity(tx *sql.Tx, event *RunRecoveryEvent, run *Run, classification string) error {
+func validExactRecoveryObservedOID(observedOID, expectedOID string) bool {
+	if len(observedOID) != 40 && len(observedOID) != 64 {
+		return false
+	}
+	if (len(expectedOID) == 40 || len(expectedOID) == 64) && len(observedOID) != len(expectedOID) {
+		return false
+	}
+	for _, char := range observedOID {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func recordExactRecoveryRemoteRefAmbiguity(tx *sql.Tx, event *RunRecoveryEvent, run *Run, sourceRef, classification, observedOID string) error {
+	sourceRef = strings.TrimSpace(sourceRef)
 	classification = strings.TrimSpace(classification)
-	if event == nil || run == nil || !validExactRecoveryRemoteRefClassification(classification) {
+	observedOID = strings.TrimSpace(observedOID)
+	if event == nil || run == nil || sourceRef != event.SourceRef ||
+		!validExactRecoveryRemoteRefClassification(classification) {
 		return fmt.Errorf("record exact recovery remote-ref ambiguity: identity or classification is invalid")
+	}
+	if classification == ExactRecoveryRemoteRefUnexpectedOID {
+		if !validExactRecoveryObservedOID(observedOID, event.HeadSHA) {
+			return fmt.Errorf("record exact recovery remote-ref ambiguity: unexpected OID is invalid")
+		}
+	} else if observedOID != "" {
+		return fmt.Errorf("record exact recovery remote-ref ambiguity: structural observation includes an OID")
 	}
 	existing, err := getExactRecoveryRemoteRefAmbiguity(tx, run.ID)
 	if err != nil {
@@ -130,25 +166,83 @@ func recordExactRecoveryRemoteRefAmbiguity(tx *sql.Tx, event *RunRecoveryEvent, 
 	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM run_head_transitions WHERE run_id = ?)`, run.ID).Scan(&pendingTransition); err != nil || pendingTransition {
 		return fmt.Errorf("record exact recovery remote-ref ambiguity: head transition is pending")
 	}
-	result, err := tx.Exec(
-		`INSERT INTO run_recovery_remote_ref_ambiguities (
+	var pushStatus types.StepStatus
+	if err := tx.QueryRow(
+		`SELECT status FROM step_results WHERE run_id = ? AND step_name = ?`,
+		run.ID, types.StepPush,
+	).Scan(&pushStatus); err != nil {
+		return fmt.Errorf("record exact recovery remote-ref ambiguity: Push phase is missing")
+	}
+	operation, err := getExactRecoveryPushOperation(tx, run.ID)
+	if err != nil {
+		return err
+	}
+	operationID := ""
+	operationPhase := ""
+	if operation != nil {
+		if operation.SourceRef != event.SourceRef ||
+			operation.StaleOID != event.LastPushedSHA || operation.TargetOID != event.HeadSHA ||
+			operation.TargetKind != event.PushTargetKind ||
+			operation.TargetFingerprint != event.PushTargetFingerprint ||
+			operation.PriorGeneration != event.PushGeneration ||
+			operation.TargetGeneration != event.PushGeneration+1 ||
+			operation.PriorPushedAt != event.LastPushedAt {
+			return fmt.Errorf("record exact recovery remote-ref ambiguity: Push operation identity changed")
+		}
+		operationID = operation.OperationID
+		operationPhase = operation.Phase
+	}
+	operationCAS := `NOT EXISTS (SELECT 1 FROM run_recovery_push_operations WHERE run_id = ?)`
+	operationArgs := []any{run.ID}
+	if operation != nil {
+		operationCAS = `EXISTS (
+			SELECT 1 FROM run_recovery_push_operations
+			 WHERE run_id = ? AND operation_id = ? AND phase = ?
+			   AND source_ref = ? AND stale_oid = ? AND target_oid = ?
+			   AND target_kind = ? AND target_fingerprint = ?
+			   AND prior_generation = ? AND target_generation = ? AND prior_pushed_at = ?
+		)`
+		operationArgs = []any{
+			run.ID, operation.OperationID, operation.Phase, operation.SourceRef,
+			operation.StaleOID, operation.TargetOID, operation.TargetKind,
+			operation.TargetFingerprint, operation.PriorGeneration,
+			operation.TargetGeneration, operation.PriorPushedAt,
+		}
+	}
+	query := `INSERT INTO run_recovery_remote_ref_ambiguities (
 			run_id, recovery_event_id, source_ref, stale_oid, target_oid,
 			target_kind, target_fingerprint, observed_last_pushed_sha,
-			observed_push_generation, classification, observed_at
-		) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			observed_push_generation, classification, observed_oid,
+			observed_push_active, observed_push_step_status,
+			observed_operation_id, observed_operation_phase, observed_at
+		) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		  WHERE EXISTS (
 			SELECT 1 FROM runs
 			 WHERE id = ? AND status = ? AND error IS NULL AND head_sha = ? AND test_head_sha = ?
 			   AND validation_replay_count = ? AND custody_returned_at IS NULL
 			   AND last_pushed_sha = ? AND push_generation = ?
 			   AND push_target_kind = ? AND push_target_fingerprint = ? AND push_ref = ?
-		  )`,
+			   AND COALESCE(push_active, 0) = ?
+		  )
+		    AND EXISTS (
+			SELECT 1 FROM step_results
+			 WHERE run_id = ? AND step_name = ? AND status = ?
+		    )
+		    AND ` + operationCAS
+	args := []any{
 		run.ID, event.ID, event.SourceRef, event.LastPushedSHA, event.HeadSHA,
 		event.PushTargetKind, event.PushTargetFingerprint, *run.LastPushedSHA,
-		*run.PushGeneration, classification, now(),
+		*run.PushGeneration, classification, observedOID, run.PushActive,
+		pushStatus, operationID, operationPhase, now(),
 		run.ID, types.RunRunning, event.HeadSHA, event.TestHeadSHA,
 		event.ReplayCount, *run.LastPushedSHA, *run.PushGeneration,
 		event.PushTargetKind, event.PushTargetFingerprint, event.SourceRef,
+		run.PushActive, run.ID, types.StepPush, pushStatus,
+	}
+	args = append(args, operationArgs...)
+	result, err := tx.Exec(
+		query,
+		args...,
 	)
 	if err != nil {
 		return fmt.Errorf("record exact recovery remote-ref ambiguity: persist: %w", err)
@@ -159,7 +253,7 @@ func recordExactRecoveryRemoteRefAmbiguity(tx *sql.Tx, event *RunRecoveryEvent, 
 	return nil
 }
 
-func (d *DB) RecordExactRecoveryRemoteRefAmbiguity(runID, classification string) error {
+func (d *DB) recordExactRecoveryRemoteRefAmbiguity(runID, sourceRef, classification, observedOID string) error {
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return fmt.Errorf("record exact recovery remote-ref ambiguity: begin: %w", err)
@@ -176,11 +270,28 @@ func (d *DB) RecordExactRecoveryRemoteRefAmbiguity(runID, classification string)
 	if err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id = ?`, runID), &run); err != nil {
 		return fmt.Errorf("record exact recovery remote-ref ambiguity: read run: %w", err)
 	}
-	if err := recordExactRecoveryRemoteRefAmbiguity(tx, event, &run, classification); err != nil {
+	if err := recordExactRecoveryRemoteRefAmbiguity(tx, event, &run, sourceRef, classification, observedOID); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("record exact recovery remote-ref ambiguity: commit: %w", err)
 	}
 	return nil
+}
+
+func (d *DB) RecordExactRecoveryRemoteRefAmbiguity(runID, classification string) error {
+	event, err := d.GetRunRecoveryEvent(runID, RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		return err
+	}
+	if event == nil {
+		return fmt.Errorf("record exact recovery remote-ref ambiguity: recovery provenance is missing")
+	}
+	return d.recordExactRecoveryRemoteRefAmbiguity(runID, event.SourceRef, classification, "")
+}
+
+func (d *DB) RecordExactRecoveryUnexpectedRemoteOID(runID, sourceRef, observedOID string) error {
+	return d.recordExactRecoveryRemoteRefAmbiguity(
+		runID, sourceRef, ExactRecoveryRemoteRefUnexpectedOID, observedOID,
+	)
 }

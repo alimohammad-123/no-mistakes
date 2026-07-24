@@ -3,6 +3,7 @@ package db
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -410,6 +411,112 @@ func TestExactRecoveryRemoteRefAmbiguityIsProviderIndependentAndTerminal(t *test
 			}
 			if !run.PushActive || run.LastPushedSHA == nil || *run.LastPushedSHA != f.pushed {
 				t.Fatalf("terminal ambiguity changed Push custody: %#v", run)
+			}
+		})
+	}
+}
+
+func TestExactRecoveryUnexpectedRemoteOIDIsProviderIndependentAndTerminal(t *testing.T) {
+	thirdOID := strings.Repeat("a", 40)
+	for _, provider := range []string{"github", "gitlab", "azure-devops"} {
+		t.Run(provider, func(t *testing.T) {
+			f, restored, _ := prepareExactRecoveryPushCrash(t)
+			if operation, err := f.d.GetExactRecoveryPushOperation(restored.ID); err != nil || operation != nil {
+				t.Fatalf("provider-neutral recovery unexpectedly has operation %#v, %v", operation, err)
+			}
+			if err := f.d.RecordExactRecoveryUnexpectedRemoteOID(
+				restored.ID, "refs/heads/feature", thirdOID,
+			); err != nil {
+				t.Fatal(err)
+			}
+			ambiguity, err := f.d.GetExactRecoveryRemoteRefAmbiguity(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ambiguity == nil ||
+				ambiguity.Classification != ExactRecoveryRemoteRefUnexpectedOID ||
+				ambiguity.ObservedOID != thirdOID ||
+				ambiguity.SourceRef != "refs/heads/feature" ||
+				!ambiguity.ObservedPushActive ||
+				ambiguity.ObservedPushStepStatus != types.StepStatusRunning ||
+				ambiguity.ObservedOperationID != "" ||
+				ambiguity.ObservedOperationPhase != "" {
+				t.Fatalf("unexpected OID ambiguity = %#v", ambiguity)
+			}
+			if err := f.d.RecordExactRecoveryUnexpectedRemoteOID(
+				restored.ID, "refs/heads/feature", strings.Repeat("b", 40),
+			); err == nil {
+				t.Fatal("competing unexpected OID replaced terminal state")
+			}
+			for _, later := range []string{f.pushed, restored.HeadSHA} {
+				if reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+					restored.ID, later, "refs/heads/feature", restored.HeadSHA,
+					now()+30, 3, types.AllSteps(),
+				); err == nil || reconciled {
+					t.Fatalf("later OID %q erased terminal ambiguity: reconciled=%v err=%v", later, reconciled, err)
+				}
+			}
+			run, err := f.d.GetRun(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !run.PushActive || run.LastPushedSHA == nil || *run.LastPushedSHA != f.pushed {
+				t.Fatalf("unexpected OID changed Push custody: %#v", run)
+			}
+		})
+	}
+}
+
+func TestExactRecoveryUnexpectedRemoteOIDPersistenceFailureStops(t *testing.T) {
+	f, restored, _ := prepareExactRecoveryPushCrash(t)
+	if _, err := f.d.sql.Exec(
+		`CREATE TRIGGER fail_unexpected_recovery_oid
+		 BEFORE INSERT ON run_recovery_remote_ref_ambiguities
+		 BEGIN
+		   SELECT RAISE(ABORT, 'injected unexpected OID persistence failure');
+		 END`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.RecordExactRecoveryUnexpectedRemoteOID(
+		restored.ID, "refs/heads/feature", strings.Repeat("c", 40),
+	); err == nil {
+		t.Fatal("unexpected OID persistence failure was accepted")
+	}
+	if ambiguity, err := f.d.GetExactRecoveryRemoteRefAmbiguity(restored.ID); err != nil || ambiguity != nil {
+		t.Fatalf("failed unexpected OID persistence left state %#v, %v", ambiguity, err)
+	}
+	run, err := f.d.GetRun(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !run.PushActive || run.LastPushedSHA == nil || *run.LastPushedSHA != f.pushed {
+		t.Fatalf("failed unexpected OID persistence changed Push custody: %#v", run)
+	}
+}
+
+func TestExactRecoveryUnexpectedRemoteOIDRefusesWrongBinding(t *testing.T) {
+	tests := []struct {
+		name      string
+		sourceRef string
+		observed  func(*exactFinalHeadRecoveryFixture, *Run) string
+	}{
+		{
+			name:      "wrong-ref",
+			sourceRef: "refs/heads/other",
+			observed:  func(*exactFinalHeadRecoveryFixture, *Run) string { return strings.Repeat("b", 40) },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f, restored, _ := prepareExactRecoveryPushCrash(t)
+			if err := f.d.RecordExactRecoveryUnexpectedRemoteOID(
+				restored.ID, test.sourceRef, test.observed(f, restored),
+			); err == nil {
+				t.Fatal("wrong-binding OID was recorded as unexpected")
+			}
+			if ambiguity, err := f.d.GetExactRecoveryRemoteRefAmbiguity(restored.ID); err != nil || ambiguity != nil {
+				t.Fatalf("rejected observation persisted ambiguity %#v, %v", ambiguity, err)
 			}
 		})
 	}
