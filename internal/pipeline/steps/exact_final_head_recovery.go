@@ -11,15 +11,19 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // ValidateExactFinalHeadRecoveryExternalState proves that the previously
 // published branch and PR still have the identities frozen on the failed run.
 // Recovery may then resume the unpublished exact candidate without replacing
 // the PR or claiming that the candidate was already delivered.
-func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, cfg *config.Config, allowExactPublished bool) error {
+func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, database *db.DB, run *db.Run, repo *db.Repo, workDir string, cfg *config.Config, allowExactPublished bool) error {
 	if run == nil || repo == nil || cfg == nil || run.PRURL == nil || run.LastPushedSHA == nil {
 		return fmt.Errorf("exact final-head recovery external state is incomplete")
+	}
+	if database == nil {
+		return fmt.Errorf("exact final-head recovery database is missing")
 	}
 	if strings.TrimSpace(*run.PRURL) == "" || strings.TrimSpace(*run.LastPushedSHA) == "" ||
 		(!allowExactPublished && *run.LastPushedSHA == run.HeadSHA) {
@@ -47,7 +51,21 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, run *db.Ru
 		return fmt.Errorf("read exact final-head recovery published head: %w", err)
 	}
 	publishedMatchesRecorded := publishedHead == *run.LastPushedSHA
-	publishedMatchesExact := allowExactPublished && publishedHead == run.HeadSHA
+	pushRunning := false
+	if allowExactPublished {
+		results, err := database.GetStepsByRun(run.ID)
+		if err != nil {
+			return fmt.Errorf("read exact final-head recovery delivery phase: %w", err)
+		}
+		for _, result := range results {
+			if result.StepName == types.StepPush {
+				pushRunning = result.Status == types.StepStatusRunning
+				break
+			}
+		}
+	}
+	publishedMatchesExact := allowExactPublished && publishedHead == run.HeadSHA &&
+		(*run.LastPushedSHA == run.HeadSHA || pushRunning)
 	if !publishedMatchesRecorded && !publishedMatchesExact {
 		return fmt.Errorf("published branch head matches neither recorded delivery phase")
 	}
@@ -77,6 +95,33 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, run *db.Ru
 	}
 	if state != scm.PRStateOpen {
 		return fmt.Errorf("stored PR is no longer open: %s", state)
+	}
+	update, err := database.GetExactRecoveryPRUpdate(run.ID)
+	if err != nil {
+		return err
+	}
+	if update != nil {
+		reader, ok := host.(scm.PRContentReader)
+		if !ok {
+			return fmt.Errorf("provider %s cannot verify exact recovery PR content", provider)
+		}
+		content, err := reader.GetPRContent(ctx, existing)
+		if err != nil {
+			return fmt.Errorf("read exact recovery PR content: %w", err)
+		}
+		contentHash := db.ExactRecoveryPRContentHash(content.Title, content.Body)
+		switch update.State {
+		case db.ExactRecoveryPRUpdatePrepared:
+			if contentHash != update.PriorContentHash && contentHash != update.IntendedContentHash {
+				return fmt.Errorf("exact recovery PR content is stale, partial, or superseded")
+			}
+		case db.ExactRecoveryPRUpdateApplied:
+			if contentHash != update.IntendedContentHash {
+				return fmt.Errorf("applied exact recovery PR content changed")
+			}
+		default:
+			return fmt.Errorf("exact recovery PR update phase is invalid")
+		}
 	}
 	return nil
 }

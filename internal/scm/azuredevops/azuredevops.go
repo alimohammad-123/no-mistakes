@@ -220,6 +220,14 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	return pr, nil
 }
 
+func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, error) {
+	got, err := h.showPR(ctx, pr)
+	if err != nil {
+		return scm.PRContent{}, err
+	}
+	return scm.PRContent{Title: got.Title, Body: got.Description}, nil
+}
+
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
 	got, err := h.showPR(ctx, pr)
 	if err != nil {

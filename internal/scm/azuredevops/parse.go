@@ -10,6 +10,8 @@ import (
 // azPR is the subset of `az repos pr show/list/create` JSON output we consume.
 type azPR struct {
 	PullRequestID int    `json:"pullRequestId"`
+	Title         string `json:"title"`
+	Description   string `json:"description"`
 	Status        string `json:"status"`      // active | completed | abandoned
 	MergeStatus   string `json:"mergeStatus"` // notSet | queued | conflicts | succeeded | rejectedByPolicy | failure
 	SourceRefName string `json:"sourceRefName"`

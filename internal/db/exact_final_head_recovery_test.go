@@ -300,7 +300,7 @@ func TestValidateActiveExactFinalHeadCapacityRecoverySpansProofClosureAndPush(t 
 	if err := f.d.ValidateActiveExactFinalHeadCapacityRecovery(restored.ID, 3, types.AllSteps()); err != nil {
 		t.Fatalf("validate after exact proof closure: %v", err)
 	}
-	if err := f.d.CompleteStep(pushID, 0, 1, "push.log"); err != nil {
+	if err := f.d.StartStep(pushID); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.d.UpdateRunPushBinding(restored.ID, PushBinding{
@@ -309,7 +309,83 @@ func TestValidateActiveExactFinalHeadCapacityRecoverySpansProofClosureAndPush(t 
 		t.Fatal(err)
 	}
 	if err := f.d.ValidateActiveExactFinalHeadCapacityRecovery(restored.ID, 3, types.AllSteps()); err != nil {
+		t.Fatalf("validate exact binding before Push completion: %v", err)
+	}
+	if bound, err := f.d.ExactRecoveryPushAlreadyBound(restored.ID, restored.HeadSHA); err != nil || !bound {
+		t.Fatalf("exact recovery Push binding = %v, %v", bound, err)
+	}
+	if err := f.d.CompleteStep(pushID, 0, 1, "push.log"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.ValidateActiveExactFinalHeadCapacityRecovery(restored.ID, 3, types.AllSteps()); err != nil {
 		t.Fatalf("validate after exact push: %v", err)
+	}
+}
+
+func TestExactRecoveryPRUpdatePersistsEveryMutationBoundary(t *testing.T) {
+	f := newExactFinalHeadRecoveryFixture(t)
+	failure := f.inspect()
+	restored, err := f.d.RestoreExactFinalHeadCapacityFailure(f.run.ID, failure.EvidenceToken, 3, types.AllSteps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps, err := f.d.GetStepsByRun(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[types.StepName]*StepResult, len(steps))
+	for _, step := range steps {
+		byName[step.StepName] = step
+	}
+	for _, name := range []types.StepName{types.StepDocument, types.StepLint} {
+		if err := f.d.CompleteStep(byName[name].ID, 0, 1, string(name)+".log"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.d.CompleteHeadValidation(restored.ID, restored.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.StartStep(byName[types.StepPush].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.UpdateRunPushBinding(restored.ID, PushBinding{
+		HeadSHA: restored.HeadSHA, TargetKind: "upstream", TargetFingerprint: "target-fingerprint", Ref: "refs/heads/feature",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.CompleteStep(byName[types.StepPush].ID, 0, 1, "push.log"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.StartStep(byName[types.StepPR].ID); err != nil {
+		t.Fatal(err)
+	}
+	update, err := f.d.PrepareExactRecoveryPRUpdate(
+		restored.ID, byName[types.StepPR].ID, *restored.PRURL, restored.HeadSHA,
+		"prior title", "prior body", "intended title", "intended body",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if update.State != ExactRecoveryPRUpdatePrepared || update.AppliedAt != nil {
+		t.Fatalf("prepared PR update = %#v", update)
+	}
+	if err := f.d.ValidateActiveExactFinalHeadCapacityRecovery(restored.ID, 3, types.AllSteps()); err != nil {
+		t.Fatalf("validate prepared PR update: %v", err)
+	}
+	if err := f.d.MarkExactRecoveryPRUpdateApplied(restored.ID, "intended title", "intended body"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.ValidateActiveExactFinalHeadCapacityRecovery(restored.ID, 3, types.AllSteps()); err != nil {
+		t.Fatalf("validate applied running PR update: %v", err)
+	}
+	if err := f.d.CompleteStep(byName[types.StepPR].ID, 0, 1, "pr.log"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.ValidateActiveExactFinalHeadCapacityRecovery(restored.ID, 3, types.AllSteps()); err != nil {
+		t.Fatalf("validate applied completed PR update: %v", err)
+	}
+	if err := f.d.MarkExactRecoveryPRUpdateApplied(restored.ID, "other", "content"); err == nil {
+		t.Fatal("mismatched remote content marked applied")
 	}
 }
 

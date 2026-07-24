@@ -171,7 +171,7 @@ func (m *RunManager) handleRecoverExactFinalHeadCapacityLocked(ctx context.Conte
 	if cfg == nil || cfg.Commands.Test == "" {
 		return cleanupCreated(fmt.Errorf("trusted configured Test command is missing"))
 	}
-	if err := validateExactFinalHeadRecoveryExternalState(ctx, run, repo, workDir, cfg, false); err != nil {
+	if err := validateExactFinalHeadRecoveryExternalState(ctx, m.db, run, repo, workDir, cfg, false); err != nil {
 		return cleanupCreated(fmt.Errorf("external delivery state: %w", err))
 	}
 	if m.shuttingDown.Load() {
@@ -187,7 +187,7 @@ func (m *RunManager) handleRecoverExactFinalHeadCapacityLocked(ctx context.Conte
 		}
 		return cleanupCreated(err)
 	}
-	if err := validateExactFinalHeadRecoveryExternalState(ctx, run, repo, workDir, cfg, false); err != nil {
+	if err := validateExactFinalHeadRecoveryExternalState(ctx, m.db, run, repo, workDir, cfg, false); err != nil {
 		return cleanupCreated(fmt.Errorf("external delivery state changed before claim: %w", err))
 	}
 	restored, err := m.db.RestoreExactFinalHeadCapacityFailure(run.ID, failure.EvidenceToken, pipeline.MaxHeadValidationReplays, stepNames(m.steps()))

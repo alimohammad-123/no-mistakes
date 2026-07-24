@@ -155,6 +155,7 @@ Missing, ambiguous, changed, already-delivered, differently failed, or unrelated
 At the exact replay boundary, Document assesses the candidate in a disposable isolated clone.
 A no-op continues through Lint, exact proof closure, Push, the existing PR update, and CI.
 A proposed repository change is discarded and fails with the three-target bound intact; it never creates a fourth candidate.
+If delivery is interrupted, recovery verifies the remote ref against the durable Push phase and never republishes an already-bound exact head. The existing PR update records its canonical identity, prior-content digest, intended content, and applied state so restart can finish an exact already-applied update without repeating it, retry only an unchanged prior state, and refuse partial or superseded content.
 
 ## no-mistakes axi respond
 

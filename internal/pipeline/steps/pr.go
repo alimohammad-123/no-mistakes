@@ -17,7 +17,9 @@ import (
 )
 
 // PRStep creates or updates a pull request via the provider CLI or API.
-type PRStep struct{}
+type PRStep struct {
+	hostFactory func(*pipeline.StepContext, scm.Provider) (scm.Host, string)
+}
 
 type prContent struct {
 	Title string `json:"title"`
@@ -66,7 +68,11 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	provider := scm.DetectProviderContext(ctx, sctx.Repo.UpstreamURL)
-	host, skipReason := buildHost(sctx, provider)
+	hostFactory := s.hostFactory
+	if hostFactory == nil {
+		hostFactory = buildHost
+	}
+	host, skipReason := hostFactory(sctx, provider)
 	if host == nil {
 		sctx.Log(fmt.Sprintf("skipping PR creation: %s", skipReason))
 		return &pipeline.StepOutcome{Skipped: true}, nil
@@ -78,10 +84,6 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 
 	// Resolve the branch base so PR summaries cover the full branch delta.
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, baseBranch)
-	content, err := s.buildPRContent(sctx, branch, baseSHA, scm.MaxPRBodyChars(provider))
-	if err != nil {
-		return nil, err
-	}
 
 	sctx.Log(fmt.Sprintf("checking for existing pull request on branch %s...", branch))
 	existing, err := host.FindPR(ctx, branch, baseBranch)
@@ -101,6 +103,42 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		}
 	}
 	if existing != nil {
+		recoveryUpdate, err := sctx.DB.GetExactRecoveryPRUpdate(sctx.Run.ID)
+		if err != nil {
+			return nil, err
+		}
+		if recoveryUpdate != nil {
+			return s.executeExactRecoveryPRUpdate(sctx, host, existing, recoveryUpdate)
+		}
+		content, err := s.buildPRContent(sctx, branch, baseSHA, scm.MaxPRBodyChars(provider))
+		if err != nil {
+			return nil, err
+		}
+		recoveryEvent, err := sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
+		if err != nil {
+			return nil, err
+		}
+		if recoveryEvent != nil {
+			if recoveryEvent.DeliveryProtocol != 1 {
+				return nil, fmt.Errorf("exact recovery PR update lacks durable delivery protocol")
+			}
+			reader, ok := host.(scm.PRContentReader)
+			if !ok {
+				return nil, fmt.Errorf("provider %s cannot verify exact recovery PR content", provider)
+			}
+			prior, err := reader.GetPRContent(ctx, existing)
+			if err != nil {
+				return nil, fmt.Errorf("read exact recovery PR content before update: %w", err)
+			}
+			recoveryUpdate, err = sctx.DB.PrepareExactRecoveryPRUpdate(
+				sctx.Run.ID, sctx.StepResultID, expectedPRURL, sctx.Run.HeadSHA,
+				prior.Title, prior.Body, content.Title, content.Body,
+			)
+			if err != nil {
+				return nil, err
+			}
+			return s.executeExactRecoveryPRUpdate(sctx, host, existing, recoveryUpdate)
+		}
 		sctx.Log(fmt.Sprintf("pull request already exists: %s, updating...", describePR(existing)))
 		updated, err := host.UpdatePR(ctx, existing, scm.PRContent(content))
 		if err != nil {
@@ -116,6 +154,10 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return &pipeline.StepOutcome{}, nil
 	}
 
+	content, err := s.buildPRContent(sctx, branch, baseSHA, scm.MaxPRBodyChars(provider))
+	if err != nil {
+		return nil, err
+	}
 	sctx.Log("creating pull request...")
 	created, err := host.CreatePR(ctx, branch, baseBranch, scm.PRContent(content))
 	if err != nil {
@@ -129,6 +171,54 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		slog.Warn("failed to persist PR URL", "run", sctx.Run.ID, "url", created.URL, "err", err)
 	}
 	return &pipeline.StepOutcome{PRURL: created.URL}, nil
+}
+
+func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host scm.Host, existing *scm.PR, update *db.ExactRecoveryPRUpdate) (*pipeline.StepOutcome, error) {
+	if update == nil || existing == nil || strings.TrimSpace(existing.URL) != update.TargetURL ||
+		update.HeadSHA != sctx.Run.HeadSHA ||
+		update.IntendedContentHash != db.ExactRecoveryPRContentHash(update.IntendedTitle, update.IntendedBody) {
+		return nil, fmt.Errorf("exact recovery PR update identity is inconsistent")
+	}
+	reader, ok := host.(scm.PRContentReader)
+	if !ok {
+		return nil, fmt.Errorf("provider %s cannot verify exact recovery PR content", host.Provider())
+	}
+	current, err := reader.GetPRContent(sctx.Ctx, existing)
+	if err != nil {
+		return nil, fmt.Errorf("read exact recovery PR content: %w", err)
+	}
+	currentHash := db.ExactRecoveryPRContentHash(current.Title, current.Body)
+	switch {
+	case currentHash == update.IntendedContentHash:
+		if err := sctx.DB.MarkExactRecoveryPRUpdateApplied(sctx.Run.ID, current.Title, current.Body); err != nil {
+			return nil, err
+		}
+	case currentHash == update.PriorContentHash && update.State == db.ExactRecoveryPRUpdatePrepared:
+		sctx.Log(fmt.Sprintf("pull request already exists: %s, applying guarded update...", describePR(existing)))
+		updated, err := host.UpdatePR(sctx.Ctx, existing, scm.PRContent{Title: update.IntendedTitle, Body: update.IntendedBody})
+		if err != nil {
+			return nil, fmt.Errorf("apply exact recovery PR update: %w", err)
+		}
+		if updated == nil {
+			updated = existing
+		}
+		if strings.TrimSpace(updated.URL) != update.TargetURL {
+			return nil, fmt.Errorf("exact recovery PR identity changed after update")
+		}
+		verified, err := reader.GetPRContent(sctx.Ctx, updated)
+		if err != nil {
+			return nil, fmt.Errorf("verify exact recovery PR update: %w", err)
+		}
+		if db.ExactRecoveryPRContentHash(verified.Title, verified.Body) != update.IntendedContentHash {
+			return nil, fmt.Errorf("verify exact recovery PR update: remote content differs from durable intent")
+		}
+		if err := sctx.DB.MarkExactRecoveryPRUpdateApplied(sctx.Run.ID, verified.Title, verified.Body); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("exact recovery PR content is stale, partial, or superseded")
+	}
+	return &pipeline.StepOutcome{PRURL: update.TargetURL}, nil
 }
 
 func describePR(pr *scm.PR) string {

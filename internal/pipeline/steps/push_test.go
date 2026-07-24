@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestPushStep_ReconcilesStaleDatabaseHeadSHA(t *testing.T) {
@@ -197,6 +199,43 @@ func TestPushStep_AllowsExactBoundaryDeliveryWithoutLocalMutation(t *testing.T) 
 	}
 	if run.LastPushedSHA == nil || *run.LastPushedSHA != headSHA || run.PushActive {
 		t.Fatalf("exact boundary push state = %#v", run)
+	}
+}
+
+func TestPushStep_ExactRecoveryReusesDurableBindingWithoutRepublishing(t *testing.T) {
+	sctx, _ := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+	results, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range results {
+		switch result.StepName {
+		case types.StepPush:
+			if err := sctx.DB.UpdateStepStatus(result.ID, types.StepStatusRunning); err != nil {
+				t.Fatal(err)
+			}
+			sctx.StepResultID = result.ID
+		case types.StepPR:
+			if err := sctx.DB.UpdateStepStatus(result.ID, types.StepStatusPending); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	before, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	after, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.PushGeneration == nil || after.PushGeneration == nil ||
+		*after.PushGeneration != *before.PushGeneration || after.LastPushedSHA == nil ||
+		*after.LastPushedSHA != after.HeadSHA {
+		t.Fatalf("recovered Push binding changed: before=%#v after=%#v", before, after)
 	}
 }
 

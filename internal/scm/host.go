@@ -97,6 +97,10 @@ type PRContent struct {
 	Body  string
 }
 
+type PRContentReader interface {
+	GetPRContent(ctx context.Context, pr *PR) (PRContent, error)
+}
+
 // PRState is the normalized lifecycle state of a PR.
 type PRState string
 

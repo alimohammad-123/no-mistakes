@@ -47,6 +47,7 @@ type RunRecoveryEvent struct {
 	DocumentStepID        string
 	PriorStepStatus       types.StepStatus
 	PriorStepError        string
+	DeliveryProtocol      int
 }
 
 // ExactFinalHeadCapacityFailure is a read-only admission snapshot. Its token
@@ -75,7 +76,8 @@ func getRunRecoveryEvent(q queryRower, runID, kind string) (*RunRecoveryEvent, e
 		`SELECT id, run_id, kind, recovered_at, evidence_token, prior_status, prior_error,
 		        head_sha, test_head_sha, validation_target_sha, replay_count, source_ref,
 		        pr_url, last_pushed_sha, push_target_kind, push_target_fingerprint,
-		        push_generation, last_pushed_at, document_step_id, prior_step_status, prior_step_error
+		        push_generation, last_pushed_at, document_step_id, prior_step_status, prior_step_error,
+		        COALESCE(delivery_protocol_version, 0)
 		 FROM run_recovery_events WHERE run_id = ? AND kind = ?`,
 		runID, kind,
 	).Scan(
@@ -84,7 +86,7 @@ func getRunRecoveryEvent(q queryRower, runID, kind string) (*RunRecoveryEvent, e
 		&event.ValidationTargetSHA, &event.ReplayCount, &event.SourceRef, &event.PRURL,
 		&event.LastPushedSHA, &event.PushTargetKind, &event.PushTargetFingerprint,
 		&event.PushGeneration, &event.LastPushedAt, &event.DocumentStepID,
-		&event.PriorStepStatus, &event.PriorStepError,
+		&event.PriorStepStatus, &event.PriorStepError, &event.DeliveryProtocol,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -362,14 +364,15 @@ func (d *DB) RestoreExactFinalHeadCapacityFailure(runID, evidenceToken string, m
 			id, run_id, kind, recovered_at, evidence_token, prior_status, prior_error,
 			head_sha, test_head_sha, validation_target_sha, replay_count, source_ref,
 			pr_url, last_pushed_sha, push_target_kind, push_target_fingerprint,
-			push_generation, last_pushed_at, document_step_id, prior_step_status, prior_step_error
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			push_generation, last_pushed_at, document_step_id, prior_step_status, prior_step_error,
+			delivery_protocol_version
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		newID(), runID, RunRecoveryExactFinalHeadCapacity, ts, failure.EvidenceToken,
 		failure.Run.Status, *failure.Run.Error, failure.Run.HeadSHA, *failure.Run.TestHeadSHA,
 		*failure.Run.ValidationTargetSHA, failure.Run.ValidationReplayCount, failure.CanonicalRef,
 		failure.StoredPRURL, failure.LastPushedSHA, *failure.Run.PushTargetKind,
 		*failure.Run.PushTargetFingerprint, *failure.Run.PushGeneration, *failure.Run.LastPushedAt,
-		failure.Document.ID, failure.Document.Status, *failure.Document.Error,
+		failure.Document.ID, failure.Document.Status, *failure.Document.Error, 1,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("restore exact final-head capacity failure: append recovery provenance: %w", err)
@@ -462,7 +465,8 @@ func (d *DB) ValidateActiveExactFinalHeadCapacityRecovery(runID string, maxRepla
 	if document.ID != event.DocumentStepID {
 		return fmt.Errorf("validate active exact final-head capacity recovery: Document identity changed")
 	}
-	var documentStatus, lintStatus, pushStatus types.StepStatus
+	var documentStatus, lintStatus, pushStatus, prStatus types.StepStatus
+	var prStepID string
 	for _, step := range steps {
 		switch step.StepName {
 		case types.StepDocument:
@@ -471,6 +475,9 @@ func (d *DB) ValidateActiveExactFinalHeadCapacityRecovery(runID string, maxRepla
 			lintStatus = step.Status
 		case types.StepPush:
 			pushStatus = step.Status
+		case types.StepPR:
+			prStatus = step.Status
+			prStepID = step.ID
 		}
 	}
 	completed := func(status types.StepStatus) bool {
@@ -487,9 +494,40 @@ func (d *DB) ValidateActiveExactFinalHeadCapacityRecovery(runID string, maxRepla
 			return fmt.Errorf("validate active exact final-head capacity recovery: Push advanced without publishing the exact head")
 		}
 	} else {
-		if *run.LastPushedSHA != run.HeadSHA || !completed(pushStatus) ||
+		pushDurable := completed(pushStatus) || pushStatus == types.StepStatusRunning
+		if *run.LastPushedSHA != run.HeadSHA || !pushDurable ||
 			*run.PushGeneration != event.PushGeneration+1 || *run.LastPushedAt < event.LastPushedAt {
 			return fmt.Errorf("validate active exact final-head capacity recovery: exact published-head provenance is incomplete")
+		}
+	}
+	prUpdate, err := d.GetExactRecoveryPRUpdate(runID)
+	if err != nil {
+		return err
+	}
+	if prUpdate != nil {
+		if prUpdate.StepResultID != prStepID || prUpdate.TargetURL != event.PRURL ||
+			prUpdate.HeadSHA != event.HeadSHA || prUpdate.IntendedContentHash == "" ||
+			prUpdate.PriorContentHash == "" || event.DeliveryProtocol != 1 {
+			return fmt.Errorf("validate active exact final-head capacity recovery: PR update provenance is inconsistent")
+		}
+		switch prStatus {
+		case types.StepStatusRunning:
+			if prUpdate.State != ExactRecoveryPRUpdatePrepared && prUpdate.State != ExactRecoveryPRUpdateApplied {
+				return fmt.Errorf("validate active exact final-head capacity recovery: PR update phase is invalid")
+			}
+		case types.StepStatusCompleted:
+			if prUpdate.State != ExactRecoveryPRUpdateApplied || prUpdate.AppliedAt == nil {
+				return fmt.Errorf("validate active exact final-head capacity recovery: completed PR lacks applied provenance")
+			}
+		default:
+			return fmt.Errorf("validate active exact final-head capacity recovery: PR update exists outside its step")
+		}
+	} else {
+		if prStatus == types.StepStatusRunning && event.DeliveryProtocol != 1 {
+			return fmt.Errorf("validate active exact final-head capacity recovery: interrupted PR update has ambiguous provenance")
+		}
+		if prStatus == types.StepStatusCompleted && event.DeliveryProtocol == 1 {
+			return fmt.Errorf("validate active exact final-head capacity recovery: completed PR update lacks durable provenance")
 		}
 	}
 	return nil

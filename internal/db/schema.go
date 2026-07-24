@@ -92,7 +92,22 @@ CREATE TABLE IF NOT EXISTS run_recovery_events (
     document_step_id        TEXT NOT NULL,
     prior_step_status     TEXT NOT NULL,
     prior_step_error      TEXT NOT NULL,
+    delivery_protocol_version INTEGER NOT NULL DEFAULT 0,
     UNIQUE (run_id, kind)
+);
+
+CREATE TABLE IF NOT EXISTS run_recovery_pr_updates (
+    run_id               TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    step_result_id       TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+    target_url           TEXT NOT NULL,
+    head_sha             TEXT NOT NULL,
+    prior_content_hash   TEXT NOT NULL,
+    intended_content_hash TEXT NOT NULL,
+    intended_title       TEXT NOT NULL,
+    intended_body        TEXT NOT NULL,
+    state                TEXT NOT NULL,
+    prepared_at          INTEGER NOT NULL,
+    applied_at           INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS step_results (
@@ -248,6 +263,7 @@ var migrationStatements = []string{
 	`ALTER TABLE step_results ADD COLUMN last_activity TEXT`,
 	`ALTER TABLE step_results ADD COLUMN agent_pid INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN auto_fix_limit INTEGER`,
+	`ALTER TABLE run_recovery_events ADD COLUMN delivery_protocol_version INTEGER NOT NULL DEFAULT 0`,
 	// Session-fidelity telemetry columns (all nullable so pre-existing rows read
 	// back as unknown, never a fabricated zero).
 	`ALTER TABLE agent_invocations ADD COLUMN model_provider TEXT`,

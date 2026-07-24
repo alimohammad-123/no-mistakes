@@ -29,6 +29,27 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	defer releaseCustody()
 
+	alreadyBound, err := sctx.DB.ExactRecoveryPushAlreadyBound(sctx.Run.ID, sctx.Run.HeadSHA)
+	if err != nil {
+		return nil, err
+	}
+	if alreadyBound {
+		if err := sctx.ValidateDeliveryCandidate(); err != nil {
+			return nil, err
+		}
+		ref := normalizedBranchRef(sctx.Run.Branch)
+		pushURL := resolvePushURL(sctx)
+		remoteHead, err := git.LsRemote(ctx, sctx.WorkDir, pushURL, ref)
+		if err != nil {
+			return nil, fmt.Errorf("verify recovered exact push binding: %w", err)
+		}
+		if remoteHead != sctx.Run.HeadSHA {
+			return nil, fmt.Errorf("verify recovered exact push binding: remote head %s does not equal candidate %s", remoteHead, sctx.Run.HeadSHA)
+		}
+		sctx.Log("exact candidate already has its durable push binding")
+		return &pipeline.StepOutcome{}, nil
+	}
+
 	// Run format command if configured (before committing, so changes are formatted)
 	if fmtCmd := sctx.Config.Commands.Format; fmtCmd != "" {
 		if err := sctx.PreflightHeadMutation(); err != nil {

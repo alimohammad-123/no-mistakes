@@ -29,6 +29,8 @@ type RepoRef struct {
 type PullRequest struct {
 	ID               int
 	URL              string
+	Title            string
+	Description      string
 	State            string
 	SourceCommitHash string
 }
@@ -313,9 +315,11 @@ func readTail(r io.Reader, maxBytes int) ([]byte, error) {
 }
 
 type bitbucketPullRequest struct {
-	ID     int    `json:"id"`
-	State  string `json:"state"`
-	Source struct {
+	ID          int    `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	State       string `json:"state"`
+	Source      struct {
 		Commit struct {
 			Hash string `json:"hash"`
 		} `json:"commit"`
@@ -331,6 +335,8 @@ func (pr bitbucketPullRequest) toPullRequest() *PullRequest {
 	return &PullRequest{
 		ID:               pr.ID,
 		URL:              strings.TrimSpace(pr.Links.HTML.Href),
+		Title:            pr.Title,
+		Description:      pr.Description,
 		State:            strings.TrimSpace(pr.State),
 		SourceCommitHash: strings.TrimSpace(pr.Source.Commit.Hash),
 	}

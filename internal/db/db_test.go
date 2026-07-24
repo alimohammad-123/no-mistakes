@@ -41,6 +41,9 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if err := d.sql.QueryRow("SELECT count(*) FROM run_recovery_events").Scan(&count); err != nil {
 		t.Fatalf("run_recovery_events table missing: %v", err)
 	}
+	if err := d.sql.QueryRow("SELECT count(*) FROM run_recovery_pr_updates").Scan(&count); err != nil {
+		t.Fatalf("run_recovery_pr_updates table missing: %v", err)
+	}
 	if err := d.sql.QueryRow("SELECT count(*) FROM bootstrap_test_retirements").Scan(&count); err != nil {
 		t.Fatalf("bootstrap_test_retirements table missing: %v", err)
 	}
@@ -58,6 +61,9 @@ func TestOpenCreatesSchema(t *testing.T) {
 		if !hasColumn(t, d, "step_results", column) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
 		}
+	}
+	if !hasColumn(t, d, "run_recovery_events", "delivery_protocol_version") {
+		t.Fatal("run_recovery_events.delivery_protocol_version column missing from fresh schema")
 	}
 }
 
