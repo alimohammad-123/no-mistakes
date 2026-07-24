@@ -1,0 +1,32 @@
+internal/db/schema.go
+  s_7b0dcaa05c2128::t_828f8af15fc175 128-141
+internal/pipeline/pipeline.go
+  s_7b0dcaa05c2128::t_8535e8cd8ef151 333-337
+internal/db/exact_recovery_remote_ref_ambiguity.go
+  s_7b0dcaa05c2128::t_828f8af15fc175 1-186
+internal/db/exact_final_head_recovery.go
+  s_7b0dcaa05c2128::t_8535e8cd8ef151 439-441
+internal/db/exact_final_head_recovery_test.go
+  s_7b0dcaa05c2128::t_f6de8d943a6856 360-447
+  s_7b0dcaa05c2128::t_559783795c831f 448-489
+internal/db/exact_final_head_delivery.go
+  s_7b0dcaa05c2128::t_8535e8cd8ef151 90-92,174-176,325-336
+internal/pipeline/steps/push.go
+  s_7b0dcaa05c2128::t_8c5822bcf9e1eb 249-250,257,260-267,270-274
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "7f5afe72a004c620ca700df2a76ef750b7a2a2ee",
+  "prompts": {},
+  "sessions": {
+    "s_7b0dcaa05c2128": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f916c-3947-7023-9409-782a9434f33e",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
