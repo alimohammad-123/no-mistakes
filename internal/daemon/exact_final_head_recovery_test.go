@@ -304,6 +304,27 @@ func TestHandleRecoverExactFinalHeadCapacityRefusesChangedExternalOrGateState(t 
 	}
 }
 
+func TestReconcileRecoveredPushCustodyRefusesLiveExecutorOwner(t *testing.T) {
+	oldReconcile := reconcileStaleExactFinalHeadPushCustody
+	calls := 0
+	reconcileStaleExactFinalHeadPushCustody = func(context.Context, *db.DB, *db.Run, *db.Repo, string, int, []types.StepName) (bool, error) {
+		calls++
+		return true, nil
+	}
+	t.Cleanup(func() {
+		reconcileStaleExactFinalHeadPushCustody = oldReconcile
+	})
+	manager := NewRunManager(nil, nil, nil)
+	run := &db.Run{ID: "run-with-live-owner", PushActive: true}
+	manager.executors[run.ID] = &pipeline.Executor{}
+	if _, err := manager.reconcileRecoveredPushCustody(context.Background(), run, &db.Repo{}, "", nil); err == nil {
+		t.Fatal("live executor owner was accepted")
+	}
+	if calls != 0 {
+		t.Fatalf("remote reconciliation calls = %d, want 0", calls)
+	}
+}
+
 func waitRunStatus(t *testing.T, d *db.DB, runID string, want types.RunStatus) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

@@ -125,3 +125,39 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, database *
 	}
 	return nil
 }
+
+func ReconcileStaleExactFinalHeadPushCustody(ctx context.Context, database *db.DB, run *db.Run, repo *db.Repo, workDir string, maxReplays int, expected []types.StepName) (bool, error) {
+	if database == nil || run == nil || repo == nil || !run.PushActive {
+		return false, fmt.Errorf("reconcile stale exact recovery Push custody: recovery context is incomplete")
+	}
+	ref, err := run.FrozenSourceRef()
+	if err != nil {
+		return false, err
+	}
+	sctx := &pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: workDir}
+	pushURL := resolvePushURL(sctx)
+	if strings.TrimSpace(pushURL) == "" {
+		return false, fmt.Errorf("reconcile stale exact recovery Push custody: canonical push URL is empty")
+	}
+	expectedTargetKind := "upstream"
+	if strings.TrimSpace(repo.ForkURL) != "" {
+		expectedTargetKind = "fork"
+	}
+	if run.PushTargetKind == nil || *run.PushTargetKind != expectedTargetKind ||
+		run.PushTargetFingerprint == nil || *run.PushTargetFingerprint != branchsync.TargetFingerprint(pushURL) ||
+		run.PushRef == nil || *run.PushRef != ref {
+		return false, fmt.Errorf("reconcile stale exact recovery Push custody: canonical push target changed")
+	}
+	remoteHead, err := git.LsRemote(ctx, workDir, pushURL, ref)
+	if err != nil {
+		return false, fmt.Errorf("reconcile stale exact recovery Push custody: read canonical remote: %w", err)
+	}
+	reconciled, err := database.ReconcileStaleExactRecoveryPushCustody(run.ID, remoteHead, maxReplays, expected)
+	if err != nil {
+		return false, err
+	}
+	if !reconciled {
+		return false, fmt.Errorf("reconcile stale exact recovery Push custody: custody was not active")
+	}
+	return true, nil
+}

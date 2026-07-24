@@ -23,8 +23,40 @@ import (
 var (
 	prepareExactFinalHeadRecoveryRuntime        = defaultPrepareExactFinalHeadRecoveryRuntime
 	validateExactFinalHeadRecoveryExternalState = steps.ValidateExactFinalHeadRecoveryExternalState
+	reconcileStaleExactFinalHeadPushCustody     = steps.ReconcileStaleExactFinalHeadPushCustody
 	addExactFinalHeadRecoveryWorktree           = git.WorktreeAdd
 )
+
+func (m *RunManager) reconcileRecoveredPushCustody(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, execSteps []pipeline.Step) (*db.Run, error) {
+	if run == nil || !run.PushActive {
+		return run, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, hasExecutor := m.executors[run.ID]
+	_, hasCancel := m.cancels[run.ID]
+	_, hasDone := m.dones[run.ID]
+	if hasExecutor || hasCancel || hasDone {
+		return nil, fmt.Errorf("reconcile stale exact recovery Push custody: run still has a live executor owner")
+	}
+	reconciled, err := reconcileStaleExactFinalHeadPushCustody(
+		ctx, m.db, run, repo, workDir, pipeline.MaxHeadValidationReplays, stepNames(execSteps),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !reconciled {
+		return nil, fmt.Errorf("reconcile stale exact recovery Push custody: custody was not reconciled")
+	}
+	refreshed, err := m.db.GetRun(run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile stale exact recovery Push custody: reload run: %w", err)
+	}
+	if refreshed == nil || refreshed.PushActive {
+		return nil, fmt.Errorf("reconcile stale exact recovery Push custody: durable custody remains active")
+	}
+	return refreshed, nil
+}
 
 func defaultPrepareExactFinalHeadRecoveryRuntime(ctx context.Context, manager *RunManager, run *db.Run, repo *db.Repo, workDir string) (*config.Config, agent.Agent, error) {
 	cfg, err := manager.loadRecoveredConfig(ctx, run, repo, workDir)

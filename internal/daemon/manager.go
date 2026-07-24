@@ -246,6 +246,10 @@ func (m *RunManager) prepareRecoveredHeadValidationRun(ctx context.Context, run 
 	if err := sourceprovenance.VerifyCandidateBinding(ctx, workDir, sourceRef, run.HeadSHA); err != nil {
 		return nil, fmt.Errorf("worktree source ref does not match run head: %w", err)
 	}
+	run, err = m.reconcileRecoveredPushCustody(ctx, run, repo, workDir, execSteps)
+	if err != nil {
+		return nil, err
+	}
 	if err := pipeline.ValidateHeadValidationRecovery(m.db, run, execSteps); err != nil {
 		return nil, err
 	}

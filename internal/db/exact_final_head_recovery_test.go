@@ -322,6 +322,98 @@ func TestValidateActiveExactFinalHeadCapacityRecoverySpansProofClosureAndPush(t 
 	}
 }
 
+func prepareExactRecoveryPushCrash(t *testing.T) (*exactFinalHeadRecoveryFixture, *Run, string) {
+	t.Helper()
+	f := newExactFinalHeadRecoveryFixture(t)
+	failure := f.inspect()
+	restored, err := f.d.RestoreExactFinalHeadCapacityFailure(f.run.ID, failure.EvidenceToken, 3, types.AllSteps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps, err := f.d.GetStepsByRun(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[types.StepName]*StepResult, len(steps))
+	for _, step := range steps {
+		byName[step.StepName] = step
+	}
+	for _, name := range []types.StepName{types.StepDocument, types.StepLint} {
+		if err := f.d.CompleteStep(byName[name].ID, 0, 1, string(name)+".log"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.d.CompleteHeadValidation(restored.ID, restored.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.StartStep(byName[types.StepPush].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.SetRunPushActive(restored.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	return f, restored, byName[types.StepPush].ID
+}
+
+func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.T) {
+	tests := []struct {
+		name           string
+		remoteHead     string
+		advanceBinding bool
+		completePush   bool
+		wantError      bool
+		wantBound      bool
+	}{
+		{name: "before push", remoteHead: "published-head"},
+		{name: "after remote mutation before binding", remoteHead: "head-3", wantBound: true},
+		{name: "after binding before completion", remoteHead: "head-3", advanceBinding: true, wantBound: true},
+		{name: "after completion before release", remoteHead: "head-3", advanceBinding: true, completePush: true, wantBound: true},
+		{name: "remote mismatch", remoteHead: "other-head", wantError: true},
+		{name: "completed without binding", remoteHead: "head-3", completePush: true, wantError: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, restored, pushID := prepareExactRecoveryPushCrash(t)
+			if tc.advanceBinding {
+				if err := f.d.UpdateRunPushBinding(restored.ID, PushBinding{
+					HeadSHA: restored.HeadSHA, TargetKind: "upstream", TargetFingerprint: "target-fingerprint", Ref: "refs/heads/feature",
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.completePush {
+				if err := f.d.CompleteStep(pushID, 0, 1, "push.log"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(restored.ID, tc.remoteHead, 3, types.AllSteps())
+			if tc.wantError {
+				if err == nil || reconciled {
+					t.Fatalf("inconsistent crash state reconciled: reconciled=%v err=%v", reconciled, err)
+				}
+			} else if err != nil || !reconciled {
+				t.Fatalf("reconcile crash state: reconciled=%v err=%v", reconciled, err)
+			}
+			got, err := f.d.GetRun(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.PushActive == !tc.wantError {
+				t.Fatalf("push_active = %v after reconciliation error=%v", got.PushActive, tc.wantError)
+			}
+			if tc.wantBound && (got.LastPushedSHA == nil || *got.LastPushedSHA != restored.HeadSHA ||
+				got.PushGeneration == nil || *got.PushGeneration != 2) {
+				t.Fatalf("exact binding was not preserved: %#v", got)
+			}
+			if !tc.wantError {
+				if again, err := f.d.ReconcileStaleExactRecoveryPushCustody(restored.ID, tc.remoteHead, 3, types.AllSteps()); err != nil || again {
+					t.Fatalf("repeated reconciliation = %v, %v", again, err)
+				}
+			}
+		})
+	}
+}
+
 func TestExactRecoveryPRUpdatePersistsEveryMutationBoundary(t *testing.T) {
 	f := newExactFinalHeadRecoveryFixture(t)
 	failure := f.inspect()
