@@ -409,30 +409,15 @@ func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef
 		}
 	case priorBinding && pushStatus == types.StepStatusRunning && remoteHead == event.HeadSHA:
 		if operation == nil {
-			ts := now()
-			result, err := tx.Exec(
-				`UPDATE runs
-				 SET last_pushed_sha = ?, push_generation = ?, last_pushed_at = ?, push_active = 0, updated_at = ?
-				 WHERE id = ? AND status = ? AND head_sha = ? AND test_head_sha = ?
-				   AND validation_target_sha IS NULL AND validation_replay_count = ?
-				   AND last_pushed_sha = ? AND push_generation = ? AND last_pushed_at = ?
-				   AND push_target_kind = ? AND push_target_fingerprint = ? AND push_ref = ?
-				   AND COALESCE(push_active, 0) = 1 AND custody_returned_at IS NULL`,
-				event.HeadSHA, event.PushGeneration+1, ts, ts, runID, types.RunRunning,
-				event.HeadSHA, event.TestHeadSHA, maxReplays, event.LastPushedSHA,
-				event.PushGeneration, event.LastPushedAt, event.PushTargetKind,
-				event.PushTargetFingerprint, event.SourceRef,
-			)
-			if err != nil {
-				return false, fmt.Errorf("reconcile stale exact recovery Push custody: bind observed exact head: %w", err)
-			}
-			if changed, err := result.RowsAffected(); err != nil || changed != 1 {
-				return false, fmt.Errorf("reconcile stale exact recovery Push custody: durable state changed before exact-head binding")
+			if err := recordExactRecoveryRemoteRefAmbiguity(
+				tx, event, &run, sourceRef, ExactRecoveryRemoteRefUnexpectedOID, remoteHead,
+			); err != nil {
+				return false, err
 			}
 			if err := tx.Commit(); err != nil {
-				return false, fmt.Errorf("reconcile stale exact recovery Push custody: commit exact-head binding: %w", err)
+				return false, fmt.Errorf("reconcile stale exact recovery Push custody: commit unattributed target: %w", err)
 			}
-			return true, nil
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: exact head lacks operation provenance")
 		}
 		if operation.Phase == ExactRecoveryPushPrepared {
 			recordErr := recordExactRecoveryRefObservation(tx, observation, operation, &run, remoteHead)
@@ -443,6 +428,10 @@ func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef
 		}
 		if operation.Phase != ExactRecoveryPushInvoked {
 			return false, fmt.Errorf("reconcile stale exact recovery Push custody: exact head lacks matching invocation")
+		}
+		if operation.ReceiptOID == nil || *operation.ReceiptOID != operation.TargetOID ||
+			operation.ReceiptAt == nil {
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: exact head lacks operation-bound success receipt")
 		}
 		if err := bindExactRecoveryPushOperation(tx, &run, operation, event); err != nil {
 			return false, err

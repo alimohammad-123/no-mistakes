@@ -246,7 +246,7 @@ func (d *DB) PrepareExactRecoveryRefObservation(runID, provider, sourceRef, expe
 	); err != nil {
 		return nil, fmt.Errorf("prepare exact recovery ref observation: persist event: %w", err)
 	}
-	operation, err := createExactRecoveryPushOperation(tx, event, deadlineAt)
+	operation, err := createExactRecoveryPushOperation(tx, event, provider, deadlineAt)
 	if err != nil {
 		return nil, err
 	}

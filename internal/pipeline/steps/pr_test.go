@@ -300,6 +300,11 @@ func TestExactRecoveryAzureRefJournalPersistsAcrossRestart(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	if err := sctx.DB.RecordExactRecoveryPushSuccessReceipt(
+		sctx.Run.ID, operation.OperationID, operation.ReceiptRef, sctx.Run.HeadSHA,
+	); err != nil {
+		t.Fatal(err)
+	}
 	if err := sctx.DB.BindExactRecoveryPushOperation(sctx.Run.ID, operation.OperationID, db.PushBinding{
 		HeadSHA: sctx.Run.HeadSHA, TargetKind: "upstream",
 		TargetFingerprint: branchsync.TargetFingerprint(resolvePushURL(sctx)),
@@ -498,6 +503,11 @@ func TestPushStep_ExactRecoveryAzureRefJournalPreventsAmbiguousPublication(t *te
 			waitCalls++
 			if waitCalls == 2 {
 				gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.HeadSHA, sctx.Run.BaseSHA)
+				operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+				if err != nil {
+					return err
+				}
+				gitCmd(t, sctx.WorkDir, "update-ref", operation.ReceiptRef, sctx.Run.HeadSHA)
 			}
 			return nil
 		}
@@ -533,7 +543,7 @@ func TestPushStep_ExactRecoveryAzureRefJournalPreventsAmbiguousPublication(t *te
 			t.Fatalf("pending observation history = %#v", observations)
 		}
 	})
-	t.Run("external success after invocation binds without duplicate push", func(t *testing.T) {
+	t.Run("operation receipt after successful Push binds without duplicate push", func(t *testing.T) {
 		sctx, _ := exactRecoveryDeliveryStepContext(
 			t, scm.PRContent{Title: "prior title", Body: "prior body"}, true,
 		)
@@ -552,9 +562,8 @@ func TestPushStep_ExactRecoveryAzureRefJournalPreventsAmbiguousPublication(t *te
 			recoveryRefObserved: func(_ *pipeline.StepContext, _ string) (string, error) {
 				return gitCmd(t, upstream, "rev-parse", "refs/heads/feature"), nil
 			},
-			invocationMarked: func() error {
-				gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.HeadSHA, sctx.Run.BaseSHA)
-				return errors.New("simulated crash after remote success")
+			successReceiptWritten: func() error {
+				return errors.New("simulated crash after operation receipt")
 			},
 		}
 		if _, err := step.Execute(sctx); err == nil {
@@ -563,9 +572,13 @@ func TestPushStep_ExactRecoveryAzureRefJournalPreventsAmbiguousPublication(t *te
 		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 			t.Fatal(err)
 		}
-		reconciled, err := sctx.DB.ReconcileStaleExactRecoveryPushCustody(
-			sctx.Run.ID, sctx.Run.HeadSHA, "refs/heads/feature", sctx.Run.HeadSHA,
-			time.Now().Add(time.Minute).Unix(), 3, types.AllSteps(),
+		sctx.Run, err = sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reconciled, err := ReconcileStaleExactFinalHeadPushCustody(
+			context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir,
+			3, types.AllSteps(),
 		)
 		if err != nil || !reconciled {
 			t.Fatalf("reconcile post-mutation crash = %v, %v", reconciled, err)
@@ -622,16 +635,19 @@ func TestPRStep_ExactRecoveryRefusesProviderIndependentRemoteAmbiguity(t *testin
 
 func TestPRStep_ExactRecoveryRefusesLifecycleIdentityAndHeadDrift(t *testing.T) {
 	tests := []struct {
-		name   string
-		mutate func(*exactRecoveryPRHost)
+		name           string
+		mutate         func(*exactRecoveryPRHost)
+		classification string
 	}{
 		{name: "closed", mutate: func(h *exactRecoveryPRHost) { h.state = scm.PRStateClosed }},
 		{name: "merged", mutate: func(h *exactRecoveryPRHost) {
 			h.state = scm.PRStateMerged
 			h.merged = true
 		}},
-		{name: "head drift", mutate: func(h *exactRecoveryPRHost) { h.headSHA = strings.Repeat("a", 40) }},
-		{name: "source branch drift", mutate: func(h *exactRecoveryPRHost) { h.headRef = "other" }},
+		{name: "head drift", mutate: func(h *exactRecoveryPRHost) { h.headSHA = strings.Repeat("a", 40) }, classification: db.ExactRecoveryRemoteRefUnexpectedOID},
+		{name: "missing head", mutate: func(h *exactRecoveryPRHost) { h.headSHA = "" }, classification: db.ExactRecoveryRemoteRefMissing},
+		{name: "malformed head", mutate: func(h *exactRecoveryPRHost) { h.headSHA = "not-an-oid" }, classification: db.ExactRecoveryRemoteRefMalformed},
+		{name: "source branch drift", mutate: func(h *exactRecoveryPRHost) { h.headRef = "other" }, classification: db.ExactRecoveryRemoteRefIdentityMismatch},
 		{name: "base drift", mutate: func(h *exactRecoveryPRHost) { h.baseRef = "release" }},
 		{name: "repository drift", mutate: func(h *exactRecoveryPRHost) { h.repository = "other/repo" }},
 		{name: "identity drift", mutate: func(h *exactRecoveryPRHost) { h.pr.URL = "https://github.com/test/repo/pull/99" }},
@@ -649,15 +665,24 @@ func TestPRStep_ExactRecoveryRefusesLifecycleIdentityAndHeadDrift(t *testing.T) 
 			if host.updateCalls != 0 {
 				t.Fatalf("stale PR was mutated %d times", host.updateCalls)
 			}
-			if tc.name == "head drift" {
+			if tc.classification != "" {
 				ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if ambiguity == nil ||
-					ambiguity.Classification != db.ExactRecoveryRemoteRefUnexpectedOID ||
-					ambiguity.ObservedOID != host.headSHA {
+				if ambiguity == nil || ambiguity.Classification != tc.classification {
 					t.Fatalf("PR head drift ambiguity = %#v", ambiguity)
+				}
+				if tc.classification == db.ExactRecoveryRemoteRefUnexpectedOID &&
+					ambiguity.ObservedOID != host.headSHA {
+					t.Fatalf("PR head drift observed OID = %#v", ambiguity)
+				}
+				host.headSHA = sctx.Run.HeadSHA
+				if _, err := step.Execute(sctx); err == nil {
+					t.Fatal("restart forgot durable PR-head ambiguity")
+				}
+				if host.updateCalls != 0 {
+					t.Fatalf("restart after PR-head ambiguity mutated PR %d times", host.updateCalls)
 				}
 			}
 		})

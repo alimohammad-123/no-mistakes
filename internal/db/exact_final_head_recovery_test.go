@@ -661,6 +661,11 @@ func TestExactRecoveryRefObservationJournalRefusesRememberedAmbiguity(t *testing
 				); err != nil {
 					t.Fatal(err)
 				}
+				if err := f.d.RecordExactRecoveryPushSuccessReceipt(
+					restored.ID, operation.OperationID, operation.ReceiptRef, restored.HeadSHA,
+				); err != nil {
+					t.Fatal(err)
+				}
 				if err := f.d.BindExactRecoveryPushOperation(
 					restored.ID, operation.OperationID, PushBinding{
 						HeadSHA: restored.HeadSHA, TargetKind: "upstream",
@@ -836,6 +841,7 @@ func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.
 		name         string
 		remoteHead   string
 		invoke       bool
+		receipt      bool
 		bind         bool
 		completePush bool
 		wantError    bool
@@ -847,9 +853,10 @@ func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.
 		{name: "prepared before push", remoteHead: "published-head", wantPhase: ExactRecoveryPushPrepared, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
 		{name: "delivered before invocation", remoteHead: "head-3", wantError: true, wantPhase: ExactRecoveryPushPrepared, wantAttempt: 1, wantState: ExactRecoveryRefObservationAmbiguous},
 		{name: "invoked before remote mutation", remoteHead: "published-head", invoke: true, wantError: true, wantPhase: ExactRecoveryPushInvoked, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
-		{name: "externally succeeded unverified", remoteHead: "head-3", invoke: true, wantBound: true, wantPhase: ExactRecoveryPushBound, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
-		{name: "after binding before completion", remoteHead: "head-3", invoke: true, bind: true, wantBound: true, wantPhase: ExactRecoveryPushBound, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
-		{name: "after completion before release", remoteHead: "head-3", invoke: true, bind: true, completePush: true, wantBound: true, wantPhase: ExactRecoveryPushBound, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
+		{name: "externally succeeded without receipt", remoteHead: "head-3", invoke: true, wantError: true, wantPhase: ExactRecoveryPushInvoked, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
+		{name: "externally succeeded with receipt", remoteHead: "head-3", invoke: true, receipt: true, wantBound: true, wantPhase: ExactRecoveryPushBound, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
+		{name: "after binding before completion", remoteHead: "head-3", invoke: true, receipt: true, bind: true, wantBound: true, wantPhase: ExactRecoveryPushBound, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
+		{name: "after completion before release", remoteHead: "head-3", invoke: true, receipt: true, bind: true, completePush: true, wantBound: true, wantPhase: ExactRecoveryPushBound, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
 		{name: "remote mismatch", remoteHead: "other-head", invoke: true, wantError: true, wantPhase: ExactRecoveryPushInvoked, wantAttempt: 1, wantState: ExactRecoveryRefObservationAmbiguous},
 		{name: "completed without binding", remoteHead: "head-3", invoke: true, completePush: true, wantError: true, wantPhase: ExactRecoveryPushInvoked, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
 	}
@@ -869,6 +876,13 @@ func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.
 			if tc.invoke {
 				if err := f.d.MarkExactRecoveryPushInvoked(
 					restored.ID, operation.OperationID, "published-head",
+				); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.receipt {
+				if err := f.d.RecordExactRecoveryPushSuccessReceipt(
+					restored.ID, operation.OperationID, operation.ReceiptRef, restored.HeadSHA,
 				); err != nil {
 					t.Fatal(err)
 				}

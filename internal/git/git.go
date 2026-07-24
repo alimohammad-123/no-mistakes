@@ -573,6 +573,25 @@ func PushSHA(ctx context.Context, dir, remote, sourceSHA, ref, expectedSHA strin
 	return PushSHAWithOptions(ctx, dir, remote, sourceSHA, ref, expectedSHA, forceWithLease, nil)
 }
 
+func PushSHAWithReceipt(ctx context.Context, dir, remote, sourceSHA, ref, expectedSHA string, forceWithLease bool, receiptRef string) error {
+	receiptRef = strings.TrimSpace(receiptRef)
+	if receiptRef == "" {
+		return fmt.Errorf("push receipt ref is required")
+	}
+	pushArgs := []string{remote}
+	alias := `!f() { git push "$1" "$2" && git update-ref "$3" "$4" ""; }; f`
+	if forceWithLease {
+		if expectedSHA == "" {
+			return fmt.Errorf("push receipt requires an exact force-with-lease OID")
+		}
+		pushArgs = append(pushArgs, fmt.Sprintf("--force-with-lease=%s:%s", ref, expectedSHA))
+		alias = `!f() { out=$(git push --porcelain "$2" "$1" "$3") || { code=$?; printf '%s\n' "$out"; exit "$code"; }; printf '%s\n' "$out"; printf '%s\n' "$out" | grep -Eq '^[+* ][[:space:]]' || exit 74; git update-ref "$4" "$5" ""; }; f`
+	}
+	pushArgs = append(pushArgs, sourceSHA+":"+ref, receiptRef, sourceSHA)
+	_, err := Run(ctx, dir, append([]string{"-c", "alias.nm-push-receipt=" + alias, "nm-push-receipt"}, pushArgs...)...)
+	return err
+}
+
 // PushSHAWithOptions is PushSHA with per-push options.
 func PushSHAWithOptions(ctx context.Context, dir, remote, sourceSHA, ref, expectedSHA string, forceWithLease bool, pushOptions []string) error {
 	args := []string{"push"}

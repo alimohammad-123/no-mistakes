@@ -382,6 +382,34 @@ func TestPushStep_ExactRecoveryPersistsUnexpectedRemoteOIDAfterLeaseRace(t *test
 	}
 }
 
+func TestPushStep_ExactRecoveryRefusesConcurrentSameTargetAfterFailedPush(t *testing.T) {
+	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
+	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+	step := &PushStep{beforeRemoteMutation: func() {
+		gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.HeadSHA, sctx.Run.BaseSHA)
+	}}
+	if _, err := step.Execute(sctx); err == nil {
+		t.Fatal("concurrent publication of the same target was attributed to the recovered Push")
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity == nil ||
+		ambiguity.Classification != db.ExactRecoveryRemoteRefUnexpectedOID ||
+		ambiguity.ObservedOID != sctx.Run.HeadSHA {
+		t.Fatalf("concurrent same-target ambiguity = %#v", ambiguity)
+	}
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation == nil || operation.Phase != db.ExactRecoveryPushInvoked ||
+		operation.ReceiptOID != nil {
+		t.Fatalf("failed Push operation provenance = %#v", operation)
+	}
+}
+
 func TestPushStep_ExactRecoveryRefMoveBeforePushPreventsPublication(t *testing.T) {
 	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"}, true)
 	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)

@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS run_recovery_push_operations (
     operation_id         TEXT NOT NULL UNIQUE,
     attempt              INTEGER NOT NULL,
     phase                TEXT NOT NULL,
+    provider             TEXT NOT NULL,
     source_ref           TEXT NOT NULL,
     stale_oid            TEXT NOT NULL,
     target_oid           TEXT NOT NULL,
@@ -159,6 +160,9 @@ CREATE TABLE IF NOT EXISTS run_recovery_push_operations (
     prior_pushed_at      INTEGER NOT NULL,
     created_at           INTEGER NOT NULL,
     invoked_at           INTEGER,
+    receipt_ref          TEXT NOT NULL,
+    receipt_oid          TEXT,
+    receipt_at           INTEGER,
     bound_at             INTEGER,
     updated_at           INTEGER NOT NULL
 );
@@ -178,6 +182,7 @@ CREATE TABLE IF NOT EXISTS run_recovery_push_attempts (
     attempt              INTEGER NOT NULL,
     operation_id         TEXT NOT NULL UNIQUE,
     phase                TEXT NOT NULL,
+    provider             TEXT NOT NULL,
     source_ref           TEXT NOT NULL,
     stale_oid            TEXT NOT NULL,
     target_oid           TEXT NOT NULL,
@@ -190,6 +195,9 @@ CREATE TABLE IF NOT EXISTS run_recovery_push_attempts (
     disposition          TEXT,
     prepared_at          INTEGER NOT NULL,
     invoked_at           INTEGER,
+    receipt_ref          TEXT NOT NULL,
+    receipt_oid          TEXT,
+    receipt_at           INTEGER,
     closed_at            INTEGER,
     PRIMARY KEY (run_id, attempt)
 );
@@ -376,6 +384,14 @@ var migrationStatements = []string{
 	`ALTER TABLE run_recovery_remote_ref_ambiguities ADD COLUMN observed_push_step_status TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE run_recovery_remote_ref_ambiguities ADD COLUMN observed_operation_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE run_recovery_remote_ref_ambiguities ADD COLUMN observed_operation_phase TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_push_operations ADD COLUMN provider TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_push_operations ADD COLUMN receipt_ref TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_push_operations ADD COLUMN receipt_oid TEXT`,
+	`ALTER TABLE run_recovery_push_operations ADD COLUMN receipt_at INTEGER`,
+	`ALTER TABLE run_recovery_push_attempts ADD COLUMN provider TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_push_attempts ADD COLUMN receipt_ref TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_push_attempts ADD COLUMN receipt_oid TEXT`,
+	`ALTER TABLE run_recovery_push_attempts ADD COLUMN receipt_at INTEGER`,
 	// Session-fidelity telemetry columns (all nullable so pre-existing rows read
 	// back as unknown, never a fabricated zero).
 	`ALTER TABLE agent_invocations ADD COLUMN model_provider TEXT`,

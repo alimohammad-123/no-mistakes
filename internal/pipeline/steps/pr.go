@@ -261,12 +261,33 @@ func validateExactRecoveryPRSnapshot(sctx *pipeline.StepContext, pr *scm.PR, exp
 	if snapshot.State != scm.PRStateOpen || snapshot.Merged {
 		return fmt.Errorf("exact recovery PR is no longer open and unmerged")
 	}
-	if strings.TrimSpace(snapshot.HeadRef) != branch || strings.TrimSpace(snapshot.BaseRef) != sctx.BaseBranch() {
+	if strings.TrimSpace(snapshot.HeadRef) != branch {
+		if err := sctx.DB.RecordExactRecoveryRemoteRefAmbiguity(
+			sctx.Run.ID, db.ExactRecoveryRemoteRefIdentityMismatch,
+		); err != nil {
+			return fmt.Errorf("exact recovery PR source changed; persist identity ambiguity: %w", err)
+		}
+		return fmt.Errorf("exact recovery PR source changed")
+	}
+	if strings.TrimSpace(snapshot.BaseRef) != sctx.BaseBranch() {
 		return fmt.Errorf("exact recovery PR source or base changed")
 	}
 	observedHead := strings.TrimSpace(snapshot.HeadSHA)
 	if observedHead == "" {
+		if err := sctx.DB.RecordExactRecoveryRemoteRefAmbiguity(
+			sctx.Run.ID, db.ExactRecoveryRemoteRefMissing,
+		); err != nil {
+			return fmt.Errorf("exact recovery PR head is missing; persist ambiguity: %w", err)
+		}
 		return fmt.Errorf("exact recovery PR head is missing")
+	}
+	if !validExactRecoveryPRHeadOID(observedHead, expectedHead) {
+		if err := sctx.DB.RecordExactRecoveryRemoteRefAmbiguity(
+			sctx.Run.ID, db.ExactRecoveryRemoteRefMalformed,
+		); err != nil {
+			return fmt.Errorf("exact recovery PR head is malformed; persist ambiguity: %w", err)
+		}
+		return fmt.Errorf("exact recovery PR head is malformed")
 	}
 	if observedHead != strings.TrimSpace(expectedHead) {
 		ref, err := sctx.Run.FrozenSourceRef()
@@ -282,6 +303,21 @@ func validateExactRecoveryPRSnapshot(sctx *pipeline.StepContext, pr *scm.PR, exp
 		return fmt.Errorf("exact recovery PR snapshot is incomplete")
 	}
 	return nil
+}
+
+func validExactRecoveryPRHeadOID(observed, expected string) bool {
+	if len(observed) != 40 && len(observed) != 64 {
+		return false
+	}
+	if (len(expected) == 40 || len(expected) == 64) && len(observed) != len(expected) {
+		return false
+	}
+	for _, char := range observed {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *PRStep) validateRemoteMutationOwnership(sctx *pipeline.StepContext) error {

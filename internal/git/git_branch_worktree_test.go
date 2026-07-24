@@ -286,6 +286,38 @@ func TestPushWithOptionsForwardsPushOptions(t *testing.T) {
 	}
 }
 
+func TestPushSHAWithReceiptBindsSuccessfulExactPush(t *testing.T) {
+	ctx := context.Background()
+	src := initTestRepo(t)
+	bare := filepath.Join(t.TempDir(), "dest.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	run(t, src, "git", "remote", "add", "dest", bare)
+	if err := Push(ctx, src, "dest", "refs/heads/main", "", false); err != nil {
+		t.Fatal(err)
+	}
+	prior := run(t, src, "git", "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(src, "receipt.txt"), []byte("receipt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, src, "git", "add", "receipt.txt")
+	run(t, src, "git", "commit", "-m", "receipt target")
+	target := run(t, src, "git", "rev-parse", "HEAD")
+	receiptRef := "refs/no-mistakes/push-receipts/test-operation"
+	if err := PushSHAWithReceipt(
+		ctx, src, "dest", target, "refs/heads/main", prior, true, receiptRef,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Run(ctx, bare, "rev-parse", "refs/heads/main"); err != nil || got != target {
+		t.Fatalf("remote target = %q, %v; want %q", got, err, target)
+	}
+	if got, err := Run(ctx, src, "rev-parse", receiptRef); err != nil || got != target {
+		t.Fatalf("success receipt = %q, %v; want %q", got, err, target)
+	}
+}
+
 func TestPushForceWithLease(t *testing.T) {
 	ctx := context.Background()
 	src := initTestRepo(t)

@@ -333,6 +333,44 @@ func ReconcileStaleExactFinalHeadPushCustody(ctx context.Context, database *db.D
 			return false, err
 		}
 		if operation != nil && operation.Phase == db.ExactRecoveryPushInvoked &&
+			remoteHead == operation.TargetOID && operation.ReceiptOID == nil {
+			receiptOID, receiptErr := exactRecoveryPushReceiptOID(sctx, operation)
+			if receiptErr == nil {
+				if err := database.RecordExactRecoveryPushSuccessReceipt(
+					run.ID, operation.OperationID, operation.ReceiptRef, receiptOID,
+				); err != nil {
+					return false, err
+				}
+				operation, err = database.GetExactRecoveryPushOperation(run.ID)
+				if err != nil {
+					return false, err
+				}
+			} else {
+				observation, err := database.GetExactRecoveryRefObservation(run.ID)
+				if err != nil {
+					return false, err
+				}
+				now := exactRecoveryReconcileNow()
+				if observation != nil && observation.DeadlineAt > now.Unix() {
+					delay := exactRecoveryRefReconcilePollInterval
+					remaining := time.Unix(observation.DeadlineAt, 0).Sub(now)
+					if remaining < delay {
+						delay = remaining
+					}
+					if delay > 0 {
+						if err := exactRecoveryReconcileWait(ctx, delay); err != nil {
+							return false, err
+						}
+					}
+					continue
+				}
+				if err := database.RecordExactRecoveryUnexpectedRemoteOID(run.ID, ref, remoteHead); err != nil {
+					return false, fmt.Errorf("reconcile stale exact recovery Push custody: persist unattributed target: %w", err)
+				}
+				return false, fmt.Errorf("reconcile stale exact recovery Push custody: target lacks operation-bound success receipt")
+			}
+		}
+		if operation != nil && operation.Phase == db.ExactRecoveryPushInvoked &&
 			remoteHead == operation.StaleOID {
 			observation, err := database.GetExactRecoveryRefObservation(run.ID)
 			if err != nil {

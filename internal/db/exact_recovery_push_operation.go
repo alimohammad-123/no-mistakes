@@ -22,6 +22,7 @@ type ExactRecoveryPushOperation struct {
 	OperationID       string
 	Attempt           int
 	Phase             string
+	Provider          string
 	SourceRef         string
 	StaleOID          string
 	TargetOID         string
@@ -32,6 +33,9 @@ type ExactRecoveryPushOperation struct {
 	PriorPushedAt     int64
 	CreatedAt         int64
 	InvokedAt         *int64
+	ReceiptRef        string
+	ReceiptOID        *string
+	ReceiptAt         *int64
 	BoundAt           *int64
 	UpdatedAt         int64
 }
@@ -50,6 +54,7 @@ type ExactRecoveryPushAttempt struct {
 	Attempt           int
 	OperationID       string
 	Phase             string
+	Provider          string
 	SourceRef         string
 	StaleOID          string
 	TargetOID         string
@@ -62,6 +67,9 @@ type ExactRecoveryPushAttempt struct {
 	Disposition       *string
 	PreparedAt        int64
 	InvokedAt         *int64
+	ReceiptRef        string
+	ReceiptOID        *string
+	ReceiptAt         *int64
 	ClosedAt          *int64
 }
 
@@ -104,18 +112,20 @@ func (d *DB) GetExactRecoveryPushOperation(runID string) (*ExactRecoveryPushOper
 func getExactRecoveryPushOperation(q queryRower, runID string) (*ExactRecoveryPushOperation, error) {
 	var operation ExactRecoveryPushOperation
 	err := q.QueryRow(
-		`SELECT run_id, operation_id, attempt, phase, source_ref, stale_oid, target_oid,
+		`SELECT run_id, operation_id, attempt, phase, provider, source_ref, stale_oid, target_oid,
 		        target_kind, target_fingerprint, prior_generation, target_generation,
-		        prior_pushed_at, created_at, invoked_at, bound_at, updated_at
+		        prior_pushed_at, created_at, invoked_at, receipt_ref, receipt_oid,
+		        receipt_at, bound_at, updated_at
 		 FROM run_recovery_push_operations WHERE run_id = ?`,
 		runID,
 	).Scan(
 		&operation.RunID, &operation.OperationID, &operation.Attempt, &operation.Phase,
-		&operation.SourceRef, &operation.StaleOID, &operation.TargetOID,
+		&operation.Provider, &operation.SourceRef, &operation.StaleOID, &operation.TargetOID,
 		&operation.TargetKind, &operation.TargetFingerprint,
 		&operation.PriorGeneration, &operation.TargetGeneration,
 		&operation.PriorPushedAt,
-		&operation.CreatedAt, &operation.InvokedAt, &operation.BoundAt, &operation.UpdatedAt,
+		&operation.CreatedAt, &operation.InvokedAt, &operation.ReceiptRef,
+		&operation.ReceiptOID, &operation.ReceiptAt, &operation.BoundAt, &operation.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -201,13 +211,15 @@ func validateExactRecoveryPushAttempts(operation *ExactRecoveryPushOperation, at
 		attempt := &attempts[index]
 		number := index + 1
 		if attempt.RunID != operation.RunID || attempt.Attempt != number ||
-			attempt.OperationID == "" || attempt.SourceRef != operation.SourceRef ||
+			attempt.OperationID == "" || attempt.Provider != operation.Provider ||
+			attempt.SourceRef != operation.SourceRef ||
 			attempt.StaleOID != operation.StaleOID || attempt.TargetOID != operation.TargetOID ||
 			attempt.TargetKind != operation.TargetKind ||
 			attempt.TargetFingerprint != operation.TargetFingerprint ||
 			attempt.PriorGeneration != operation.PriorGeneration ||
 			attempt.TargetGeneration != operation.TargetGeneration ||
 			attempt.PriorPushedAt != operation.PriorPushedAt ||
+			attempt.ReceiptRef == "" ||
 			attempt.DeadlineAt <= attempt.PreparedAt {
 			return fmt.Errorf("exact recovery Push attempt identity is inconsistent")
 		}
@@ -236,21 +248,34 @@ func validateExactRecoveryPushAttempts(operation *ExactRecoveryPushOperation, at
 			continue
 		}
 		if attempt.OperationID != operation.OperationID || attempt.Phase != operation.Phase ||
-			attempt.PreparedAt != operation.CreatedAt {
+			attempt.PreparedAt != operation.CreatedAt ||
+			attempt.ReceiptRef != operation.ReceiptRef ||
+			(attempt.ReceiptOID == nil) != (operation.ReceiptOID == nil) ||
+			(attempt.ReceiptAt == nil) != (operation.ReceiptAt == nil) {
 			return fmt.Errorf("exact recovery Push current attempt is inconsistent")
+		}
+		if attempt.ReceiptOID != nil && *attempt.ReceiptOID != *operation.ReceiptOID ||
+			attempt.ReceiptAt != nil && *attempt.ReceiptAt != *operation.ReceiptAt {
+			return fmt.Errorf("exact recovery Push current receipt is inconsistent")
 		}
 		switch operation.Phase {
 		case ExactRecoveryPushPrepared:
-			if attempt.InvokedAt != nil || attempt.Disposition != nil || attempt.ClosedAt != nil {
+			if attempt.InvokedAt != nil || attempt.ReceiptOID != nil || attempt.ReceiptAt != nil ||
+				attempt.Disposition != nil || attempt.ClosedAt != nil {
 				return fmt.Errorf("exact recovery Push prepared attempt is terminal")
 			}
 		case ExactRecoveryPushInvoked:
 			if attempt.InvokedAt == nil || attempt.Disposition != nil || attempt.ClosedAt != nil {
 				return fmt.Errorf("exact recovery Push invoked attempt is inconsistent")
 			}
+			if (attempt.ReceiptOID == nil) != (attempt.ReceiptAt == nil) {
+				return fmt.Errorf("exact recovery Push receipt provenance is incomplete")
+			}
 		case ExactRecoveryPushBound:
 			if attempt.InvokedAt == nil || attempt.Disposition == nil ||
-				*attempt.Disposition != ExactRecoveryPushApplied || attempt.ClosedAt == nil {
+				attempt.ReceiptOID == nil || *attempt.ReceiptOID != attempt.TargetOID ||
+				attempt.ReceiptAt == nil || *attempt.Disposition != ExactRecoveryPushApplied ||
+				attempt.ClosedAt == nil {
 				return fmt.Errorf("exact recovery Push bound attempt is incomplete")
 			}
 		default:
@@ -260,16 +285,26 @@ func validateExactRecoveryPushAttempts(operation *ExactRecoveryPushOperation, at
 	return nil
 }
 
-func createExactRecoveryPushOperation(tx *sql.Tx, event *RunRecoveryEvent, deadlineAt int64) (*ExactRecoveryPushOperation, error) {
+func ExactRecoveryPushReceiptRef(operationID string) string {
+	return "refs/no-mistakes/push-receipts/" + strings.TrimSpace(operationID)
+}
+
+func createExactRecoveryPushOperation(tx *sql.Tx, event *RunRecoveryEvent, provider string, deadlineAt int64) (*ExactRecoveryPushOperation, error) {
 	if event == nil {
 		return nil, fmt.Errorf("create exact recovery Push operation: recovery provenance is missing")
 	}
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return nil, fmt.Errorf("create exact recovery Push operation: provider is missing")
+	}
 	ts := now()
+	operationID := newID()
 	operation := &ExactRecoveryPushOperation{
 		RunID:             event.RunID,
-		OperationID:       newID(),
+		OperationID:       operationID,
 		Attempt:           1,
 		Phase:             ExactRecoveryPushPrepared,
+		Provider:          provider,
 		SourceRef:         event.SourceRef,
 		StaleOID:          event.LastPushedSHA,
 		TargetOID:         event.HeadSHA,
@@ -278,21 +313,21 @@ func createExactRecoveryPushOperation(tx *sql.Tx, event *RunRecoveryEvent, deadl
 		PriorGeneration:   event.PushGeneration,
 		TargetGeneration:  event.PushGeneration + 1,
 		PriorPushedAt:     event.LastPushedAt,
+		ReceiptRef:        ExactRecoveryPushReceiptRef(operationID),
 		CreatedAt:         ts,
 		UpdatedAt:         ts,
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO run_recovery_push_operations (
-			run_id, operation_id, attempt, phase, source_ref, stale_oid, target_oid,
+			run_id, operation_id, attempt, phase, provider, source_ref, stale_oid, target_oid,
 			target_kind, target_fingerprint, prior_generation, target_generation,
-			prior_pushed_at, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			prior_pushed_at, created_at, receipt_ref, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		operation.RunID, operation.OperationID, operation.Attempt, operation.Phase,
-		operation.SourceRef, operation.StaleOID, operation.TargetOID,
+		operation.Provider, operation.SourceRef, operation.StaleOID, operation.TargetOID,
 		operation.TargetKind, operation.TargetFingerprint,
 		operation.PriorGeneration, operation.TargetGeneration,
-		operation.PriorPushedAt,
-		operation.CreatedAt, operation.UpdatedAt,
+		operation.PriorPushedAt, operation.CreatedAt, operation.ReceiptRef, operation.UpdatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("create exact recovery Push operation: persist: %w", err)
 	}
@@ -311,15 +346,15 @@ func insertExactRecoveryPushAttempt(tx *sql.Tx, operation *ExactRecoveryPushOper
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO run_recovery_push_attempts (
-			run_id, attempt, operation_id, phase, source_ref, stale_oid, target_oid,
+			run_id, attempt, operation_id, phase, provider, source_ref, stale_oid, target_oid,
 			target_kind, target_fingerprint, prior_generation, target_generation,
-			prior_pushed_at, deadline_at, prepared_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			prior_pushed_at, deadline_at, prepared_at, receipt_ref
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		operation.RunID, operation.Attempt, operation.OperationID, operation.Phase,
-		operation.SourceRef, operation.StaleOID, operation.TargetOID,
+		operation.Provider, operation.SourceRef, operation.StaleOID, operation.TargetOID,
 		operation.TargetKind, operation.TargetFingerprint,
 		operation.PriorGeneration, operation.TargetGeneration,
-		operation.PriorPushedAt, deadlineAt, operation.CreatedAt,
+		operation.PriorPushedAt, deadlineAt, operation.CreatedAt, operation.ReceiptRef,
 	); err != nil {
 		return fmt.Errorf("create exact recovery Push attempt: %w", err)
 	}
@@ -328,9 +363,10 @@ func insertExactRecoveryPushAttempt(tx *sql.Tx, operation *ExactRecoveryPushOper
 
 func (d *DB) ListExactRecoveryPushAttempts(runID string) ([]ExactRecoveryPushAttempt, error) {
 	rows, err := d.sql.Query(
-		`SELECT run_id, attempt, operation_id, phase, source_ref, stale_oid, target_oid,
+		`SELECT run_id, attempt, operation_id, phase, provider, source_ref, stale_oid, target_oid,
 		        target_kind, target_fingerprint, prior_generation, target_generation,
-		        prior_pushed_at, deadline_at, disposition, prepared_at, invoked_at, closed_at
+		        prior_pushed_at, deadline_at, disposition, prepared_at, invoked_at,
+		        receipt_ref, receipt_oid, receipt_at, closed_at
 		 FROM run_recovery_push_attempts WHERE run_id = ? ORDER BY attempt`,
 		runID,
 	)
@@ -343,11 +379,12 @@ func (d *DB) ListExactRecoveryPushAttempts(runID string) ([]ExactRecoveryPushAtt
 		var attempt ExactRecoveryPushAttempt
 		if err := rows.Scan(
 			&attempt.RunID, &attempt.Attempt, &attempt.OperationID, &attempt.Phase,
-			&attempt.SourceRef, &attempt.StaleOID, &attempt.TargetOID,
+			&attempt.Provider, &attempt.SourceRef, &attempt.StaleOID, &attempt.TargetOID,
 			&attempt.TargetKind, &attempt.TargetFingerprint,
 			&attempt.PriorGeneration, &attempt.TargetGeneration, &attempt.PriorPushedAt,
 			&attempt.DeadlineAt, &attempt.Disposition, &attempt.PreparedAt,
-			&attempt.InvokedAt, &attempt.ClosedAt,
+			&attempt.InvokedAt, &attempt.ReceiptRef, &attempt.ReceiptOID,
+			&attempt.ReceiptAt, &attempt.ClosedAt,
 		); err != nil {
 			return nil, fmt.Errorf("list exact recovery Push attempts: %w", err)
 		}
@@ -447,6 +484,9 @@ func rotateExactRecoveryPushOperation(tx *sql.Tx, operation *ExactRecoveryPushOp
 	if operation.Phase == ExactRecoveryPushInvoked && operation.InvokedAt == nil {
 		return fmt.Errorf("rotate exact recovery Push operation: invocation provenance is missing")
 	}
+	if operation.ReceiptOID != nil || operation.ReceiptAt != nil {
+		return fmt.Errorf("rotate exact recovery Push operation: successful operation receipt forbids retry")
+	}
 	if operation.Phase == ExactRecoveryPushInvoked && observation.DeadlineAt > ts {
 		return ErrExactRecoveryPushObservationPending
 	}
@@ -472,14 +512,16 @@ func rotateExactRecoveryPushOperation(tx *sql.Tx, operation *ExactRecoveryPushOp
 		return fmt.Errorf("rotate exact recovery Push operation: immutable attempt changed")
 	}
 	nextID := newID()
+	nextReceiptRef := ExactRecoveryPushReceiptRef(nextID)
 	result, err = tx.Exec(
 		`UPDATE run_recovery_push_operations
 		 SET operation_id = ?, attempt = attempt + 1, phase = ?,
-		     created_at = ?, invoked_at = NULL, bound_at = NULL, updated_at = ?
+		     created_at = ?, invoked_at = NULL, receipt_ref = ?, receipt_oid = NULL,
+		     receipt_at = NULL, bound_at = NULL, updated_at = ?
 		 WHERE run_id = ? AND operation_id = ? AND attempt = ? AND phase = ?
 		   AND bound_at IS NULL
 		   AND ((? = ? AND invoked_at IS NULL) OR (? = ? AND invoked_at IS NOT NULL))`,
-		nextID, ExactRecoveryPushPrepared, ts, ts, operation.RunID,
+		nextID, ExactRecoveryPushPrepared, ts, nextReceiptRef, ts, operation.RunID,
 		operation.OperationID, operation.Attempt, priorPhase,
 		priorPhase, ExactRecoveryPushPrepared,
 		priorPhase, ExactRecoveryPushInvoked,
@@ -495,6 +537,9 @@ func rotateExactRecoveryPushOperation(tx *sql.Tx, operation *ExactRecoveryPushOp
 	operation.Phase = ExactRecoveryPushPrepared
 	operation.CreatedAt = ts
 	operation.InvokedAt = nil
+	operation.ReceiptRef = nextReceiptRef
+	operation.ReceiptOID = nil
+	operation.ReceiptAt = nil
 	operation.BoundAt = nil
 	operation.UpdatedAt = ts
 	if err := insertExactRecoveryPushAttempt(tx, operation, deadlineAt); err != nil {
@@ -523,6 +568,8 @@ func rotateExactRecoveryPushOperation(tx *sql.Tx, operation *ExactRecoveryPushOp
 func validateExactRecoveryPushOperationIdentity(operation *ExactRecoveryPushOperation, observation *ExactRecoveryRefObservation, event *RunRecoveryEvent) error {
 	if operation == nil || observation == nil || event == nil ||
 		operation.RunID != event.RunID || operation.OperationID == "" || operation.Attempt <= 0 ||
+		operation.Provider == "" || operation.Provider != observation.Provider ||
+		operation.ReceiptRef != ExactRecoveryPushReceiptRef(operation.OperationID) ||
 		operation.SourceRef != event.SourceRef || operation.StaleOID != event.LastPushedSHA ||
 		operation.TargetOID != event.HeadSHA || operation.TargetKind != event.PushTargetKind ||
 		operation.TargetFingerprint != event.PushTargetFingerprint ||
@@ -535,15 +582,21 @@ func validateExactRecoveryPushOperationIdentity(operation *ExactRecoveryPushOper
 	}
 	switch operation.Phase {
 	case ExactRecoveryPushPrepared:
-		if operation.InvokedAt != nil || operation.BoundAt != nil {
+		if operation.InvokedAt != nil || operation.ReceiptOID != nil ||
+			operation.ReceiptAt != nil || operation.BoundAt != nil {
 			return fmt.Errorf("exact recovery Push prepared phase has later timestamps")
 		}
 	case ExactRecoveryPushInvoked:
 		if operation.InvokedAt == nil || operation.BoundAt != nil {
 			return fmt.Errorf("exact recovery Push invoked phase is incomplete")
 		}
+		if (operation.ReceiptOID == nil) != (operation.ReceiptAt == nil) {
+			return fmt.Errorf("exact recovery Push receipt provenance is incomplete")
+		}
 	case ExactRecoveryPushBound:
-		if operation.InvokedAt == nil || operation.BoundAt == nil {
+		if operation.InvokedAt == nil || operation.ReceiptOID == nil ||
+			*operation.ReceiptOID != operation.TargetOID ||
+			operation.ReceiptAt == nil || operation.BoundAt == nil {
 			return fmt.Errorf("exact recovery Push bound phase is incomplete")
 		}
 	default:
@@ -602,7 +655,8 @@ func (d *DB) MarkExactRecoveryPushInvoked(runID, operationID, observedRemote str
 		`UPDATE run_recovery_push_operations
 		 SET phase = ?, invoked_at = ?, updated_at = ?
 		 WHERE run_id = ? AND operation_id = ? AND attempt = ? AND phase = ?
-		   AND invoked_at IS NULL AND bound_at IS NULL`,
+		   AND invoked_at IS NULL AND receipt_oid IS NULL
+		   AND receipt_at IS NULL AND bound_at IS NULL`,
 		ExactRecoveryPushInvoked, ts, ts, runID, operation.OperationID,
 		operation.Attempt, ExactRecoveryPushPrepared,
 	)
@@ -638,6 +692,68 @@ func (d *DB) MarkExactRecoveryPushInvoked(runID, operationID, observedRemote str
 	return nil
 }
 
+func (d *DB) RecordExactRecoveryPushSuccessReceipt(runID, operationID, receiptRef, receiptOID string) error {
+	receiptRef = strings.TrimSpace(receiptRef)
+	receiptOID = strings.TrimSpace(receiptOID)
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("record exact recovery Push success receipt: begin: %w", err)
+	}
+	defer tx.Rollback()
+	_, operation, _, _, err := exactRecoveryPushOperationState(tx, runID)
+	if err != nil {
+		return err
+	}
+	if operation.OperationID != strings.TrimSpace(operationID) ||
+		operation.Phase != ExactRecoveryPushInvoked ||
+		receiptRef != operation.ReceiptRef || receiptOID != operation.TargetOID {
+		return fmt.Errorf("record exact recovery Push success receipt: operation-bound receipt identity changed")
+	}
+	if operation.ReceiptOID != nil || operation.ReceiptAt != nil {
+		if operation.ReceiptOID != nil && *operation.ReceiptOID == receiptOID &&
+			operation.ReceiptAt != nil {
+			return nil
+		}
+		return fmt.Errorf("record exact recovery Push success receipt: durable receipt changed")
+	}
+	ts := now()
+	result, err := tx.Exec(
+		`UPDATE run_recovery_push_operations
+		 SET receipt_oid = ?, receipt_at = ?, updated_at = ?
+		 WHERE run_id = ? AND operation_id = ? AND attempt = ? AND phase = ?
+		   AND invoked_at IS NOT NULL AND receipt_ref = ?
+		   AND receipt_oid IS NULL AND receipt_at IS NULL AND bound_at IS NULL`,
+		receiptOID, ts, ts, runID, operation.OperationID, operation.Attempt,
+		ExactRecoveryPushInvoked, receiptRef,
+	)
+	if err != nil {
+		return fmt.Errorf("record exact recovery Push success receipt: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("record exact recovery Push success receipt: durable operation changed")
+	}
+	result, err = tx.Exec(
+		`UPDATE run_recovery_push_attempts
+		 SET receipt_oid = ?, receipt_at = ?
+		 WHERE run_id = ? AND attempt = ? AND operation_id = ? AND phase = ?
+		   AND invoked_at IS NOT NULL AND receipt_ref = ?
+		   AND receipt_oid IS NULL AND receipt_at IS NULL
+		   AND disposition IS NULL AND closed_at IS NULL`,
+		receiptOID, ts, runID, operation.Attempt, operation.OperationID,
+		ExactRecoveryPushInvoked, receiptRef,
+	)
+	if err != nil {
+		return fmt.Errorf("record exact recovery Push success receipt: update attempt: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("record exact recovery Push success receipt: immutable attempt changed")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("record exact recovery Push success receipt: commit: %w", err)
+	}
+	return nil
+}
+
 func (d *DB) BindExactRecoveryPushOperation(runID, operationID string, binding PushBinding) error {
 	tx, err := d.sql.Begin()
 	if err != nil {
@@ -650,6 +766,8 @@ func (d *DB) BindExactRecoveryPushOperation(runID, operationID string, binding P
 	}
 	if operation.OperationID != strings.TrimSpace(operationID) ||
 		operation.Phase != ExactRecoveryPushInvoked || observation.State != ExactRecoveryRefObservationStale ||
+		operation.ReceiptOID == nil || *operation.ReceiptOID != operation.TargetOID ||
+		operation.ReceiptAt == nil ||
 		!exactRecoveryRunHasPriorPushBinding(run, operation) ||
 		binding.HeadSHA != operation.TargetOID || binding.Ref != operation.SourceRef ||
 		binding.TargetKind != operation.TargetKind ||
@@ -689,7 +807,8 @@ func bindExactRecoveryPushOperation(tx *sql.Tx, run *Run, operation *ExactRecove
 		`UPDATE run_recovery_push_operations
 		 SET phase = ?, bound_at = ?, updated_at = ?
 		 WHERE run_id = ? AND operation_id = ? AND attempt = ? AND phase = ?
-		   AND invoked_at IS NOT NULL AND bound_at IS NULL`,
+		   AND invoked_at IS NOT NULL AND receipt_oid = target_oid
+		   AND receipt_at IS NOT NULL AND bound_at IS NULL`,
 		ExactRecoveryPushBound, ts, ts, run.ID, operation.OperationID,
 		operation.Attempt, ExactRecoveryPushInvoked,
 	)
@@ -703,7 +822,8 @@ func bindExactRecoveryPushOperation(tx *sql.Tx, run *Run, operation *ExactRecove
 		`UPDATE run_recovery_push_attempts
 		 SET phase = ?, disposition = ?, closed_at = ?
 		 WHERE run_id = ? AND attempt = ? AND operation_id = ? AND phase = ?
-		   AND disposition IS NULL AND invoked_at IS NOT NULL AND closed_at IS NULL`,
+		   AND disposition IS NULL AND invoked_at IS NOT NULL
+		   AND receipt_oid = target_oid AND receipt_at IS NOT NULL AND closed_at IS NULL`,
 		ExactRecoveryPushBound, ExactRecoveryPushApplied, ts, run.ID,
 		operation.Attempt, operation.OperationID, ExactRecoveryPushInvoked,
 	)
