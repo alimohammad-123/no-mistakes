@@ -1,6 +1,7 @@
 package db
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -602,7 +603,7 @@ func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.
 	}{
 		{name: "prepared before push", remoteHead: "published-head", wantPhase: ExactRecoveryPushPrepared, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
 		{name: "delivered before invocation", remoteHead: "head-3", wantError: true, wantPhase: ExactRecoveryPushPrepared, wantAttempt: 1, wantState: ExactRecoveryRefObservationAmbiguous},
-		{name: "invoked before remote mutation", remoteHead: "published-head", invoke: true, wantPhase: ExactRecoveryPushPrepared, wantAttempt: 2, wantState: ExactRecoveryRefObservationStale},
+		{name: "invoked before remote mutation", remoteHead: "published-head", invoke: true, wantError: true, wantPhase: ExactRecoveryPushInvoked, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
 		{name: "externally succeeded unverified", remoteHead: "head-3", invoke: true, wantBound: true, wantPhase: ExactRecoveryPushBound, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
 		{name: "after binding before completion", remoteHead: "head-3", invoke: true, bind: true, wantBound: true, wantPhase: ExactRecoveryPushBound, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
 		{name: "after completion before release", remoteHead: "head-3", invoke: true, bind: true, completePush: true, wantBound: true, wantPhase: ExactRecoveryPushBound, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
@@ -794,6 +795,71 @@ func TestReconcileStaleExactRecoveryPushCustodyRotatesFreshAttemptDeadline(t *te
 	}
 }
 
+func TestReconcileStaleExactRecoveryPushCustodyKeepsInvokedAttemptThroughDeadline(t *testing.T) {
+	f, restored, _ := prepareExactRecoveryPushCrash(t)
+	deadline := now() + 30
+	if _, err := f.d.PrepareExactRecoveryRefObservation(
+		restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+		f.pushed, deadline,
+	); err != nil {
+		t.Fatal(err)
+	}
+	first, err := f.d.GetExactRecoveryPushOperation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.MarkExactRecoveryPushInvoked(restored.ID, first.OperationID, f.pushed); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := f.d.RecordExactRecoveryRefObservation(restored.ID, f.pushed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+		restored.ID, f.pushed, "refs/heads/feature", restored.HeadSHA,
+		now()+90, 3, types.AllSteps(),
+	)
+	if !errors.Is(err, ErrExactRecoveryPushObservationPending) || reconciled {
+		t.Fatalf("predeadline invoked attempt = %v, %v", reconciled, err)
+	}
+	operation, err := f.d.GetExactRecoveryPushOperation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := f.d.GetExactRecoveryRefObservation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation.OperationID != first.OperationID ||
+		operation.Attempt != 1 ||
+		operation.Phase != ExactRecoveryPushInvoked ||
+		journal.DeadlineAt != deadline ||
+		journal.Attempts != 3 {
+		t.Fatalf("pending invocation provenance changed: operation=%#v journal=%#v", operation, journal)
+	}
+	expireExactRecoveryPushAttempt(t, f.d, restored.ID, 1)
+	nextDeadline := now() + 90
+	reconciled, err = f.d.ReconcileStaleExactRecoveryPushCustody(
+		restored.ID, f.pushed, "refs/heads/feature", restored.HeadSHA,
+		nextDeadline, 3, types.AllSteps(),
+	)
+	if err != nil || !reconciled {
+		t.Fatalf("final unchanged probe = %v, %v", reconciled, err)
+	}
+	attempts, err := f.d.ListExactRecoveryPushAttempts(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 2 ||
+		attempts[0].OperationID != first.OperationID ||
+		attempts[0].Disposition == nil ||
+		*attempts[0].Disposition != ExactRecoveryPushNotApplied ||
+		attempts[1].DeadlineAt != nextDeadline {
+		t.Fatalf("final probe attempt history = %#v", attempts)
+	}
+}
+
 func TestReconcileStaleExactRecoveryPushCustodyRotatesExpiredPreparedAttempt(t *testing.T) {
 	f, restored, _ := prepareExactRecoveryPushCrash(t)
 	if _, err := f.d.PrepareExactRecoveryRefObservation(
@@ -961,6 +1027,8 @@ func TestReconcileStaleExactRecoveryPushCustodyBoundsAttemptRotation(t *testing.
 			expireExactRecoveryPushAttempt(t, f.d, restored.ID, attempt)
 		} else if err := f.d.MarkExactRecoveryPushInvoked(restored.ID, operation.OperationID, f.pushed); err != nil {
 			t.Fatal(err)
+		} else {
+			expireExactRecoveryPushAttempt(t, f.d, restored.ID, attempt)
 		}
 		reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
 			restored.ID, f.pushed, "refs/heads/feature", restored.HeadSHA,
@@ -1035,6 +1103,7 @@ func TestExactRecoveryPushOperationInvocationCASIsSingleOwner(t *testing.T) {
 	if err := f.d.MarkExactRecoveryPushInvoked(restored.ID, first.OperationID, f.pushed); err == nil {
 		t.Fatal("second owner marked the same operation invoked")
 	}
+	expireExactRecoveryPushAttempt(t, f.d, restored.ID, 1)
 	if reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
 		restored.ID, f.pushed, "refs/heads/feature", restored.HeadSHA,
 		now()+60, 3, types.AllSteps(),

@@ -445,7 +445,7 @@ func TestPushStep_ExactRecoveryAzureRefJournalPreventsAmbiguousPublication(t *te
 			t.Fatalf("ambiguous retry changed push binding: %#v", after)
 		}
 	})
-	t.Run("invoked before mutation rotates safely after restart", func(t *testing.T) {
+	t.Run("invoked operation retains attribution through late success", func(t *testing.T) {
 		sctx, _ := exactRecoveryDeliveryStepContext(
 			t, scm.PRContent{Title: "prior title", Body: "prior body"}, true,
 		)
@@ -481,20 +481,55 @@ func TestPushStep_ExactRecoveryAzureRefJournalPreventsAmbiguousPublication(t *te
 		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 			t.Fatal(err)
 		}
-		reconciled, err := sctx.DB.ReconcileStaleExactRecoveryPushCustody(
-			sctx.Run.ID, sctx.Run.BaseSHA, "refs/heads/feature", sctx.Run.HeadSHA,
-			time.Now().Add(time.Minute).Unix(), 3, types.AllSteps(),
+		sctx.Run, err = sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldWait := exactRecoveryReconcileWait
+		t.Cleanup(func() {
+			exactRecoveryReconcileWait = oldWait
+		})
+		waitCalls := 0
+		exactRecoveryReconcileWait = func(ctx context.Context, _ time.Duration) error {
+			if err := context.Cause(ctx); err != nil {
+				return err
+			}
+			waitCalls++
+			if waitCalls == 2 {
+				gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.HeadSHA, sctx.Run.BaseSHA)
+			}
+			return nil
+		}
+		reconciled, err := ReconcileStaleExactFinalHeadPushCustody(
+			context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir,
+			3, types.AllSteps(),
 		)
 		if err != nil || !reconciled {
-			t.Fatalf("reconcile pre-mutation crash = %v, %v", reconciled, err)
+			t.Fatalf("reconcile late success = %v, %v", reconciled, err)
 		}
 		operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if crashed.LastPushedSHA == nil || *crashed.LastPushedSHA != sctx.Run.BaseSHA ||
-			operation.Phase != db.ExactRecoveryPushPrepared || operation.Attempt != 2 {
-			t.Fatalf("rotated operation = %#v, crashed run = %#v", operation, crashed)
+			operation.Phase != db.ExactRecoveryPushBound || operation.Attempt != 1 ||
+			waitCalls != 2 {
+			t.Fatalf("late success attribution = %#v, waits=%d crashed=%#v", operation, waitCalls, crashed)
+		}
+		bound, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bound.LastPushedSHA == nil || *bound.LastPushedSHA != sctx.Run.HeadSHA ||
+			bound.PushGeneration == nil || *bound.PushGeneration != 2 {
+			t.Fatalf("late success binding = %#v", bound)
+		}
+		observations, err := sctx.DB.ListExactRecoveryPushAttemptObservations(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(observations) < 3 {
+			t.Fatalf("pending observation history = %#v", observations)
 		}
 	})
 	t.Run("external success after invocation binds without duplicate push", func(t *testing.T) {
@@ -874,6 +909,15 @@ func TestExactRecoveryReconciliationRefMovesPreventPublication(t *testing.T) {
 			}
 			exactRecoveryReconcilePoint = oldPoint
 		})
+	}
+}
+
+func TestExactRecoveryReconcileWaitPreservesCancellationCause(t *testing.T) {
+	cause := errors.New("cancel recovery probe")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(cause)
+	if err := exactRecoveryReconcileWait(ctx, time.Hour); !errors.Is(err, cause) {
+		t.Fatalf("wait error = %v, want %v", err, cause)
 	}
 }
 

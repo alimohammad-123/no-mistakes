@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,9 +16,25 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-var exactRecoveryReconcilePoint = func(string) {}
+var (
+	exactRecoveryReconcilePoint = func(string) {}
+	exactRecoveryReconcileNow   = time.Now
+	exactRecoveryReconcileWait  = func(ctx context.Context, delay time.Duration) error {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-timer.C:
+			return nil
+		}
+	}
+)
 
-const exactRecoveryRefReconcileWindow = 5 * time.Second
+const (
+	exactRecoveryRefReconcileWindow       = 5 * time.Second
+	exactRecoveryRefReconcilePollInterval = 100 * time.Millisecond
+)
 
 // ValidateExactFinalHeadRecoveryExternalState proves that the previously
 // published branch and PR still have the identities frozen on the failed run.
@@ -246,25 +263,67 @@ func ReconcileStaleExactFinalHeadPushCustody(ctx context.Context, database *db.D
 		run.PushRef == nil || *run.PushRef != ref {
 		return false, fmt.Errorf("reconcile stale exact recovery Push custody: canonical push target changed")
 	}
-	remoteHead, err := git.LsRemote(ctx, workDir, pushURL, ref)
-	if err != nil {
-		return false, fmt.Errorf("reconcile stale exact recovery Push custody: read canonical remote: %w", err)
-	}
-	exactRecoveryReconcilePoint("remote-probed")
-	if _, err := sctx.BindSourceRef(); err != nil {
-		return false, err
-	}
-	exactRecoveryReconcilePoint("source-verified")
-	if _, err := sctx.BindSourceRef(); err != nil {
-		return false, err
-	}
-	nextDeadlineAt := time.Now().Add(exactRecoveryRefReconcileWindow).Unix()
-	reconciled, err := database.ReconcileStaleExactRecoveryPushCustody(run.ID, remoteHead, ref, run.HeadSHA, nextDeadlineAt, maxReplays, expected)
-	if err != nil {
-		return false, err
-	}
-	if !reconciled {
-		return false, fmt.Errorf("reconcile stale exact recovery Push custody: custody was not active")
+	for {
+		remoteHead, err := git.LsRemote(ctx, workDir, pushURL, ref)
+		if err != nil {
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: read canonical remote: %w", err)
+		}
+		exactRecoveryReconcilePoint("remote-probed")
+		if _, err := sctx.BindSourceRef(); err != nil {
+			return false, err
+		}
+		exactRecoveryReconcilePoint("source-verified")
+		if _, err := sctx.BindSourceRef(); err != nil {
+			return false, err
+		}
+		operation, err := database.GetExactRecoveryPushOperation(run.ID)
+		if err != nil {
+			return false, err
+		}
+		if operation != nil && operation.Phase == db.ExactRecoveryPushInvoked &&
+			remoteHead == operation.StaleOID {
+			observation, err := database.GetExactRecoveryRefObservation(run.ID)
+			if err != nil {
+				return false, err
+			}
+			now := exactRecoveryReconcileNow()
+			if observation == nil {
+				return false, fmt.Errorf("reconcile stale exact recovery Push custody: observation journal is missing")
+			}
+			if observation.DeadlineAt > now.Unix() {
+				recorded, err := database.RecordExactRecoveryPendingPushObservation(run.ID, remoteHead)
+				if err != nil {
+					return false, err
+				}
+				if !recorded {
+					continue
+				}
+				exactRecoveryReconcilePoint("invoked-pending")
+				delay := exactRecoveryRefReconcilePollInterval
+				remaining := time.Unix(observation.DeadlineAt, 0).Sub(now)
+				if remaining < delay {
+					delay = remaining
+				}
+				if delay > 0 {
+					if err := exactRecoveryReconcileWait(ctx, delay); err != nil {
+						return false, err
+					}
+				}
+				continue
+			}
+		}
+		nextDeadlineAt := exactRecoveryReconcileNow().Add(exactRecoveryRefReconcileWindow).Unix()
+		reconciled, err := database.ReconcileStaleExactRecoveryPushCustody(run.ID, remoteHead, ref, run.HeadSHA, nextDeadlineAt, maxReplays, expected)
+		if errors.Is(err, db.ErrExactRecoveryPushObservationPending) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if !reconciled {
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: custody was not active")
+		}
+		break
 	}
 	exactRecoveryReconcilePoint("database-reconciled")
 	if _, err := sctx.BindSourceRef(); err != nil {

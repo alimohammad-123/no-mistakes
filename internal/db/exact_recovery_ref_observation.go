@@ -302,6 +302,35 @@ func (d *DB) RecordExactRecoveryRefObservation(runID, observed string) error {
 	return recordErr
 }
 
+func (d *DB) RecordExactRecoveryPendingPushObservation(runID, observed string) (bool, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return false, fmt.Errorf("record exact recovery pending Push observation: begin: %w", err)
+	}
+	defer tx.Rollback()
+	_, operation, observation, run, err := exactRecoveryPushOperationState(tx, runID)
+	if err != nil {
+		return false, err
+	}
+	observed = strings.TrimSpace(observed)
+	if operation.Phase != ExactRecoveryPushInvoked ||
+		observation.State != ExactRecoveryRefObservationStale ||
+		observed != operation.StaleOID ||
+		!exactRecoveryRunHasPriorPushBinding(run, operation) {
+		return false, fmt.Errorf("record exact recovery pending Push observation: invocation identity changed")
+	}
+	if observation.DeadlineAt <= now() {
+		return false, nil
+	}
+	if err := recordExactRecoveryRefObservation(tx, observation, operation, run, observed); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("record exact recovery pending Push observation: commit: %w", err)
+	}
+	return true, nil
+}
+
 func recordExactRecoveryRefObservation(tx *sql.Tx, observation *ExactRecoveryRefObservation, operation *ExactRecoveryPushOperation, run *Run, observed string) error {
 	state := observation.State
 	if observation.State != ExactRecoveryRefObservationAmbiguous {

@@ -447,6 +447,9 @@ func rotateExactRecoveryPushOperation(tx *sql.Tx, operation *ExactRecoveryPushOp
 	if operation.Phase == ExactRecoveryPushInvoked && operation.InvokedAt == nil {
 		return fmt.Errorf("rotate exact recovery Push operation: invocation provenance is missing")
 	}
+	if operation.Phase == ExactRecoveryPushInvoked && observation.DeadlineAt > ts {
+		return ErrExactRecoveryPushObservationPending
+	}
 	if operation.Attempt >= maxAttempts {
 		return fmt.Errorf("rotate exact recovery Push operation: attempt budget exhausted")
 	}

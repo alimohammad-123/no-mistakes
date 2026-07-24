@@ -5,11 +5,14 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+var ErrExactRecoveryPushObservationPending = errors.New("exact recovery Push observation is pending")
 
 const (
 	ExactRecoveryPRUpdatePrepared = "prepared"
@@ -351,6 +354,9 @@ func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef
 					}
 				}
 			case ExactRecoveryPushInvoked:
+				if observation.DeadlineAt > now() {
+					return false, ErrExactRecoveryPushObservationPending
+				}
 				if err := rotateExactRecoveryPushOperation(tx, operation, observation, nextDeadlineAt, maxReplays); err != nil {
 					return false, err
 				}
