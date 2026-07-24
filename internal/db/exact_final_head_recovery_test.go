@@ -1265,13 +1265,107 @@ func TestReconcileStaleExactRecoveryPushCustodyDoesNotRotateExpiredPreparedAttem
 			if err != nil {
 				t.Fatal(err)
 			}
-			if observation.State != ExactRecoveryRefObservationAmbiguous ||
-				observation.LastObservation != tc.observation {
-				t.Fatalf("ambiguous remote observation was not durable: %#v", observation)
-			}
 			events, err := f.d.ListExactRecoveryRefObservationEvents(restored.ID)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if tc.remoteHead == "" {
+				if observation.Provider != "azuredevops" ||
+					observation.State != ExactRecoveryRefObservationStale ||
+					observation.LastObservation != f.pushed ||
+					observation.Attempts != 1 ||
+					len(events) != 1 ||
+					events[0].Observation != f.pushed ||
+					events[0].State != ExactRecoveryRefObservationStale {
+					t.Fatalf("provider-specific observation changed after generic missing ambiguity: observation=%#v events=%#v", observation, events)
+				}
+				ambiguity, err := f.d.GetExactRecoveryRemoteRefAmbiguity(restored.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				recovery, err := f.d.GetRunRecoveryEvent(restored.ID, RunRecoveryExactFinalHeadCapacity)
+				if err != nil {
+					t.Fatal(err)
+				}
+				operation, err := getExactRecoveryPushOperation(f.d.sql, restored.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ambiguity == nil || recovery == nil || operation == nil ||
+					ambiguity.RunID != restored.ID ||
+					ambiguity.RecoveryEventID != recovery.ID ||
+					ambiguity.SourceRef != recovery.SourceRef ||
+					ambiguity.StaleOID != recovery.LastPushedSHA ||
+					ambiguity.TargetOID != recovery.HeadSHA ||
+					ambiguity.TargetKind != recovery.PushTargetKind ||
+					ambiguity.TargetFingerprint != recovery.PushTargetFingerprint ||
+					ambiguity.ObservedLastPushedSHA != f.pushed ||
+					ambiguity.ObservedPushGeneration != recovery.PushGeneration ||
+					ambiguity.Classification != ExactRecoveryRemoteRefMissing ||
+					ambiguity.ObservedOID != "" ||
+					!ambiguity.ObservedPushActive ||
+					ambiguity.ObservedPushStepStatus != types.StepStatusRunning ||
+					ambiguity.ObservedOperationID != operation.OperationID ||
+					ambiguity.ObservedOperationPhase != ExactRecoveryPushPrepared {
+					t.Fatalf("provider-neutral missing ambiguity = %#v, recovery=%#v operation=%#v", ambiguity, recovery, operation)
+				}
+				assertUnchanged := func(stage string) {
+					t.Helper()
+					after, err := f.d.GetExactRecoveryRemoteRefAmbiguity(restored.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if after == nil || *after != *ambiguity {
+						t.Fatalf("%s changed terminal missing ambiguity: before=%#v after=%#v", stage, ambiguity, after)
+					}
+				}
+				if err := f.d.RecordExactRecoveryRemoteRefAmbiguity(restored.ID, ExactRecoveryRemoteRefMalformed); err == nil {
+					t.Fatal("competing generic ambiguity replaced terminal missing ambiguity")
+				}
+				assertUnchanged("competing ambiguity")
+				if reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+					restored.ID, restored.HeadSHA, "refs/heads/feature", restored.HeadSHA,
+					now()+120, 3, types.AllSteps(),
+				); err == nil || reconciled {
+					t.Fatalf("later expected OID erased terminal missing ambiguity: reconciled=%v err=%v", reconciled, err)
+				}
+				assertUnchanged("later expected OID")
+				if _, err := f.d.PrepareExactRecoveryRefObservation(
+					restored.ID, "github", "refs/heads/feature", restored.HeadSHA,
+					f.pushed, now()+120,
+				); err == nil {
+					t.Fatal("provider change reopened terminal missing ambiguity")
+				}
+				assertUnchanged("provider change")
+				var databasePath string
+				if err := f.d.sql.QueryRow(`SELECT file FROM pragma_database_list WHERE name = 'main'`).Scan(&databasePath); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.d.Close(); err != nil {
+					t.Fatal(err)
+				}
+				f.d, err = Open(databasePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = f.d.Close() })
+				assertUnchanged("restart")
+				if reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+					restored.ID, "", "refs/heads/feature", restored.HeadSHA,
+					now()+120, 3, types.AllSteps(),
+				); err == nil || reconciled {
+					t.Fatalf("missing ambiguity retry reconciled: reconciled=%v err=%v", reconciled, err)
+				}
+				assertUnchanged("retry")
+				if err := f.d.ValidateActiveExactFinalHeadCapacityRecovery(restored.ID, 3, types.AllSteps()); err == nil {
+					t.Fatal("terminal missing ambiguity passed recovery admission")
+				}
+				assertUnchanged("recovery admission")
+				return
+			}
+			if observation.State != ExactRecoveryRefObservationAmbiguous ||
+				observation.LastObservation != tc.observation {
+				t.Fatalf("ambiguous remote observation was not durable: %#v", observation)
 			}
 			if len(events) != 2 || events[1].Observation != tc.observation ||
 				events[1].State != ExactRecoveryRefObservationAmbiguous {
