@@ -1,0 +1,46 @@
+internal/scm/azuredevops/parse.go
+  s_7b0dcaa05c2128::t_07b5df89af04d2 12-19,23
+  s_7b0dcaa05c2128::t_d2d3b7ac07b0df 20-22
+internal/db/exact_recovery_remote_ref_ambiguity.go
+  s_7b0dcaa05c2128::t_d2d3b7ac07b0df 253-258
+internal/scm/host.go
+  s_7b0dcaa05c2128::t_d2d3b7ac07b0df 118-122
+internal/git/git_branch_worktree_test.go
+  s_7b0dcaa05c2128::t_6d379961849bbe 308-312,327-374,423-427,433-435
+docs/src/content/docs/concepts/daemon.md
+  s_7b0dcaa05c2128::t_476745f9843849 130
+internal/db/run.go
+  s_7b0dcaa05c2128::t_d2d3b7ac07b0df 542-549
+internal/git/git.go
+  s_7b0dcaa05c2128::t_d2d3b7ac07b0df 623,628
+internal/scm/azuredevops/azuredevops_test.go
+  s_7b0dcaa05c2128::t_aec01c64ec9a0b 122-156
+docs/src/content/docs/reference/cli.md
+  s_7b0dcaa05c2128::t_476745f9843849 158
+internal/scm/azuredevops/azuredevops.go
+  s_7b0dcaa05c2128::t_d2d3b7ac07b0df 247-258
+internal/pipeline/steps/ci.go
+  s_7b0dcaa05c2128::t_8b4c0a3d477af0 12,48-50,68-72,92,96-99,134-208,225-229,299-309,366,368-371,374-376,400-404,425-429,534,541,543-546,599,606-610,620-624,629
+internal/pipeline/steps/ci_test.go
+  s_7b0dcaa05c2128::t_ba6323edc4f633 14-15,17,20-163,682
+internal/pipeline/steps/exact_final_head_recovery.go
+  s_7b0dcaa05c2128::t_b8f463d82ab4eb 64-67,95-104,116
+internal/pipeline/steps/pr.go
+  s_7b0dcaa05c2128::t_f9c1662b306789 209-211,238-240
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "9d94b5e12b19de05004bcc579ac0b3d94aaf4e4c",
+  "prompts": {},
+  "sessions": {
+    "s_7b0dcaa05c2128": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f916c-3947-7023-9409-782a9434f33e",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
