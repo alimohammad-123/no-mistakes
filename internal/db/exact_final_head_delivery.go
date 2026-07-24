@@ -190,6 +190,28 @@ func (d *DB) ExactRecoveryPushAlreadyBound(runID, headSHA string) (bool, error) 
 		*run.LastPushedAt < event.LastPushedAt {
 		return false, fmt.Errorf("exact recovery push binding changed")
 	}
+	observation, err := d.GetExactRecoveryRefObservation(runID)
+	if err != nil {
+		return false, err
+	}
+	operation, err := d.GetExactRecoveryPushOperation(runID)
+	if err != nil {
+		return false, err
+	}
+	if (observation == nil) != (operation == nil) {
+		return false, fmt.Errorf("exact recovery Push operation journal is incomplete")
+	}
+	if operation != nil {
+		if err := validateExactRecoveryPushOperationIdentity(operation, observation, event); err != nil {
+			return false, err
+		}
+		if err := validateExactRecoveryPushOperationPhase(operation, observation, run); err != nil {
+			return false, err
+		}
+		if operation.Phase != ExactRecoveryPushBound {
+			return false, fmt.Errorf("exact recovery push binding lacks bound operation")
+		}
+	}
 	var pushStatus types.StepStatus
 	if err := d.sql.QueryRow(
 		`SELECT status FROM step_results WHERE run_id = ? AND step_name = ?`,
@@ -287,39 +309,112 @@ func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef
 	} else if update != nil {
 		return false, fmt.Errorf("reconcile stale exact recovery Push custody: PR delivery already started")
 	}
+	observation, err := getExactRecoveryRefObservation(tx, runID)
+	if err != nil {
+		return false, err
+	}
+	operation, err := getExactRecoveryPushOperation(tx, runID)
+	if err != nil {
+		return false, err
+	}
+	if (observation == nil) != (operation == nil) {
+		return false, fmt.Errorf("reconcile stale exact recovery Push custody: operation journal is incomplete")
+	}
+	if observation != nil {
+		if err := validateExactRecoveryPushOperationIdentity(operation, observation, event); err != nil {
+			return false, err
+		}
+		if observation.State != ExactRecoveryRefObservationStale {
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: observation state is not stale")
+		}
+	}
 
 	priorBinding := *run.LastPushedSHA == event.LastPushedSHA &&
 		*run.PushGeneration == event.PushGeneration && *run.LastPushedAt == event.LastPushedAt
 	exactBinding := *run.LastPushedSHA == event.HeadSHA &&
 		*run.PushGeneration == event.PushGeneration+1 && *run.LastPushedAt >= event.LastPushedAt
+	if operation != nil && remoteHead != operation.StaleOID && remoteHead != operation.TargetOID {
+		recordErr := recordExactRecoveryRefObservation(tx, observation, operation, &run, remoteHead)
+		if commitErr := tx.Commit(); commitErr != nil {
+			return false, fmt.Errorf("%v; commit remote ambiguity: %w", recordErr, commitErr)
+		}
+		return false, fmt.Errorf("reconcile stale exact recovery Push custody: remote head is ambiguous")
+	}
 	switch {
 	case priorBinding && pushStatus == types.StepStatusRunning && remoteHead == event.LastPushedSHA:
+		if operation != nil {
+			switch operation.Phase {
+			case ExactRecoveryPushPrepared:
+			case ExactRecoveryPushInvoked:
+				if err := rotateExactRecoveryPushOperation(tx, operation); err != nil {
+					return false, err
+				}
+			default:
+				return false, fmt.Errorf("reconcile stale exact recovery Push custody: prior binding has invalid operation phase")
+			}
+		}
 	case priorBinding && pushStatus == types.StepStatusRunning && remoteHead == event.HeadSHA:
-		ts := now()
+		if operation == nil {
+			ts := now()
+			result, err := tx.Exec(
+				`UPDATE runs
+				 SET last_pushed_sha = ?, push_generation = ?, last_pushed_at = ?, push_active = 0, updated_at = ?
+				 WHERE id = ? AND status = ? AND head_sha = ? AND test_head_sha = ?
+				   AND validation_target_sha IS NULL AND validation_replay_count = ?
+				   AND last_pushed_sha = ? AND push_generation = ? AND last_pushed_at = ?
+				   AND push_target_kind = ? AND push_target_fingerprint = ? AND push_ref = ?
+				   AND COALESCE(push_active, 0) = 1 AND custody_returned_at IS NULL`,
+				event.HeadSHA, event.PushGeneration+1, ts, ts, runID, types.RunRunning,
+				event.HeadSHA, event.TestHeadSHA, maxReplays, event.LastPushedSHA,
+				event.PushGeneration, event.LastPushedAt, event.PushTargetKind,
+				event.PushTargetFingerprint, event.SourceRef,
+			)
+			if err != nil {
+				return false, fmt.Errorf("reconcile stale exact recovery Push custody: bind observed exact head: %w", err)
+			}
+			if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+				return false, fmt.Errorf("reconcile stale exact recovery Push custody: durable state changed before exact-head binding")
+			}
+			if err := tx.Commit(); err != nil {
+				return false, fmt.Errorf("reconcile stale exact recovery Push custody: commit exact-head binding: %w", err)
+			}
+			return true, nil
+		}
+		if operation.Phase == ExactRecoveryPushPrepared {
+			recordErr := recordExactRecoveryRefObservation(tx, observation, operation, &run, remoteHead)
+			if commitErr := tx.Commit(); commitErr != nil {
+				return false, fmt.Errorf("%v; commit pre-invocation delivery ambiguity: %w", recordErr, commitErr)
+			}
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: exact head predates Push invocation")
+		}
+		if operation.Phase != ExactRecoveryPushInvoked {
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: exact head lacks matching invocation")
+		}
+		if err := bindExactRecoveryPushOperation(tx, &run, operation, event); err != nil {
+			return false, err
+		}
 		result, err := tx.Exec(
-			`UPDATE runs
-			 SET last_pushed_sha = ?, push_generation = ?, last_pushed_at = ?, push_active = 0, updated_at = ?
-			 WHERE id = ? AND status = ? AND head_sha = ? AND test_head_sha = ?
-			   AND validation_target_sha IS NULL AND validation_replay_count = ?
-			   AND last_pushed_sha = ? AND push_generation = ? AND last_pushed_at = ?
+			`UPDATE runs SET push_active = 0, updated_at = ?
+			 WHERE id = ? AND status = ? AND last_pushed_sha = ? AND push_generation = ?
 			   AND push_target_kind = ? AND push_target_fingerprint = ? AND push_ref = ?
 			   AND COALESCE(push_active, 0) = 1 AND custody_returned_at IS NULL`,
-			event.HeadSHA, event.PushGeneration+1, ts, ts, runID, types.RunRunning,
-			event.HeadSHA, event.TestHeadSHA, maxReplays, event.LastPushedSHA,
-			event.PushGeneration, event.LastPushedAt, event.PushTargetKind,
-			event.PushTargetFingerprint, event.SourceRef,
+			now(), runID, types.RunRunning, operation.TargetOID, operation.TargetGeneration,
+			operation.TargetKind, operation.TargetFingerprint, operation.SourceRef,
 		)
 		if err != nil {
-			return false, fmt.Errorf("reconcile stale exact recovery Push custody: bind observed exact head: %w", err)
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: release exact binding: %w", err)
 		}
 		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
-			return false, fmt.Errorf("reconcile stale exact recovery Push custody: durable state changed before exact-head binding")
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: exact binding custody changed")
 		}
 		if err := tx.Commit(); err != nil {
 			return false, fmt.Errorf("reconcile stale exact recovery Push custody: commit exact-head binding: %w", err)
 		}
 		return true, nil
 	case exactBinding && remoteHead == event.HeadSHA:
+		if operation != nil && operation.Phase != ExactRecoveryPushBound {
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: exact binding lacks bound operation")
+		}
 	default:
 		return false, fmt.Errorf("reconcile stale exact recovery Push custody: remote head and durable binding are inconsistent")
 	}

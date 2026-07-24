@@ -159,10 +159,6 @@ func exactRecoveryPRSnapshotRequest(sctx *pipeline.StepContext, expectedHead str
 	if err != nil {
 		return scm.PRSnapshotRequest{}, fmt.Errorf("read exact recovery push visibility bound: %w", err)
 	}
-	if persisted == nil || persisted.LastPushedSHA == nil || persisted.LastPushedAt == nil ||
-		strings.TrimSpace(*persisted.LastPushedSHA) != request.ExpectedHead {
-		return request, nil
-	}
 	provider := scm.DetectProviderContext(sctx.Ctx, sctx.Repo.UpstreamURL)
 	if provider == scm.ProviderUnknown && sctx.Run.PRURL != nil {
 		provider = scm.DetectProviderContext(sctx.Ctx, *sctx.Run.PRURL)
@@ -171,8 +167,19 @@ func exactRecoveryPRSnapshotRequest(sctx *pipeline.StepContext, expectedHead str
 	if err != nil {
 		return scm.PRSnapshotRequest{}, fmt.Errorf("read exact recovery provenance for ref visibility: %w", err)
 	}
+	if persisted == nil || persisted.LastPushedSHA == nil || persisted.LastPushedAt == nil ||
+		strings.TrimSpace(*persisted.LastPushedSHA) != request.ExpectedHead {
+		if provider == scm.ProviderAzureDevOps && event != nil && request.ExpectedHead == event.HeadSHA {
+			return scm.PRSnapshotRequest{}, fmt.Errorf("exact recovery Azure target lacks its durable Push binding")
+		}
+		return request, nil
+	}
 	if provider == scm.ProviderAzureDevOps && event != nil {
 		observation, err := sctx.DB.GetExactRecoveryRefObservation(sctx.Run.ID)
+		if err != nil {
+			return scm.PRSnapshotRequest{}, err
+		}
+		operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
 		if err != nil {
 			return scm.PRSnapshotRequest{}, err
 		}
@@ -181,11 +188,24 @@ func exactRecoveryPRSnapshotRequest(sctx *pipeline.StepContext, expectedHead str
 			observation.ExpectedOID != event.HeadSHA || observation.DeadlineAt <= 0) {
 			return scm.PRSnapshotRequest{}, fmt.Errorf("exact recovery Azure ref observation journal is missing or inconsistent")
 		}
+		if (observation == nil) != (operation == nil) {
+			return scm.PRSnapshotRequest{}, fmt.Errorf("exact recovery Azure Push operation journal is incomplete")
+		}
 		if observation != nil && observation.State == db.ExactRecoveryRefObservationAmbiguous {
 			return scm.PRSnapshotRequest{}, fmt.Errorf("exact recovery Azure ref observation journal is ambiguous")
 		}
 		if request.ExpectedHead == event.HeadSHA {
-			if observation == nil {
+			if observation == nil || operation.Phase != db.ExactRecoveryPushBound ||
+				operation.SourceRef != event.SourceRef || operation.StaleOID != event.LastPushedSHA ||
+				operation.TargetOID != event.HeadSHA ||
+				operation.TargetKind != event.PushTargetKind ||
+				operation.TargetFingerprint != event.PushTargetFingerprint ||
+				operation.PriorGeneration != event.PushGeneration ||
+				operation.TargetGeneration != event.PushGeneration+1 ||
+				operation.PriorPushedAt != event.LastPushedAt ||
+				operation.BoundAt == nil || persisted.PushGeneration == nil ||
+				*persisted.PushGeneration != operation.TargetGeneration ||
+				persisted.LastPushedAt == nil || *persisted.LastPushedAt != *operation.BoundAt {
 				return scm.PRSnapshotRequest{}, fmt.Errorf("exact recovery Azure ref observation journal is missing or inconsistent")
 			}
 			request.AllowedStaleHead = observation.StaleOID

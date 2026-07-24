@@ -183,12 +183,19 @@ func (d *DB) PrepareExactRecoveryRefObservation(runID, provider, sourceRef, expe
 		return nil, err
 	}
 	if existing != nil {
+		operation, err := getExactRecoveryPushOperation(tx, runID)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateExactRecoveryPushOperationIdentity(operation, existing, event); err != nil {
+			return nil, err
+		}
 		if existing.Provider != provider || existing.SourceRef != sourceRef ||
 			existing.StaleOID != event.LastPushedSHA || existing.ExpectedOID != expectedOID {
 			return nil, fmt.Errorf("prepare exact recovery ref observation: durable identity changed")
 		}
 		if observedOID == existing.StaleOID && existing.DeadlineAt <= now() {
-			err := recordExactRecoveryRefObservation(tx, existing, "timeout")
+			err := recordExactRecoveryRefObservation(tx, existing, operation, &run, "timeout")
 			if commitErr := tx.Commit(); commitErr != nil {
 				return nil, fmt.Errorf("%v; commit ambiguity: %w", err, commitErr)
 			}
@@ -198,7 +205,7 @@ func (d *DB) PrepareExactRecoveryRefObservation(runID, provider, sourceRef, expe
 			}
 			return observation, fmt.Errorf("prepare exact recovery ref observation: visibility deadline expired")
 		}
-		if err := recordExactRecoveryRefObservation(tx, existing, observedOID); err != nil {
+		if err := recordExactRecoveryRefObservation(tx, existing, operation, &run, observedOID); err != nil {
 			if commitErr := tx.Commit(); commitErr != nil {
 				return nil, fmt.Errorf("%v; commit ambiguity: %w", err, commitErr)
 			}
@@ -236,6 +243,9 @@ func (d *DB) PrepareExactRecoveryRefObservation(runID, provider, sourceRef, expe
 	); err != nil {
 		return nil, fmt.Errorf("prepare exact recovery ref observation: persist event: %w", err)
 	}
+	if _, err := createExactRecoveryPushOperation(tx, event); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("prepare exact recovery ref observation: commit: %w", err)
 	}
@@ -262,24 +272,51 @@ func (d *DB) RecordExactRecoveryRefObservation(runID, observed string) error {
 	if observation == nil {
 		return fmt.Errorf("record exact recovery ref observation: durable journal is missing")
 	}
+	event, err := getRunRecoveryEvent(tx, runID, RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		return err
+	}
+	operation, err := getExactRecoveryPushOperation(tx, runID)
+	if err != nil {
+		return err
+	}
+	var run Run
+	if err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id = ?`, runID), &run); err != nil {
+		return fmt.Errorf("record exact recovery ref observation: read run: %w", err)
+	}
+	if err := validateExactRecoveryPushOperationIdentity(operation, observation, event); err != nil {
+		return err
+	}
 	observed = strings.TrimSpace(observed)
 	if observed == observation.StaleOID && observation.DeadlineAt <= now() {
 		observed = "timeout"
 	}
-	recordErr := recordExactRecoveryRefObservation(tx, observation, observed)
+	recordErr := recordExactRecoveryRefObservation(tx, observation, operation, &run, observed)
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("record exact recovery ref observation: commit: %w", err)
 	}
 	return recordErr
 }
 
-func recordExactRecoveryRefObservation(tx *sql.Tx, observation *ExactRecoveryRefObservation, observed string) error {
+func recordExactRecoveryRefObservation(tx *sql.Tx, observation *ExactRecoveryRefObservation, operation *ExactRecoveryPushOperation, run *Run, observed string) error {
 	state := observation.State
 	if observation.State != ExactRecoveryRefObservationAmbiguous {
-		switch observed {
-		case observation.ExpectedOID:
-			state = ExactRecoveryRefObservationExpected
-		case observation.StaleOID:
+		priorBinding := exactRecoveryRunHasPriorPushBinding(run, operation)
+		targetBinding := exactRecoveryRunHasTargetPushBinding(run, operation)
+		switch {
+		case operation.Phase == ExactRecoveryPushPrepared && !priorBinding:
+			state = ExactRecoveryRefObservationAmbiguous
+		case operation.Phase == ExactRecoveryPushInvoked && !priorBinding:
+			state = ExactRecoveryRefObservationAmbiguous
+		case operation.Phase == ExactRecoveryPushBound && !targetBinding:
+			state = ExactRecoveryRefObservationAmbiguous
+		case observed == observation.ExpectedOID:
+			if operation.Phase == ExactRecoveryPushBound && targetBinding {
+				state = ExactRecoveryRefObservationExpected
+			} else {
+				state = ExactRecoveryRefObservationAmbiguous
+			}
+		case observed == observation.StaleOID:
 			if observation.State == ExactRecoveryRefObservationExpected {
 				state = ExactRecoveryRefObservationAmbiguous
 			} else {

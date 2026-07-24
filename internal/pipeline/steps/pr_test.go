@@ -287,7 +287,19 @@ func TestExactRecoveryAzureRefJournalPersistsAcrossRestart(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
+	if _, err := exactRecoveryPRSnapshotRequest(sctx, sctx.Run.HeadSHA); err == nil {
+		t.Fatal("Azure target was admitted before its Push operation was bound")
+	}
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.MarkExactRecoveryPushInvoked(
+		sctx.Run.ID, operation.OperationID, sctx.Run.BaseSHA,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.BindExactRecoveryPushOperation(sctx.Run.ID, operation.OperationID, db.PushBinding{
 		HeadSHA: sctx.Run.HeadSHA, TargetKind: "upstream",
 		TargetFingerprint: branchsync.TargetFingerprint(resolvePushURL(sctx)),
 		Ref:               "refs/heads/feature",
@@ -352,6 +364,13 @@ func TestPushStep_ExactRecoveryAzureRefJournalPreventsAmbiguousPublication(t *te
 		}
 		if err := sctx.DB.RecordExactRecoveryRefObservation(sctx.Run.ID, sctx.Run.HeadSHA); err != nil {
 			t.Fatal(err)
+		}
+		operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if operation.Phase != db.ExactRecoveryPushBound || operation.BoundAt == nil {
+			t.Fatalf("successful Push operation = %#v", operation)
 		}
 		pushed, err := sctx.DB.GetRun(sctx.Run.ID)
 		if err != nil {
@@ -424,6 +443,114 @@ func TestPushStep_ExactRecoveryAzureRefJournalPreventsAmbiguousPublication(t *te
 		if *after.PushGeneration != *before.PushGeneration ||
 			after.LastPushedSHA == nil || *after.LastPushedSHA != sctx.Run.BaseSHA {
 			t.Fatalf("ambiguous retry changed push binding: %#v", after)
+		}
+	})
+	t.Run("invoked before mutation rotates safely after restart", func(t *testing.T) {
+		sctx, _ := exactRecoveryDeliveryStepContext(
+			t, scm.PRContent{Title: "prior title", Body: "prior body"}, true,
+		)
+		upstream := resolvePushURL(sctx)
+		gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+		sctx.Repo.UpstreamURL = "https://dev.azure.com/org/project/_git/repo"
+		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		run, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.Run = run
+		step := &PushStep{
+			recoveryRefObserved: func(_ *pipeline.StepContext, _ string) (string, error) {
+				return gitCmd(t, upstream, "rev-parse", "refs/heads/feature"), nil
+			},
+			invocationMarked: func() error {
+				return errors.New("simulated process crash")
+			},
+		}
+		if _, err := step.Execute(sctx); err == nil {
+			t.Fatal("simulated crash did not interrupt Push")
+		}
+		if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+			t.Fatalf("pre-mutation crash published %s", got)
+		}
+		crashed, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		reconciled, err := sctx.DB.ReconcileStaleExactRecoveryPushCustody(
+			sctx.Run.ID, sctx.Run.BaseSHA, "refs/heads/feature", sctx.Run.HeadSHA,
+			3, types.AllSteps(),
+		)
+		if err != nil || !reconciled {
+			t.Fatalf("reconcile pre-mutation crash = %v, %v", reconciled, err)
+		}
+		operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if crashed.LastPushedSHA == nil || *crashed.LastPushedSHA != sctx.Run.BaseSHA ||
+			operation.Phase != db.ExactRecoveryPushPrepared || operation.Attempt != 2 {
+			t.Fatalf("rotated operation = %#v, crashed run = %#v", operation, crashed)
+		}
+	})
+	t.Run("external success after invocation binds without duplicate push", func(t *testing.T) {
+		sctx, _ := exactRecoveryDeliveryStepContext(
+			t, scm.PRContent{Title: "prior title", Body: "prior body"}, true,
+		)
+		upstream := resolvePushURL(sctx)
+		gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+		sctx.Repo.UpstreamURL = "https://dev.azure.com/org/project/_git/repo"
+		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		run, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.Run = run
+		step := &PushStep{
+			recoveryRefObserved: func(_ *pipeline.StepContext, _ string) (string, error) {
+				return gitCmd(t, upstream, "rev-parse", "refs/heads/feature"), nil
+			},
+			invocationMarked: func() error {
+				gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.HeadSHA, sctx.Run.BaseSHA)
+				return errors.New("simulated crash after remote success")
+			},
+		}
+		if _, err := step.Execute(sctx); err == nil {
+			t.Fatal("simulated post-mutation crash did not interrupt Push")
+		}
+		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		reconciled, err := sctx.DB.ReconcileStaleExactRecoveryPushCustody(
+			sctx.Run.ID, sctx.Run.HeadSHA, "refs/heads/feature", sctx.Run.HeadSHA,
+			3, types.AllSteps(),
+		)
+		if err != nil || !reconciled {
+			t.Fatalf("reconcile post-mutation crash = %v, %v", reconciled, err)
+		}
+		bound, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		generation := *bound.PushGeneration
+		sctx.Run = bound
+		step.invocationMarked = nil
+		if _, err := step.Execute(sctx); err != nil {
+			t.Fatal(err)
+		}
+		replayed, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if *replayed.PushGeneration != generation ||
+			gitCmd(t, upstream, "rev-parse", "refs/heads/feature") != sctx.Run.HeadSHA {
+			t.Fatalf("replayed recovered Push changed delivery: %#v", replayed)
 		}
 	})
 }

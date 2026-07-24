@@ -22,6 +22,7 @@ type PushStep struct {
 	beforeRemoteMutation        func()
 	ownershipClaimed            func()
 	recoveryRefObserved         func(*pipeline.StepContext, string) (string, error)
+	invocationMarked            func() error
 }
 
 func (s *PushStep) Name() types.StepName { return types.StepPush }
@@ -133,7 +134,8 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	// of silently dropping it. A bare --force-with-lease offers no protection
 	// when pushing to a URL (no remote-tracking refs), so the anchor is explicit.
 	lastSeen := lastFetchedBranchTip(ctx, sctx.WorkDir, branch, usingFork)
-	if err := s.prepareExactRecoveryAzureRefObservation(sctx, ref, headBeingPushed); err != nil {
+	azureOperation, err := s.prepareExactRecoveryAzureRefObservation(sctx, ref, headBeingPushed)
+	if err != nil {
 		return nil, err
 	}
 	gitRun := func(args ...string) (string, error) { return git.Run(ctx, sctx.WorkDir, args...) }
@@ -148,8 +150,25 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		if s.ownershipClaimed != nil {
 			s.ownershipClaimed()
 		}
-		if err := s.prepareExactRecoveryAzureRefObservation(sctx, ref, headBeingPushed); err != nil {
+		currentOperation, err := s.prepareExactRecoveryAzureRefObservation(sctx, ref, headBeingPushed)
+		if err != nil {
 			return err
+		}
+		if (azureOperation == nil) != (currentOperation == nil) ||
+			azureOperation != nil && azureOperation.OperationID != currentOperation.OperationID {
+			return fmt.Errorf("Azure recovery Push operation changed before invocation")
+		}
+		if currentOperation != nil {
+			if err := sctx.DB.MarkExactRecoveryPushInvoked(
+				sctx.Run.ID, currentOperation.OperationID, decision.remoteSHA,
+			); err != nil {
+				return err
+			}
+			if s.invocationMarked != nil {
+				if err := s.invocationMarked(); err != nil {
+					return err
+				}
+			}
 		}
 		switch {
 		case decision.newBranch:
@@ -169,12 +188,18 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 			}
 			return fmt.Errorf("verify successful push to %s: remote head %s does not equal pushed head %s", pushTarget, verifiedRemote, headBeingPushed)
 		}
-		return sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
+		binding := db.PushBinding{
 			HeadSHA:           headBeingPushed,
 			TargetKind:        pushTarget,
 			TargetFingerprint: branchsync.TargetFingerprint(pushURL),
 			Ref:               ref,
-		})
+		}
+		if currentOperation != nil {
+			return sctx.DB.BindExactRecoveryPushOperation(
+				sctx.Run.ID, currentOperation.OperationID, binding,
+			)
+		}
+		return sctx.DB.UpdateRunPushBinding(sctx.Run.ID, binding)
 	}); err != nil {
 		return nil, err
 	}
@@ -193,13 +218,13 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	return &pipeline.StepOutcome{}, nil
 }
 
-func (s *PushStep) prepareExactRecoveryAzureRefObservation(sctx *pipeline.StepContext, ref, expectedHead string) error {
+func (s *PushStep) prepareExactRecoveryAzureRefObservation(sctx *pipeline.StepContext, ref, expectedHead string) (*db.ExactRecoveryPushOperation, error) {
 	event, err := sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
 	if err != nil || event == nil {
-		return err
+		return nil, err
 	}
 	if scm.DetectProviderContext(sctx.Ctx, sctx.Repo.UpstreamURL) != scm.ProviderAzureDevOps {
-		return nil
+		return nil, nil
 	}
 	observe := s.recoveryRefObserved
 	if observe == nil {
@@ -207,7 +232,7 @@ func (s *PushStep) prepareExactRecoveryAzureRefObservation(sctx *pipeline.StepCo
 	}
 	observed, err := observe(sctx, event.LastPushedSHA)
 	if err != nil {
-		return fmt.Errorf("read Azure recovery source ref before Push: %w", err)
+		return nil, fmt.Errorf("read Azure recovery source ref before Push: %w", err)
 	}
 	if strings.TrimSpace(observed) == "" {
 		observed = "missing"
@@ -217,9 +242,16 @@ func (s *PushStep) prepareExactRecoveryAzureRefObservation(sctx *pipeline.StepCo
 		time.Now().Add(exactRecoveryRefReconcileWindow).Unix(),
 	)
 	if err != nil {
-		return fmt.Errorf("prepare Azure recovery source ref observation: %w", err)
+		return nil, fmt.Errorf("prepare Azure recovery source ref observation: %w", err)
 	}
-	return nil
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if operation == nil || operation.Phase != db.ExactRecoveryPushPrepared {
+		return nil, fmt.Errorf("prepare Azure recovery Push operation: durable prepared phase is missing")
+	}
+	return operation, nil
 }
 
 func observeExactRecoveryAzureSourceRef(sctx *pipeline.StepContext, expected string) (string, error) {

@@ -516,11 +516,24 @@ func (d *DB) ValidateActiveExactFinalHeadCapacityRecovery(runID string, maxRepla
 	if err != nil {
 		return err
 	}
+	pushOperation, err := d.GetExactRecoveryPushOperation(runID)
+	if err != nil {
+		return err
+	}
+	if (refObservation == nil) != (pushOperation == nil) {
+		return fmt.Errorf("validate active exact final-head capacity recovery: Push operation journal is incomplete")
+	}
 	if refObservation != nil {
 		if refObservation.Provider == "" || refObservation.SourceRef != event.SourceRef ||
 			refObservation.StaleOID != event.LastPushedSHA || refObservation.ExpectedOID != event.HeadSHA ||
 			refObservation.DeadlineAt <= 0 {
 			return fmt.Errorf("validate active exact final-head capacity recovery: ref observation identity changed")
+		}
+		if err := validateExactRecoveryPushOperationIdentity(pushOperation, refObservation, event); err != nil {
+			return fmt.Errorf("validate active exact final-head capacity recovery: %w", err)
+		}
+		if err := validateExactRecoveryPushOperationPhase(pushOperation, refObservation, run); err != nil {
+			return fmt.Errorf("validate active exact final-head capacity recovery: %w", err)
 		}
 		switch refObservation.State {
 		case ExactRecoveryRefObservationStale, ExactRecoveryRefObservationExpected:

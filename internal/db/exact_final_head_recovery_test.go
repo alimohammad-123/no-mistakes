@@ -362,12 +362,20 @@ func TestExactRecoveryRefObservationJournalRefusesRememberedAmbiguity(t *testing
 		observations []string
 		wantState    string
 		wantErrorAt  int
+		bind         bool
 	}{
 		{
 			name:         "old to expected",
 			observations: []string{"published-head", "head-3"},
 			wantState:    ExactRecoveryRefObservationExpected,
 			wantErrorAt:  -1,
+			bind:         true,
+		},
+		{
+			name:         "target before invocation",
+			observations: []string{"published-head", "head-3"},
+			wantState:    ExactRecoveryRefObservationAmbiguous,
+			wantErrorAt:  1,
 		},
 		{
 			name:         "old to third",
@@ -386,6 +394,7 @@ func TestExactRecoveryRefObservationJournalRefusesRememberedAmbiguity(t *testing
 			observations: []string{"published-head", "head-3", "published-head"},
 			wantState:    ExactRecoveryRefObservationAmbiguous,
 			wantErrorAt:  2,
+			bind:         true,
 		},
 	}
 	for _, tc := range tests {
@@ -397,6 +406,25 @@ func TestExactRecoveryRefObservationJournalRefusesRememberedAmbiguity(t *testing
 			)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if tc.bind {
+				operation, err := f.d.GetExactRecoveryPushOperation(restored.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := f.d.MarkExactRecoveryPushInvoked(
+					restored.ID, operation.OperationID, "published-head",
+				); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.d.BindExactRecoveryPushOperation(
+					restored.ID, operation.OperationID, PushBinding{
+						HeadSHA: restored.HeadSHA, TargetKind: "upstream",
+						TargetFingerprint: "target-fingerprint", Ref: "refs/heads/feature",
+					},
+				); err != nil {
+					t.Fatal(err)
+				}
 			}
 			for index, observed := range tc.observations[1:] {
 				err := f.d.RecordExactRecoveryRefObservation(restored.ID, observed)
@@ -460,21 +488,126 @@ func TestExactRecoveryRefObservationJournalPersistsTimeout(t *testing.T) {
 	}
 }
 
+func TestExactRecoveryPushInvocationRefusesPreexistingTarget(t *testing.T) {
+	f, restored, _ := prepareExactRecoveryPushCrash(t)
+	if _, err := f.d.PrepareExactRecoveryRefObservation(
+		restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+		"published-head", now()+30,
+	); err != nil {
+		t.Fatal(err)
+	}
+	operation, err := f.d.GetExactRecoveryPushOperation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.MarkExactRecoveryPushInvoked(
+		restored.ID, operation.OperationID, restored.HeadSHA,
+	); err == nil {
+		t.Fatal("preexisting target was admitted as this operation's Push")
+	}
+	journal, err := f.d.GetExactRecoveryRefObservation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err = f.d.GetExactRecoveryPushOperation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if journal.State != ExactRecoveryRefObservationAmbiguous ||
+		operation.Phase != ExactRecoveryPushPrepared || operation.InvokedAt != nil {
+		t.Fatalf("preexisting target state = journal %#v operation %#v", journal, operation)
+	}
+}
+
+func TestValidateActiveExactRecoveryRejectsUnscopedAzureOperationStates(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *exactFinalHeadRecoveryFixture, *Run)
+	}{
+		{
+			name: "expected observation with prior binding",
+			mutate: func(t *testing.T, f *exactFinalHeadRecoveryFixture, restored *Run) {
+				ts := now()
+				mustExecRecoveryTest(t, f.d,
+					`UPDATE run_recovery_ref_observations
+					 SET attempts = 2, state = ?, last_observation = ?, updated_at = ?
+					 WHERE run_id = ?`,
+					ExactRecoveryRefObservationExpected, restored.HeadSHA, ts, restored.ID,
+				)
+				mustExecRecoveryTest(t, f.d,
+					`INSERT INTO run_recovery_ref_observation_events (
+						run_id, attempt, observation, prior_state, state, observed_at
+					 ) VALUES (?, 2, ?, ?, ?, ?)`,
+					restored.ID, restored.HeadSHA, ExactRecoveryRefObservationStale,
+					ExactRecoveryRefObservationExpected, ts,
+				)
+			},
+		},
+		{
+			name: "bound phase without invocation",
+			mutate: func(t *testing.T, f *exactFinalHeadRecoveryFixture, restored *Run) {
+				mustExecRecoveryTest(t, f.d,
+					`UPDATE run_recovery_push_operations
+					 SET phase = ?, bound_at = ?, updated_at = ? WHERE run_id = ?`,
+					ExactRecoveryPushBound, now(), now(), restored.ID,
+				)
+			},
+		},
+		{
+			name: "exact binding with prepared operation",
+			mutate: func(t *testing.T, f *exactFinalHeadRecoveryFixture, restored *Run) {
+				if err := f.d.UpdateRunPushBinding(restored.ID, PushBinding{
+					HeadSHA: restored.HeadSHA, TargetKind: "upstream",
+					TargetFingerprint: "target-fingerprint", Ref: "refs/heads/feature",
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, restored, _ := prepareExactRecoveryPushCrash(t)
+			if _, err := f.d.PrepareExactRecoveryRefObservation(
+				restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+				"published-head", now()+30,
+			); err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(t, f, restored)
+			if err := f.d.SetRunPushActive(restored.ID, false); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.d.ValidateActiveExactFinalHeadCapacityRecovery(
+				restored.ID, 3, types.AllSteps(),
+			); err == nil {
+				t.Fatal("unscoped Azure operation state was admitted")
+			}
+		})
+	}
+}
+
 func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.T) {
 	tests := []struct {
-		name           string
-		remoteHead     string
-		advanceBinding bool
-		completePush   bool
-		wantError      bool
-		wantBound      bool
+		name         string
+		remoteHead   string
+		invoke       bool
+		bind         bool
+		completePush bool
+		wantError    bool
+		wantBound    bool
+		wantPhase    string
+		wantAttempt  int
+		wantState    string
 	}{
-		{name: "before push", remoteHead: "published-head"},
-		{name: "after remote mutation before binding", remoteHead: "head-3", wantBound: true},
-		{name: "after binding before completion", remoteHead: "head-3", advanceBinding: true, wantBound: true},
-		{name: "after completion before release", remoteHead: "head-3", advanceBinding: true, completePush: true, wantBound: true},
-		{name: "remote mismatch", remoteHead: "other-head", wantError: true},
-		{name: "completed without binding", remoteHead: "head-3", completePush: true, wantError: true},
+		{name: "prepared before push", remoteHead: "published-head", wantPhase: ExactRecoveryPushPrepared, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
+		{name: "delivered before invocation", remoteHead: "head-3", wantError: true, wantPhase: ExactRecoveryPushPrepared, wantAttempt: 1, wantState: ExactRecoveryRefObservationAmbiguous},
+		{name: "invoked before remote mutation", remoteHead: "published-head", invoke: true, wantPhase: ExactRecoveryPushPrepared, wantAttempt: 2, wantState: ExactRecoveryRefObservationStale},
+		{name: "externally succeeded unverified", remoteHead: "head-3", invoke: true, wantBound: true, wantPhase: ExactRecoveryPushBound, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
+		{name: "after binding before completion", remoteHead: "head-3", invoke: true, bind: true, wantBound: true, wantPhase: ExactRecoveryPushBound, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
+		{name: "after completion before release", remoteHead: "head-3", invoke: true, bind: true, completePush: true, wantBound: true, wantPhase: ExactRecoveryPushBound, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
+		{name: "remote mismatch", remoteHead: "other-head", invoke: true, wantError: true, wantPhase: ExactRecoveryPushInvoked, wantAttempt: 1, wantState: ExactRecoveryRefObservationAmbiguous},
+		{name: "completed without binding", remoteHead: "head-3", invoke: true, completePush: true, wantError: true, wantPhase: ExactRecoveryPushInvoked, wantAttempt: 1, wantState: ExactRecoveryRefObservationStale},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -485,8 +618,19 @@ func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.
 			); err != nil {
 				t.Fatal(err)
 			}
-			if tc.advanceBinding {
-				if err := f.d.UpdateRunPushBinding(restored.ID, PushBinding{
+			operation, err := f.d.GetExactRecoveryPushOperation(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.invoke {
+				if err := f.d.MarkExactRecoveryPushInvoked(
+					restored.ID, operation.OperationID, "published-head",
+				); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.bind {
+				if err := f.d.BindExactRecoveryPushOperation(restored.ID, operation.OperationID, PushBinding{
 					HeadSHA: restored.HeadSHA, TargetKind: "upstream", TargetFingerprint: "target-fingerprint", Ref: "refs/heads/feature",
 				}); err != nil {
 					t.Fatal(err)
@@ -522,8 +666,15 @@ func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			if journal == nil || journal.State != ExactRecoveryRefObservationStale {
-				t.Fatalf("reconciled journal = %#v, want preserved Azure observation", journal)
+			if journal == nil || journal.State != tc.wantState {
+				t.Fatalf("reconciled journal = %#v, want state %s", journal, tc.wantState)
+			}
+			operation, err = f.d.GetExactRecoveryPushOperation(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if operation == nil || operation.Phase != tc.wantPhase || operation.Attempt != tc.wantAttempt {
+				t.Fatalf("reconciled operation = %#v, want phase %s attempt %d", operation, tc.wantPhase, tc.wantAttempt)
 			}
 			if !tc.wantError {
 				if again, err := f.d.ReconcileStaleExactRecoveryPushCustody(
