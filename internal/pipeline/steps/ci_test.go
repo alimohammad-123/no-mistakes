@@ -161,6 +161,148 @@ func TestCIStep_ExactRecoveryDeletedSourceRejectsWrongMergedHead(t *testing.T) {
 	}
 }
 
+func TestCIStep_ReconcileExactRecoveryCannotHealDurableAmbiguity(t *testing.T) {
+	sctx, host := exactRecoveryCIContext(t)
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, resolvePushURL(sctx), "update-ref", "-d", operation.ReceiptRef)
+	if err := validateBoundExactRecoveryPushReceipt(sctx); err == nil {
+		t.Fatal("missing receipt did not become terminal ambiguity")
+	}
+	gitCmd(t, resolvePushURL(sctx), "update-ref", operation.ReceiptRef, operation.TargetOID)
+	host.state = scm.PRStateMerged
+	host.merged = true
+	snapshotCalls := host.snapshotCalls
+	step := &CIStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+		return host, ""
+	}}
+	completed, err := step.ReconcileApprovalGate(sctx)
+	if err == nil || completed {
+		t.Fatalf("restored pair healed terminal ambiguity: completed=%v err=%v", completed, err)
+	}
+	if host.snapshotCalls != snapshotCalls {
+		t.Fatalf("terminal ambiguity added provider snapshots: before=%d after=%d", snapshotCalls, host.snapshotCalls)
+	}
+}
+
+func TestCIStep_ReconcileExactRecoveryProviderErrorChecksCustody(t *testing.T) {
+	providerErr := errors.New("provider unavailable")
+	for _, test := range []struct {
+		name              string
+		deleteReceipt     bool
+		wantProviderError bool
+	}{
+		{name: "intact pair preserves provider error", wantProviderError: true},
+		{name: "missing receipt takes precedence", deleteReceipt: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sctx, host := exactRecoveryCIContext(t)
+			host.stateErr = providerErr
+			if test.deleteReceipt {
+				operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := sctx.DB.SetRunCIReady(sctx.Run.ID, true); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, resolvePushURL(sctx), "update-ref", "-d", operation.ReceiptRef)
+			}
+			step := &CIStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+				return host, ""
+			}}
+			completed, err := step.ReconcileApprovalGate(sctx)
+			if completed || err == nil {
+				t.Fatalf("provider error reconciliation: completed=%v err=%v", completed, err)
+			}
+			if errors.Is(err, providerErr) != test.wantProviderError {
+				t.Fatalf("provider error precedence = %v, want %v: %v", errors.Is(err, providerErr), test.wantProviderError, err)
+			}
+			if test.deleteReceipt {
+				ambiguity, ambiguityErr := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+				if ambiguityErr != nil {
+					t.Fatal(ambiguityErr)
+				}
+				if ambiguity == nil || ambiguity.Classification != db.ExactRecoveryRemoteRefMissing {
+					t.Fatalf("provider-error ambiguity = %#v", ambiguity)
+				}
+				persisted, getErr := sctx.DB.GetRun(sctx.Run.ID)
+				if getErr != nil {
+					t.Fatal(getErr)
+				}
+				if persisted.CIReadyAt != nil {
+					t.Fatalf("provider-error ambiguity retained readiness at %d", *persisted.CIReadyAt)
+				}
+			}
+		})
+	}
+}
+
+func TestCIStep_ReconcileExactRecoveryCancellationChecksCustody(t *testing.T) {
+	sctx, host := exactRecoveryCIContext(t)
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, resolvePushURL(sctx), "update-ref", "-d", operation.ReceiptRef)
+	cancelled, cancel := context.WithCancel(sctx.Ctx)
+	cancel()
+	sctx.Ctx = cancelled
+	step := &CIStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+		return host, ""
+	}}
+	completed, err := step.ReconcileApprovalGate(sctx)
+	if completed || err == nil || errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation hid lost custody: completed=%v err=%v", completed, err)
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity == nil || ambiguity.Classification != db.ExactRecoveryRemoteRefMissing {
+		t.Fatalf("cancellation ambiguity = %#v", ambiguity)
+	}
+}
+
+func TestCIStep_ExactRecoveryTimeoutChecksCustody(t *testing.T) {
+	sctx, host := exactRecoveryCIContext(t)
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.SetRunCIReady(sctx.Run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, resolvePushURL(sctx), "update-ref", "-d", operation.ReceiptRef)
+	sctx.Config.CITimeout = time.Nanosecond
+	nowCalls := 0
+	started := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	step := &CIStep{
+		hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+			return host, ""
+		},
+		now: func() time.Time {
+			nowCalls++
+			if nowCalls == 1 {
+				return started
+			}
+			return started.Add(time.Second)
+		},
+	}
+	if _, err := step.Execute(sctx); err == nil {
+		t.Fatal("CI timeout accepted lost exact recovery custody")
+	}
+	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.CIReadyAt != nil {
+		t.Fatalf("timeout ambiguity retained readiness at %d", *persisted.CIReadyAt)
+	}
+}
+
 func TestCIStep_PendingChecksUseAdaptivePollIntervals(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

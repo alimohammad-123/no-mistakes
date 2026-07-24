@@ -72,6 +72,9 @@ func validateBoundExactRecoveryPushReceiptState(sctx *pipeline.StepContext, allo
 	if err != nil || event == nil {
 		return err
 	}
+	if err := sctx.DB.CheckExactRecoveryRemoteRefAmbiguity(sctx.Run.ID); err != nil {
+		return err
+	}
 	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
 	if err != nil {
 		return err

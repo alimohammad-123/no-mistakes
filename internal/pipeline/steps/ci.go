@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	defaultChecksGracePeriod          = 60 * time.Second
-	defaultBaseBranchTipResolveWindow = 30 * time.Second
+	defaultChecksGracePeriod           = 60 * time.Second
+	defaultBaseBranchTipResolveWindow  = 30 * time.Second
+	exactRecoveryCICustodyCheckTimeout = 5 * time.Second
 )
 
 // CI monitoring status messages. These are surfaced to the user and parsed by
@@ -59,7 +60,7 @@ func (s *CIStep) Name() types.StepName { return types.StepCI }
 // parked so reconciliation never guesses success.
 func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error) {
 	if err := sctx.Ctx.Err(); err != nil {
-		return false, err
+		return false, preferExactRecoveryCICustodyError(sctx, err)
 	}
 	provider := scm.DetectProviderContext(sctx.Ctx, sctx.Repo.UpstreamURL)
 	if provider == scm.ProviderUnknown && sctx.Run.PRURL != nil {
@@ -74,7 +75,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		return false, fmt.Errorf("cannot check PR state: %s", skipReason)
 	}
 	if err := host.Available(sctx.Ctx); err != nil {
-		return false, err
+		return false, preferExactRecoveryCICustodyError(sctx, err)
 	}
 
 	prURL := ""
@@ -91,7 +92,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	state, err := host.GetPRState(sctx.Ctx, &scm.PR{Number: prNumber, URL: prURL})
 	s.afterPoll("state")
 	if err != nil {
-		return false, err
+		return false, preferExactRecoveryCICustodyError(sctx, err)
 	}
 	if err := s.validateExactRecoveryCITerminalPair(sctx, host, &scm.PR{Number: prNumber, URL: prURL}, state); err != nil {
 		clearCIMonitorReady(sctx)
@@ -140,6 +141,9 @@ func (s *CIStep) afterPoll(name string) {
 func (s *CIStep) validateExactRecoveryCITerminalPair(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, state scm.PRState) error {
 	event, err := sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
 	if err != nil || event == nil {
+		return err
+	}
+	if err := sctx.DB.CheckExactRecoveryRemoteRefAmbiguity(sctx.Run.ID); err != nil {
 		return err
 	}
 	if state != scm.PRStateMerged {
@@ -209,7 +213,7 @@ func (s *CIStep) validateExactRecoveryCITerminalPair(sctx *pipeline.StepContext,
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, preferExactRecoveryCICustodyError(sctx, err)
 	}
 	if configuredTestProofStale(sctx) {
 		sctx.Log("CI monitoring withheld until configured Test proves the exact candidate")
@@ -232,6 +236,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
 	if err := host.Available(ctx); err != nil {
+		if custodyErr := validateExactRecoveryCICustodyBounded(sctx); custodyErr != nil {
+			clearCIMonitorReady(sctx)
+			return nil, custodyErr
+		}
 		sctx.Log(fmt.Sprintf("skipping CI: %v", err))
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
@@ -299,7 +307,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		state, stateErr := host.GetPRState(ctx, pr)
 		s.afterPoll("timeout-state")
 		if stateErr != nil {
-			if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
+			if err := validateExactRecoveryCICustodyBounded(sctx); err != nil {
 				clearCIMonitorReady(sctx)
 				return nil, err
 			}
@@ -319,7 +327,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			clearCIMonitorReady(sctx)
+			return nil, preferExactRecoveryCICustodyError(sctx, err)
 		}
 		if configuredTestProofStale(sctx) {
 			clearCIMonitorReady(sctx)
@@ -365,7 +374,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		state, err := host.GetPRState(ctx, pr)
 		s.afterPoll("state")
 		if err != nil {
-			if pairErr := validateBoundExactRecoveryPushReceipt(sctx); pairErr != nil {
+			if pairErr := validateExactRecoveryCICustodyBounded(sctx); pairErr != nil {
 				clearCIMonitorReady(sctx)
 				return nil, pairErr
 			}
@@ -398,9 +407,15 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		if host.Capabilities().MergeableState {
 			mergeState, mergeErr := host.GetMergeableState(ctx, pr)
 			s.afterPoll("mergeable")
-			if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
+			var custodyErr error
+			if mergeErr != nil {
+				custodyErr = validateExactRecoveryCICustodyBounded(sctx)
+			} else {
+				custodyErr = validateBoundExactRecoveryPushReceipt(sctx)
+			}
+			if custodyErr != nil {
 				clearCIMonitorReady(sctx)
-				return nil, err
+				return nil, custodyErr
 			}
 			if mergeErr != nil {
 				sctx.Log(fmt.Sprintf("warning: could not check mergeable state: %v", mergeErr))
@@ -423,7 +438,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		ciFixLimit := sctx.Config.AutoFix.CI
 		checks, err := host.GetChecks(ctx, pr)
 		s.afterPoll("checks")
-		if pairErr := validateBoundExactRecoveryPushReceipt(sctx); pairErr != nil {
+		var pairErr error
+		if err != nil {
+			pairErr = validateExactRecoveryCICustodyBounded(sctx)
+		} else {
+			pairErr = validateBoundExactRecoveryPushReceipt(sctx)
+		}
+		if pairErr != nil {
 			clearCIMonitorReady(sctx)
 			return nil, pairErr
 		}
@@ -571,9 +592,29 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			}
 		}
 		if err := waitForNextPoll(ctx, interval); err != nil {
-			return nil, err
+			clearCIMonitorReady(sctx)
+			return nil, preferExactRecoveryCICustodyError(sctx, err)
 		}
 	}
+}
+
+func preferExactRecoveryCICustodyError(sctx *pipeline.StepContext, fallback error) error {
+	if err := validateExactRecoveryCICustodyBounded(sctx); err != nil {
+		clearCIMonitorReady(sctx)
+		return err
+	}
+	return fallback
+}
+
+func validateExactRecoveryCICustodyBounded(sctx *pipeline.StepContext) error {
+	if sctx == nil || sctx.Ctx == nil {
+		return nil
+	}
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(sctx.Ctx), exactRecoveryCICustodyCheckTimeout)
+	defer cancel()
+	checkContext := *sctx
+	checkContext.Ctx = checkCtx
+	return validateBoundExactRecoveryPushReceipt(&checkContext)
 }
 
 func configuredTestProofStale(sctx *pipeline.StepContext) bool {
