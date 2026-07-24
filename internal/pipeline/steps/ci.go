@@ -9,6 +9,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -44,7 +45,9 @@ type CIStep struct {
 	// The bool is false when the SHA is a fallback/unknown value and
 	// must not re-arm the timeout. Overridable for testing; defaults to
 	// fetching the upstream pipeline base.
-	baseBranchTip func(context.Context) (string, bool)
+	baseBranchTip     func(context.Context) (string, bool)
+	hostFactory       func(*pipeline.StepContext, scm.Provider) (scm.Host, string)
+	afterProviderPoll func(string)
 }
 
 func (s *CIStep) Name() types.StepName { return types.StepCI }
@@ -58,14 +61,15 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	if err := sctx.Ctx.Err(); err != nil {
 		return false, err
 	}
-	if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
-		return false, err
-	}
 	provider := scm.DetectProviderContext(sctx.Ctx, sctx.Repo.UpstreamURL)
 	if provider == scm.ProviderUnknown && sctx.Run.PRURL != nil {
 		provider = scm.DetectProviderContext(sctx.Ctx, *sctx.Run.PRURL)
 	}
-	host, skipReason := buildHost(sctx, provider)
+	hostFactory := s.hostFactory
+	if hostFactory == nil {
+		hostFactory = buildHost
+	}
+	host, skipReason := hostFactory(sctx, provider)
 	if host == nil {
 		return false, fmt.Errorf("cannot check PR state: %s", skipReason)
 	}
@@ -85,7 +89,12 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		return false, fmt.Errorf("extract PR number: %w", err)
 	}
 	state, err := host.GetPRState(sctx.Ctx, &scm.PR{Number: prNumber, URL: prURL})
+	s.afterPoll("state")
 	if err != nil {
+		return false, err
+	}
+	if err := s.validateExactRecoveryCITerminalPair(sctx, host, &scm.PR{Number: prNumber, URL: prURL}, state); err != nil {
+		clearCIMonitorReady(sctx)
 		return false, err
 	}
 	switch state {
@@ -122,6 +131,81 @@ func (s *CIStep) gracePeriod() time.Duration {
 	return defaultChecksGracePeriod
 }
 
+func (s *CIStep) afterPoll(name string) {
+	if s.afterProviderPoll != nil {
+		s.afterProviderPoll(name)
+	}
+}
+
+func (s *CIStep) validateExactRecoveryCITerminalPair(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, state scm.PRState) error {
+	event, err := sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil || event == nil {
+		return err
+	}
+	if state != scm.PRStateMerged {
+		return validateBoundExactRecoveryPushReceipt(sctx)
+	}
+	reader, ok := host.(scm.PRSnapshotReader)
+	if host == nil || !host.Capabilities().RecoverySnapshot || !ok {
+		return fmt.Errorf("provider cannot prove the merged exact recovery head")
+	}
+	request, err := exactRecoveryPRSnapshotRequest(sctx, event.HeadSHA)
+	if err != nil {
+		return err
+	}
+	request.AllowMergedSourceDeletion = true
+	snapshot, err := reader.GetPRSnapshot(sctx.Ctx, pr, request)
+	s.afterPoll("merged-snapshot")
+	if err != nil {
+		return fmt.Errorf("read merged exact recovery PR snapshot: %w", err)
+	}
+	expectedNumber := strings.TrimSpace(pr.Number)
+	if expectedNumber == "" {
+		expectedNumber, _ = scm.ExtractPRNumber(pr.URL)
+	}
+	identityMismatch := strings.TrimSpace(reader.ExpectedRepository()) == "" ||
+		strings.TrimSpace(snapshot.Repository) != strings.TrimSpace(reader.ExpectedRepository()) ||
+		strings.TrimSpace(snapshot.URL) != strings.TrimSpace(pr.URL) ||
+		strings.TrimSpace(snapshot.Number) != expectedNumber ||
+		strings.TrimSpace(snapshot.HeadRef) != strings.TrimPrefix(sctx.Run.Branch, "refs/heads/") ||
+		strings.TrimSpace(snapshot.BaseRef) != sctx.BaseBranch() ||
+		snapshot.State != scm.PRStateMerged || !snapshot.Merged
+	if identityMismatch {
+		if err := sctx.DB.RecordExactRecoveryRemoteRefAmbiguity(
+			sctx.Run.ID, db.ExactRecoveryRemoteRefIdentityMismatch,
+		); err != nil {
+			return fmt.Errorf("persist merged exact recovery PR identity ambiguity: %w", err)
+		}
+		return fmt.Errorf("merged exact recovery PR identity is ambiguous")
+	}
+	head := strings.TrimSpace(snapshot.HeadSHA)
+	if head == "" {
+		if err := sctx.DB.RecordExactRecoveryRemoteRefAmbiguity(
+			sctx.Run.ID, db.ExactRecoveryRemoteRefMissing,
+		); err != nil {
+			return fmt.Errorf("persist merged exact recovery PR head ambiguity: %w", err)
+		}
+		return fmt.Errorf("merged exact recovery PR head is missing")
+	}
+	if !validExactRecoveryPRHeadOID(head, event.HeadSHA) {
+		if err := sctx.DB.RecordExactRecoveryRemoteRefAmbiguity(
+			sctx.Run.ID, db.ExactRecoveryRemoteRefMalformed,
+		); err != nil {
+			return fmt.Errorf("persist merged exact recovery PR head ambiguity: %w", err)
+		}
+		return fmt.Errorf("merged exact recovery PR head is malformed")
+	}
+	if head != event.HeadSHA {
+		if err := persistExactRecoveryUnexpectedRemoteOID(
+			sctx.DB, sctx.Run, event.SourceRef, head, event.HeadSHA,
+		); err != nil {
+			return fmt.Errorf("persist merged exact recovery PR head ambiguity: %w", err)
+		}
+		return fmt.Errorf("merged exact recovery PR head changed")
+	}
+	return validateBoundExactRecoveryPushReceiptState(sctx, true)
+}
+
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
 	if err := ctx.Err(); err != nil {
@@ -134,14 +218,15 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	if err := validateCIMonitorCandidate(sctx); err != nil {
 		return nil, err
 	}
-	if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
-		return nil, err
-	}
 	provider := scm.DetectProviderContext(ctx, sctx.Repo.UpstreamURL)
 	if provider == scm.ProviderUnknown && sctx.Run.PRURL != nil {
 		provider = scm.DetectProviderContext(ctx, *sctx.Run.PRURL)
 	}
-	host, skipReason := buildHost(sctx, provider)
+	hostFactory := s.hostFactory
+	if hostFactory == nil {
+		hostFactory = buildHost
+	}
+	host, skipReason := hostFactory(sctx, provider)
 	if host == nil {
 		sctx.Log(fmt.Sprintf("skipping CI: %s", skipReason))
 		return &pipeline.StepOutcome{Skipped: true}, nil
@@ -211,6 +296,17 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	timeoutMergeConflict := false
 	lastMonitorLog := ""
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
+		state, stateErr := host.GetPRState(ctx, pr)
+		s.afterPoll("timeout-state")
+		if stateErr != nil {
+			if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
+				clearCIMonitorReady(sctx)
+				return nil, err
+			}
+		} else if err := s.validateExactRecoveryCITerminalPair(sctx, host, pr, state); err != nil {
+			clearCIMonitorReady(sctx)
+			return nil, err
+		}
 		sctx.Log("CI timeout reached")
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
 			return ciFailureOutcome(timeoutFailingChecks, timeoutMergeConflict, "CI timed out with known failures still present"), nil
@@ -233,7 +329,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			clearCIMonitorReady(sctx)
 			return nil, err
 		}
-
 		if !unlimited && now().Sub(timeoutAnchor) >= timeout {
 			return timeoutOutcome()
 		}
@@ -268,9 +363,17 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		// Check PR state (merged/closed -> exit)
 		prStateKnown := true
 		state, err := host.GetPRState(ctx, pr)
+		s.afterPoll("state")
 		if err != nil {
+			if pairErr := validateBoundExactRecoveryPushReceipt(sctx); pairErr != nil {
+				clearCIMonitorReady(sctx)
+				return nil, pairErr
+			}
 			sctx.Log(fmt.Sprintf("warning: could not check PR state: %v", err))
 			prStateKnown = false
+		} else if err := s.validateExactRecoveryCITerminalPair(sctx, host, pr, state); err != nil {
+			clearCIMonitorReady(sctx)
+			return nil, err
 		} else if state == scm.PRStateMerged {
 			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
 				return nil, err
@@ -294,6 +397,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		mergeabilityKnown := true
 		if host.Capabilities().MergeableState {
 			mergeState, mergeErr := host.GetMergeableState(ctx, pr)
+			s.afterPoll("mergeable")
+			if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
+				clearCIMonitorReady(sctx)
+				return nil, err
+			}
 			if mergeErr != nil {
 				sctx.Log(fmt.Sprintf("warning: could not check mergeable state: %v", mergeErr))
 				mergeabilityBlockedReason = ""
@@ -314,6 +422,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		// Check CI status - wait for all checks to complete before fixing
 		ciFixLimit := sctx.Config.AutoFix.CI
 		checks, err := host.GetChecks(ctx, pr)
+		s.afterPoll("checks")
+		if pairErr := validateBoundExactRecoveryPushReceipt(sctx); pairErr != nil {
+			clearCIMonitorReady(sctx)
+			return nil, pairErr
+		}
 		if err != nil {
 			clearCIMonitorReady(sctx)
 			lastMonitorLog = ""
@@ -418,16 +531,19 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					// Checks are (re-)running with no failures yet. Surface this
 					// so a PR that passed checks and starts re-running clears the
 					// previous passed-checks signal instead of looking stale.
-					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+					lastMonitorLog, err = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
 				case len(checks) == 0 && elapsed < s.gracePeriod():
 					clearCIMonitorReady(sctx)
 					// CI checks may not be registered yet, keep polling.
 					lastMonitorLog = ""
 					sctx.Log("no CI checks reported yet, waiting for checks to register...")
 				case len(checks) == 0:
-					lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
+					lastMonitorLog, err = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
 				default:
-					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
+					lastMonitorLog, err = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
+				}
+				if err != nil {
+					return nil, err
 				}
 			}
 		}
@@ -480,14 +596,18 @@ func validateCIMonitorCandidate(sctx *pipeline.StepContext) error {
 	return sctx.ValidateDeliveryCandidate()
 }
 
-func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) string {
+func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) (string, error) {
 	if message != previous {
 		ready := message == ciChecksPassedMsg || message == ciNoChecksPassedMsg
 		if ready {
 			if err := sctx.ValidateDeliveryCandidate(); err != nil {
 				clearCIMonitorReady(sctx)
 				sctx.Log(fmt.Sprintf("CI readiness withheld: %v", err))
-				return ""
+				return "", nil
+			}
+			if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
+				clearCIMonitorReady(sctx)
+				return "", err
 			}
 		}
 		if err := sctx.DB.SetRunCIReady(sctx.Run.ID, ready); err != nil {
@@ -497,12 +617,16 @@ func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) st
 			if err := sctx.ValidateDeliveryCandidate(); err != nil {
 				clearCIMonitorReady(sctx)
 				sctx.Log(fmt.Sprintf("CI readiness withdrawn: %v", err))
-				return ""
+				return "", nil
+			}
+			if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
+				clearCIMonitorReady(sctx)
+				return "", err
 			}
 		}
 		sctx.Log(message)
 	}
-	return message
+	return message, nil
 }
 
 func clearCIMonitorReady(sctx *pipeline.StepContext) {

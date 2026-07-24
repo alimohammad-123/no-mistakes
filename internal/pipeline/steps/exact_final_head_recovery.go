@@ -61,6 +61,10 @@ func persistExactRecoveryUnexpectedRemoteOID(database *db.DB, run *db.Run, sourc
 }
 
 func validateBoundExactRecoveryPushReceipt(sctx *pipeline.StepContext) error {
+	return validateBoundExactRecoveryPushReceiptState(sctx, false)
+}
+
+func validateBoundExactRecoveryPushReceiptState(sctx *pipeline.StepContext, allowMissingTarget bool) error {
 	if sctx == nil || sctx.Run == nil || sctx.Repo == nil || sctx.DB == nil {
 		return fmt.Errorf("validate exact recovery Push receipt: recovery context is incomplete")
 	}
@@ -88,13 +92,17 @@ func validateBoundExactRecoveryPushReceipt(sctx *pipeline.StepContext) error {
 		return err
 	}
 	if targetObservation.Invalid != "" {
-		observationErr := &git.RemoteRefObservationError{
-			Ref: operation.SourceRef, Observation: targetObservation.Invalid,
+		if allowMissingTarget && targetObservation.Invalid == git.RemoteRefMissing {
+			targetObservation.Invalid = ""
+		} else {
+			observationErr := &git.RemoteRefObservationError{
+				Ref: operation.SourceRef, Observation: targetObservation.Invalid,
+			}
+			if err := persistExactRecoveryRemoteRefError(sctx, operation, observationErr); err != nil {
+				return err
+			}
+			return observationErr
 		}
-		if err := persistExactRecoveryRemoteRefError(sctx, operation, observationErr); err != nil {
-			return err
-		}
-		return observationErr
 	}
 	if receiptObservation.Invalid != "" {
 		observationErr := &git.RemoteRefObservationError{
@@ -105,7 +113,7 @@ func validateBoundExactRecoveryPushReceipt(sctx *pipeline.StepContext) error {
 		}
 		return observationErr
 	}
-	if targetObservation.OID != operation.TargetOID {
+	if targetObservation.OID != "" && targetObservation.OID != operation.TargetOID {
 		return persistExactRecoveryUnexpectedRemoteOID(
 			sctx.DB, sctx.Run, operation.SourceRef, targetObservation.OID,
 		)

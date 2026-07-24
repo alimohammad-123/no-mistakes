@@ -206,6 +206,9 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 		if err != nil {
 			return err
 		}
+		if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
+			return err
+		}
 		currentHash := db.ExactRecoveryPRContentHash(current.Title, current.Body)
 		switch {
 		case currentHash == update.IntendedContentHash:
@@ -231,6 +234,9 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 			}
 			if db.ExactRecoveryPRContentHash(verified.Title, verified.Body) != update.IntendedContentHash {
 				return fmt.Errorf("verify exact recovery PR update: remote content differs from durable intent")
+			}
+			if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
+				return err
 			}
 			return sctx.DB.MarkExactRecoveryPRUpdateApplied(sctx.Run.ID, verified.Title, verified.Body)
 		default:

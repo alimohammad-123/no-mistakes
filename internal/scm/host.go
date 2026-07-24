@@ -115,10 +115,11 @@ type PRSnapshot struct {
 }
 
 type PRSnapshotRequest struct {
-	ExpectedHead      string
-	AllowedStaleHead  string
-	ReconcileUntil    time.Time
-	RecordObservation func(context.Context, string) error
+	ExpectedHead              string
+	AllowedStaleHead          string
+	ReconcileUntil            time.Time
+	RecordObservation         func(context.Context, string) error
+	AllowMergedSourceDeletion bool
 }
 
 type PRSnapshotReader interface {

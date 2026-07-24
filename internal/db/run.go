@@ -539,7 +539,14 @@ func (d *DB) SetRunCIReady(id string, ready bool) error {
 	if ready {
 		readyAt = now()
 	}
-	_, err := d.sql.Exec(`UPDATE runs SET ci_ready_at = ?, updated_at = ? WHERE id = ? AND ((ci_ready_at IS NULL AND ? = 1) OR (ci_ready_at IS NOT NULL AND ? = 0))`, readyAt, now(), id, ready, ready)
+	_, err := d.sql.Exec(`UPDATE runs SET ci_ready_at = ?, updated_at = ?
+		WHERE id = ?
+		  AND ((ci_ready_at IS NULL AND ? = 1) OR (ci_ready_at IS NOT NULL AND ? = 0))
+		  AND (? = 0 OR NOT EXISTS (
+			SELECT 1 FROM run_recovery_remote_ref_ambiguities WHERE run_id = ?
+		  ))`,
+		readyAt, now(), id, ready, ready, ready, id,
+	)
 	if err != nil {
 		return fmt.Errorf("set run CI ready: %w", err)
 	}

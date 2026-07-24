@@ -305,6 +305,11 @@ func TestPushSHAWithReceiptBindsSuccessfulExactPush(t *testing.T) {
 	run(t, src, "git", "commit", "-m", "receipt target")
 	target := run(t, src, "git", "rev-parse", "HEAD")
 	receiptRef := "refs/heads/no-mistakes-receipts/test-operation"
+	hookRecord := filepath.Join(t.TempDir(), "pre-push.txt")
+	hook := "#!/bin/sh\ncat > " + shellSingleQuote(hookRecord) + "\n"
+	if err := os.WriteFile(filepath.Join(src, ".git", "hooks", "pre-push"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := PushSHAWithReceipt(
 		ctx, src, "dest", target, "refs/heads/main", prior, true, receiptRef,
 	); err != nil {
@@ -318,6 +323,54 @@ func TestPushSHAWithReceiptBindsSuccessfulExactPush(t *testing.T) {
 	}
 	if _, err := Run(ctx, src, "rev-parse", "--verify", receiptRef); err == nil {
 		t.Fatal("atomic remote receipt leaked into the local repository")
+	}
+	hookInput, err := os.ReadFile(hookRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(hookInput)), "\n")
+	if len(lines) != 2 ||
+		!strings.Contains(lines[0]+"\n"+lines[1], "refs/heads/main") ||
+		!strings.Contains(lines[0]+"\n"+lines[1], receiptRef) {
+		t.Fatalf("pre-push hook input = %q", hookInput)
+	}
+}
+
+func TestPushSHAWithReceiptHookRejectionIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	src := initTestRepo(t)
+	bare := filepath.Join(t.TempDir(), "dest.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	run(t, src, "git", "remote", "add", "dest", bare)
+	if err := Push(ctx, src, "dest", "refs/heads/main", "", false); err != nil {
+		t.Fatal(err)
+	}
+	prior := run(t, src, "git", "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(src, "rejected.txt"), "rejected\n")
+	run(t, src, "git", "add", "rejected.txt")
+	run(t, src, "git", "commit", "-m", "rejected target")
+	target := run(t, src, "git", "rev-parse", "HEAD")
+	receiptRef := "refs/heads/no-mistakes-receipts/rejected"
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	hook := "#!/bin/sh\ntouch " + shellSingleQuote(marker) + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(src, ".git", "hooks", "pre-push"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := PushSHAWithReceipt(
+		ctx, src, "dest", target, "refs/heads/main", prior, true, receiptRef,
+	); err == nil {
+		t.Fatal("pre-push hook rejection was ignored")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("pre-push hook did not run: %v", err)
+	}
+	if got, err := Run(ctx, bare, "rev-parse", "refs/heads/main"); err != nil || got != prior {
+		t.Fatalf("hook rejection moved target to %q, %v", got, err)
+	}
+	if _, err := Run(ctx, bare, "rev-parse", "--verify", receiptRef); err == nil {
+		t.Fatal("hook rejection created a receipt")
 	}
 }
 
@@ -367,10 +420,18 @@ func TestCheckAtomicPushReceiptCapabilityDoesNotPublish(t *testing.T) {
 	}
 	head := run(t, src, "git", "rev-parse", "HEAD")
 	receiptRef := "refs/heads/no-mistakes-receipts/capability"
+	hookMarker := filepath.Join(t.TempDir(), "capability-hook")
+	hook := "#!/bin/sh\ntouch " + shellSingleQuote(hookMarker) + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(src, ".git", "hooks", "pre-push"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := CheckAtomicPushReceiptCapability(
 		ctx, src, "dest", head, "refs/heads/main", head, receiptRef,
 	); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
+		t.Fatalf("capability probe invoked pre-push hook: %v", err)
 	}
 	if _, err := Run(ctx, bare, "rev-parse", "--verify", receiptRef); err == nil {
 		t.Fatal("atomic capability probe published its receipt")

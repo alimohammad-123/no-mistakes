@@ -620,12 +620,12 @@ func atomicPushReceiptArgs(remote, sourceSHA, ref, expectedSHA, receiptRef strin
 	}
 	zeroOID := strings.Repeat("0", len(sourceSHA))
 	args := []string{
-		"push", "--atomic", "--porcelain", "--no-verify",
+		"push", "--atomic", "--porcelain",
 		fmt.Sprintf("--force-with-lease=%s:%s", ref, expectedSHA),
 		fmt.Sprintf("--force-with-lease=%s:%s", receiptRef, zeroOID),
 	}
 	if dryRun {
-		args = append(args, "--dry-run")
+		args = append(args, "--dry-run", "--no-verify")
 	}
 	args = append(args, remote, sourceSHA+":"+ref, sourceSHA+":"+receiptRef)
 	return args, nil

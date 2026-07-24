@@ -250,6 +250,12 @@ func recordExactRecoveryRemoteRefAmbiguity(tx *sql.Tx, event *RunRecoveryEvent, 
 	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 		return fmt.Errorf("record exact recovery remote-ref ambiguity: durable state changed")
 	}
+	if _, err := tx.Exec(
+		`UPDATE runs SET ci_ready_at = NULL, updated_at = ? WHERE id = ?`,
+		now(), run.ID,
+	); err != nil {
+		return fmt.Errorf("record exact recovery remote-ref ambiguity: clear CI readiness: %w", err)
+	}
 	return nil
 }
 

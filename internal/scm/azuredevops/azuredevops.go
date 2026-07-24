@@ -243,11 +243,19 @@ func (h *Host) GetPRSnapshot(ctx context.Context, pr *scm.PR, request scm.PRSnap
 		return scm.PRSnapshot{}, err
 	}
 	sourceRef := strings.TrimSpace(got.SourceRefName)
-	headSHA, err := h.resolveRecoverySourceHead(ctx, sourceRef, request)
-	if err != nil {
-		return scm.PRSnapshot{}, err
-	}
 	state := normalizePRState(got.Status)
+	headSHA := ""
+	if state == scm.PRStateMerged && request.AllowMergedSourceDeletion {
+		headSHA = strings.TrimSpace(got.LastMergeSourceCommit.CommitID)
+		if !validAzureObjectID(headSHA) || headSHA != strings.TrimSpace(request.ExpectedHead) {
+			return scm.PRSnapshot{}, fmt.Errorf("azure merged recovery source head is missing or unexpected")
+		}
+	} else {
+		headSHA, err = h.resolveRecoverySourceHead(ctx, sourceRef, request)
+		if err != nil {
+			return scm.PRSnapshot{}, err
+		}
+	}
 	number := ""
 	if got.PullRequestID > 0 {
 		number = strconv.Itoa(got.PullRequestID)

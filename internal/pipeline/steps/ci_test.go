@@ -11,8 +11,155 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func exactRecoveryCIContext(t *testing.T) (*pipeline.StepContext, *exactRecoveryPRHost) {
+	t.Helper()
+	sctx, host := exactRecoveryPRStepContext(
+		t, scm.PRContent{Title: "prior title", Body: "prior body"},
+	)
+	prStep := &PRStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+		return host, ""
+	}}
+	if _, err := prStep.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.CompleteStep(sctx.StepResultID, 0, 1, "pr.log"); err != nil {
+		t.Fatal(err)
+	}
+	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range steps {
+		if result.StepName != types.StepCI {
+			continue
+		}
+		if err := sctx.DB.StartStep(result.ID); err != nil {
+			t.Fatal(err)
+		}
+		sctx.StepResultID = result.ID
+		sctx.Run, err = sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sctx, host
+	}
+	t.Fatal("CI step result is missing")
+	return nil, nil
+}
+
+func TestCIStep_ExactRecoveryRevalidatesReceiptAfterProviderPoll(t *testing.T) {
+	sctx, host := exactRecoveryCIContext(t)
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.SetRunCIReady(sctx.Run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	step := &CIStep{
+		hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+			return host, ""
+		},
+		afterProviderPoll: func(name string) {
+			if name == "checks" {
+				gitCmd(t, resolvePushURL(sctx), "update-ref", "-d", operation.ReceiptRef)
+			}
+		},
+	}
+	if _, err := step.Execute(sctx); err == nil {
+		t.Fatal("CI accepted a receipt deleted after its checks poll")
+	}
+	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.CIReadyAt != nil {
+		t.Fatalf("receipt ambiguity retained CI readiness at %d", *persisted.CIReadyAt)
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity == nil || ambiguity.Classification != db.ExactRecoveryRemoteRefMissing {
+		t.Fatalf("receipt ambiguity = %#v", ambiguity)
+	}
+}
+
+func TestCIStep_ExactRecoveryRevalidatesReceiptAcrossLongPoll(t *testing.T) {
+	sctx, host := exactRecoveryCIContext(t)
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waits := 0
+	step := &CIStep{
+		hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+			return host, ""
+		},
+		waitForNextPoll: func(context.Context, time.Duration) error {
+			waits++
+			gitCmd(t, resolvePushURL(sctx), "update-ref", "-d", operation.ReceiptRef)
+			return nil
+		},
+	}
+	if _, err := step.Execute(sctx); err == nil {
+		t.Fatal("CI accepted a receipt deleted between polls")
+	}
+	if waits != 1 {
+		t.Fatalf("poll waits = %d, want 1", waits)
+	}
+}
+
+func TestCIStep_ExactRecoveryMergedHeadPermitsSourceDeletionWithReceipt(t *testing.T) {
+	sctx, host := exactRecoveryCIContext(t)
+	host.state = scm.PRStateMerged
+	host.merged = true
+	gitCmd(t, resolvePushURL(sctx), "update-ref", "-d", "refs/heads/feature")
+	step := &CIStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+		return host, ""
+	}}
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome == nil || host.snapshotCalls == 0 {
+		t.Fatalf("merged recovery outcome = %#v, snapshots=%d", outcome, host.snapshotCalls)
+	}
+	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.PRState == nil || *persisted.PRState != "merged" {
+		t.Fatalf("merged lifecycle = %#v", persisted.PRState)
+	}
+}
+
+func TestCIStep_ExactRecoveryDeletedSourceRejectsWrongMergedHead(t *testing.T) {
+	sctx, host := exactRecoveryCIContext(t)
+	host.state = scm.PRStateMerged
+	host.merged = true
+	host.headSHA = strings.Repeat("c", 40)
+	gitCmd(t, resolvePushURL(sctx), "update-ref", "-d", "refs/heads/feature")
+	step := &CIStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+		return host, ""
+	}}
+	if _, err := step.Execute(sctx); err == nil {
+		t.Fatal("wrong merged head was accepted after source deletion")
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity == nil || ambiguity.Classification != db.ExactRecoveryRemoteRefUnexpectedOID {
+		t.Fatalf("merged-head ambiguity = %#v", ambiguity)
+	}
+}
 
 func TestCIStep_PendingChecksUseAdaptivePollIntervals(t *testing.T) {
 	t.Parallel()
@@ -532,7 +679,7 @@ func TestCIMonitorReadinessRefusesSupersededSourceRef(t *testing.T) {
 	var logs []string
 	sctx.Log = func(message string) { logs = append(logs, message) }
 
-	if got := logCIMonitorStatus(sctx, ciChecksPassedMsg, ""); got != "" {
+	if got, err := logCIMonitorStatus(sctx, ciChecksPassedMsg, ""); err != nil || got != "" {
 		t.Fatalf("monitor status = %q, want readiness withheld", got)
 	}
 	persisted, err := sctx.DB.GetRun(sctx.Run.ID)

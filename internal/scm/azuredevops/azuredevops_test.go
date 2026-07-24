@@ -119,6 +119,41 @@ func TestGetPRSnapshotReadsAuthoritativeRecoveryState(t *testing.T) {
 	}
 }
 
+func TestGetPRSnapshotProvesMergedDeletedSourceFromMergeMetadata(t *testing.T) {
+	t.Parallel()
+	const mergedHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	showKey := "az repos pr show --id 42 --organization " + testOrg + " --output json"
+	for _, tc := range []struct {
+		name string
+		head string
+		ok   bool
+	}{
+		{name: "exact merged head", head: mergedHead, ok: true},
+		{name: "unexpected merged head", head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{name: "missing merged head"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHost(map[string]azdoTestResponse{
+				showKey: {
+					stdout: `{"pullRequestId":42,"title":"title","description":"body","status":"completed","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main","lastMergeSourceCommit":{"commitId":"` + tc.head + `"},"repository":{"name":"myrepo","webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo","project":{"name":"myproject"}}}` + "\n",
+				},
+			})
+			snapshot, err := h.GetPRSnapshot(
+				context.Background(), &scm.PR{Number: "42"}, scm.PRSnapshotRequest{
+					ExpectedHead: mergedHead, AllowMergedSourceDeletion: true,
+				},
+			)
+			if tc.ok {
+				if err != nil || snapshot.State != scm.PRStateMerged || !snapshot.Merged || snapshot.HeadSHA != mergedHead {
+					t.Fatalf("merged snapshot = %#v, %v", snapshot, err)
+				}
+			} else if err == nil {
+				t.Fatalf("merged snapshot accepted head %q", tc.head)
+			}
+		})
+	}
+}
+
 func TestGetPRSnapshotRejectsAmbiguousRecoveryRefs(t *testing.T) {
 	t.Parallel()
 	const expectedHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

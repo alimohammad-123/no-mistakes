@@ -205,6 +205,61 @@ func TestPRStep_ExactRecoveryJournalAvoidsDuplicateMutation(t *testing.T) {
 	}
 }
 
+func TestPRStep_ExactRecoveryRevalidatesReceiptAroundMutation(t *testing.T) {
+	tests := []struct {
+		name            string
+		deleteAt        string
+		wantUpdateCalls int
+	}{
+		{name: "before update", deleteAt: "ownership", wantUpdateCalls: 0},
+		{name: "after update", deleteAt: "update", wantUpdateCalls: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sctx, host := exactRecoveryPRStepContext(
+				t, scm.PRContent{Title: "prior title", Body: "prior body"},
+			)
+			operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			deleteReceipt := func() {
+				gitCmd(t, resolvePushURL(sctx), "update-ref", "-d", operation.ReceiptRef)
+			}
+			step := &PRStep{
+				hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+					return host, ""
+				},
+			}
+			if tc.deleteAt == "ownership" {
+				step.ownershipClaimed = deleteReceipt
+			} else {
+				host.updateHook = deleteReceipt
+			}
+			if _, err := step.Execute(sctx); err == nil {
+				t.Fatal("lost exact recovery receipt was accepted")
+			}
+			if host.updateCalls != tc.wantUpdateCalls {
+				t.Fatalf("UpdatePR calls = %d, want %d", host.updateCalls, tc.wantUpdateCalls)
+			}
+			ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ambiguity == nil || ambiguity.Classification != db.ExactRecoveryRemoteRefMissing {
+				t.Fatalf("receipt ambiguity = %#v", ambiguity)
+			}
+			update, err := sctx.DB.GetExactRecoveryPRUpdate(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if update == nil || update.State != db.ExactRecoveryPRUpdatePrepared {
+				t.Fatalf("PR update provenance = %#v", update)
+			}
+		})
+	}
+}
+
 func TestExactRecoveryPRAdmissionRejectsUnsupportedOrStaleStateBeforeDelivery(t *testing.T) {
 	tests := []struct {
 		name   string
