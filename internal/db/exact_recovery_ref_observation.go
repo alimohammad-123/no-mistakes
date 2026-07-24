@@ -144,7 +144,10 @@ func (d *DB) PrepareExactRecoveryRefObservation(runID, provider, sourceRef, expe
 	sourceRef = strings.TrimSpace(sourceRef)
 	expectedOID = strings.TrimSpace(expectedOID)
 	observedOID = strings.TrimSpace(observedOID)
-	if runID == "" || provider == "" || sourceRef == "" || expectedOID == "" || observedOID == "" || deadlineAt <= now() {
+	if observedOID == "" {
+		observedOID = "missing"
+	}
+	if runID == "" || provider == "" || sourceRef == "" || expectedOID == "" || deadlineAt <= now() {
 		return nil, fmt.Errorf("prepare exact recovery ref observation: identity or deadline is incomplete")
 	}
 	tx, err := d.sql.Begin()
@@ -292,6 +295,9 @@ func (d *DB) RecordExactRecoveryRefObservation(runID, observed string) error {
 		return err
 	}
 	observed = strings.TrimSpace(observed)
+	if observed == "" {
+		observed = "missing"
+	}
 	if observed == observation.StaleOID && observation.DeadlineAt <= now() {
 		observed = "timeout"
 	}

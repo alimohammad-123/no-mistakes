@@ -385,6 +385,12 @@ func TestExactRecoveryRefObservationJournalRefusesRememberedAmbiguity(t *testing
 			wantErrorAt:  1,
 		},
 		{
+			name:         "old to missing",
+			observations: []string{"published-head", ""},
+			wantState:    ExactRecoveryRefObservationAmbiguous,
+			wantErrorAt:  1,
+		},
+		{
 			name:         "old to third to expected",
 			observations: []string{"published-head", "third-head", "head-3"},
 			wantState:    ExactRecoveryRefObservationAmbiguous,
@@ -964,13 +970,14 @@ func TestReconcileStaleExactRecoveryPushCustodyRefusesUncertainPreparedInvocatio
 
 func TestReconcileStaleExactRecoveryPushCustodyDoesNotRotateExpiredPreparedAttemptOnRemoteAmbiguity(t *testing.T) {
 	tests := []struct {
-		name       string
-		remoteHead string
+		name        string
+		remoteHead  string
+		observation string
 	}{
-		{name: "expected target", remoteHead: "head-3"},
-		{name: "third oid", remoteHead: "other-head"},
-		{name: "malformed oid", remoteHead: "not an oid"},
-		{name: "missing oid"},
+		{name: "expected target", remoteHead: "head-3", observation: "head-3"},
+		{name: "third oid", remoteHead: "other-head", observation: "other-head"},
+		{name: "malformed oid", remoteHead: "not an oid", observation: "not an oid"},
+		{name: "missing oid", observation: "missing"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1003,7 +1010,83 @@ func TestReconcileStaleExactRecoveryPushCustodyDoesNotRotateExpiredPreparedAttem
 			if !run.PushActive || run.LastPushedSHA == nil || *run.LastPushedSHA != f.pushed {
 				t.Fatalf("ambiguous remote changed publication custody: %#v", run)
 			}
+			observation, err := f.d.GetExactRecoveryRefObservation(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observation.State != ExactRecoveryRefObservationAmbiguous ||
+				observation.LastObservation != tc.observation {
+				t.Fatalf("ambiguous remote observation was not durable: %#v", observation)
+			}
+			events, err := f.d.ListExactRecoveryRefObservationEvents(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 2 || events[1].Observation != tc.observation ||
+				events[1].State != ExactRecoveryRefObservationAmbiguous {
+				t.Fatalf("ambiguous remote observation history = %#v", events)
+			}
+			for _, later := range []string{f.pushed, restored.HeadSHA} {
+				reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+					restored.ID, later, "refs/heads/feature", restored.HeadSHA,
+					now()+120, 3, types.AllSteps(),
+				)
+				if err == nil || reconciled {
+					t.Fatalf("terminal ambiguity accepted later remote %q: reconciled=%v err=%v", later, reconciled, err)
+				}
+			}
+			after, err := f.d.GetExactRecoveryRefObservation(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Attempts != observation.Attempts ||
+				after.State != ExactRecoveryRefObservationAmbiguous ||
+				after.LastObservation != tc.observation {
+				t.Fatalf("later remote erased terminal ambiguity: before=%#v after=%#v", observation, after)
+			}
 		})
+	}
+}
+
+func TestReconcileStaleExactRecoveryPushCustodyMissingObservationPersistenceFailureStops(t *testing.T) {
+	f, restored, _ := prepareExactRecoveryPushCrash(t)
+	if _, err := f.d.PrepareExactRecoveryRefObservation(
+		restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+		f.pushed, now()+30,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.d.sql.Exec(
+		`CREATE TRIGGER fail_missing_recovery_observation
+		 BEFORE UPDATE ON run_recovery_ref_observations
+		 WHEN NEW.last_observation = 'missing'
+		 BEGIN
+		   SELECT RAISE(ABORT, 'injected observation persistence failure');
+		 END`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+		restored.ID, "", "refs/heads/feature", restored.HeadSHA,
+		now()+90, 3, types.AllSteps(),
+	)
+	if err == nil || reconciled {
+		t.Fatalf("missing observation persistence failure reconciled: reconciled=%v err=%v", reconciled, err)
+	}
+	observation, err := f.d.GetExactRecoveryRefObservation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.State != ExactRecoveryRefObservationStale ||
+		observation.LastObservation != f.pushed || observation.Attempts != 1 {
+		t.Fatalf("failed persistence changed durable observation: %#v", observation)
+	}
+	run, err := f.d.GetRun(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !run.PushActive || run.LastPushedSHA == nil || *run.LastPushedSHA != f.pushed {
+		t.Fatalf("failed persistence changed publication custody: %#v", run)
 	}
 }
 

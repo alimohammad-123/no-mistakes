@@ -226,10 +226,14 @@ func (d *DB) ExactRecoveryPushAlreadyBound(runID, headSHA string) (bool, error) 
 }
 
 func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef, sourceHead string, nextDeadlineAt int64, maxReplays int, expected []types.StepName) (bool, error) {
-	if strings.TrimSpace(runID) == "" || strings.TrimSpace(remoteHead) == "" ||
+	remoteHead = strings.TrimSpace(remoteHead)
+	if remoteHead == "" {
+		remoteHead = "missing"
+	}
+	if strings.TrimSpace(runID) == "" ||
 		strings.TrimSpace(sourceRef) == "" || strings.TrimSpace(sourceHead) == "" ||
 		nextDeadlineAt <= now() || maxReplays <= 0 || len(expected) == 0 {
-		return false, fmt.Errorf("reconcile stale exact recovery Push custody: identities, remote head, replay bound, and topology are required")
+		return false, fmt.Errorf("reconcile stale exact recovery Push custody: identities, replay bound, and topology are required")
 	}
 	tx, err := d.sql.Begin()
 	if err != nil {
