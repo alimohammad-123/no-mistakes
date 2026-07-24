@@ -69,6 +69,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	if err := sctx.ValidateDeliveryCandidate(); err != nil {
 		return nil, err
 	}
+	if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
+		return nil, err
+	}
 	provider := scm.DetectProviderContext(ctx, sctx.Repo.UpstreamURL)
 	hostFactory := s.hostFactory
 	if hostFactory == nil {

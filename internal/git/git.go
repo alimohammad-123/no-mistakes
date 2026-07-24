@@ -574,22 +574,61 @@ func PushSHA(ctx context.Context, dir, remote, sourceSHA, ref, expectedSHA strin
 }
 
 func PushSHAWithReceipt(ctx context.Context, dir, remote, sourceSHA, ref, expectedSHA string, forceWithLease bool, receiptRef string) error {
-	receiptRef = strings.TrimSpace(receiptRef)
-	if receiptRef == "" {
-		return fmt.Errorf("push receipt ref is required")
+	if !forceWithLease {
+		return fmt.Errorf("push receipt requires an exact force-with-lease")
 	}
-	pushArgs := []string{remote}
-	alias := `!f() { git push "$1" "$2" && git update-ref "$3" "$4" ""; }; f`
-	if forceWithLease {
-		if expectedSHA == "" {
-			return fmt.Errorf("push receipt requires an exact force-with-lease OID")
+	args, err := atomicPushReceiptArgs(remote, sourceSHA, ref, expectedSHA, receiptRef, false)
+	if err != nil {
+		return err
+	}
+	out, err := Run(ctx, dir, args...)
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) >= 2 && fields[0] == "=" && strings.HasSuffix(fields[1], ":"+ref) {
+			return fmt.Errorf("%w: %s", ErrAtomicPushTargetUnchanged, ref)
 		}
-		pushArgs = append(pushArgs, fmt.Sprintf("--force-with-lease=%s:%s", ref, expectedSHA))
-		alias = `!f() { out=$(git push --porcelain "$2" "$1" "$3") || { code=$?; printf '%s\n' "$out"; exit "$code"; }; printf '%s\n' "$out"; printf '%s\n' "$out" | grep -Eq '^[+* ][[:space:]]' || exit 74; git update-ref "$4" "$5" ""; }; f`
 	}
-	pushArgs = append(pushArgs, sourceSHA+":"+ref, receiptRef, sourceSHA)
-	_, err := Run(ctx, dir, append([]string{"-c", "alias.nm-push-receipt=" + alias, "nm-push-receipt"}, pushArgs...)...)
-	return err
+	return nil
+}
+
+var ErrAtomicPushTargetUnchanged = errors.New("atomic Push target was already current")
+
+func CheckAtomicPushReceiptCapability(ctx context.Context, dir, remote, sourceSHA, ref, expectedSHA, receiptRef string) error {
+	args, err := atomicPushReceiptArgs(remote, sourceSHA, ref, expectedSHA, receiptRef, true)
+	if err != nil {
+		return err
+	}
+	if _, err := Run(ctx, dir, args...); err != nil {
+		return fmt.Errorf("atomic Push receipt capability is unavailable: %w", err)
+	}
+	return nil
+}
+
+func atomicPushReceiptArgs(remote, sourceSHA, ref, expectedSHA, receiptRef string, dryRun bool) ([]string, error) {
+	remote = strings.TrimSpace(remote)
+	sourceSHA = strings.TrimSpace(sourceSHA)
+	ref = strings.TrimSpace(ref)
+	expectedSHA = strings.TrimSpace(expectedSHA)
+	receiptRef = strings.TrimSpace(receiptRef)
+	if remote == "" || (len(sourceSHA) != 40 && len(sourceSHA) != 64) ||
+		ref == "" || (len(expectedSHA) != 40 && len(expectedSHA) != 64) ||
+		len(sourceSHA) != len(expectedSHA) || receiptRef == "" || receiptRef == ref {
+		return nil, fmt.Errorf("atomic Push receipt identity is incomplete")
+	}
+	zeroOID := strings.Repeat("0", len(sourceSHA))
+	args := []string{
+		"push", "--atomic", "--porcelain", "--no-verify",
+		fmt.Sprintf("--force-with-lease=%s:%s", ref, expectedSHA),
+		fmt.Sprintf("--force-with-lease=%s:%s", receiptRef, zeroOID),
+	}
+	if dryRun {
+		args = append(args, "--dry-run")
+	}
+	args = append(args, remote, sourceSHA+":"+ref, sourceSHA+":"+receiptRef)
+	return args, nil
 }
 
 // PushSHAWithOptions is PushSHA with per-push options.

@@ -58,6 +58,9 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	if err := sctx.Ctx.Err(); err != nil {
 		return false, err
 	}
+	if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
+		return false, err
+	}
 	provider := scm.DetectProviderContext(sctx.Ctx, sctx.Repo.UpstreamURL)
 	if provider == scm.ProviderUnknown && sctx.Run.PRURL != nil {
 		provider = scm.DetectProviderContext(sctx.Ctx, *sctx.Run.PRURL)
@@ -129,6 +132,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return &pipeline.StepOutcome{ReplayValidation: true}, nil
 	}
 	if err := validateCIMonitorCandidate(sctx); err != nil {
+		return nil, err
+	}
+	if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
 		return nil, err
 	}
 	provider := scm.DetectProviderContext(ctx, sctx.Repo.UpstreamURL)

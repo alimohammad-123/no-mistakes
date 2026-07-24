@@ -221,6 +221,13 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 				if observeErr != nil {
 					return fmt.Errorf("push to %s: %w; verify failed Push remote: %v", pushTarget, pushErr, observeErr)
 				}
+				if currentOperation != nil {
+					if _, receiptErr := exactRecoveryPushReceiptObservation(
+						sctx, pushURL, currentOperation,
+					); receiptErr != nil {
+						return fmt.Errorf("push to %s: %w; verify failed Push receipt: %v", pushTarget, pushErr, receiptErr)
+					}
+				}
 				if remoteObservation.Invalid != "" {
 					observationErr := &git.RemoteRefObservationError{Ref: ref, Observation: remoteObservation.Invalid}
 					if err := persistExactRecoveryRemoteRefError(sctx, currentOperation, observationErr); err != nil {
@@ -228,27 +235,26 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 					}
 				}
 				if remoteObservation.OID != "" {
-					attributed := false
-					if remoteObservation.OID == recoveryEvent.HeadSHA {
-						if receiptOID, receiptErr := exactRecoveryPushReceiptOID(sctx, currentOperation); receiptErr == nil {
-							if err := sctx.DB.RecordExactRecoveryPushSuccessReceipt(
-								sctx.Run.ID, currentOperation.OperationID,
-								currentOperation.ReceiptRef, receiptOID,
-							); err != nil {
-								return fmt.Errorf("push to %s: %w; persist successful Push receipt: %v", pushTarget, pushErr, err)
-							}
-							pushErr = nil
-							attributed = true
-						} else {
-							if err := persistExactRecoveryUnexpectedRemoteOID(
-								sctx.DB, sctx.Run, ref, remoteObservation.OID,
-								recoveryEvent.LastPushedSHA,
-							); err != nil {
-								return fmt.Errorf("push to %s: %w; persist unattributed target: %v", pushTarget, pushErr, err)
-							}
+					if errors.Is(pushErr, git.ErrAtomicPushTargetUnchanged) ||
+						remoteObservation.OID != recoveryEvent.LastPushedSHA &&
+							remoteObservation.OID != sctx.Run.HeadSHA {
+						if err := persistExactRecoveryUnexpectedRemoteOID(
+							sctx.DB, sctx.Run, ref, remoteObservation.OID,
+							recoveryEvent.LastPushedSHA,
+						); err != nil {
+							return fmt.Errorf("push to %s: %w; verify failed Push remote: %v", pushTarget, pushErr, err)
 						}
+						return fmt.Errorf("push to %s: %w", pushTarget, pushErr)
 					}
-					if !attributed {
+					attributed, receiptErr := reconcileExactRecoveryPushReceiptState(
+						sctx, pushURL, currentOperation, remoteObservation.OID,
+					)
+					if receiptErr != nil {
+						return fmt.Errorf("push to %s: %w; verify failed Push receipt: %v", pushTarget, pushErr, receiptErr)
+					}
+					if attributed {
+						pushErr = nil
+					} else {
 						if err := persistExactRecoveryUnexpectedRemoteOID(
 							sctx.DB, sctx.Run, ref, remoteObservation.OID,
 							recoveryEvent.LastPushedSHA,
@@ -269,7 +275,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 					return err
 				}
 			}
-			receiptOID, err := exactRecoveryPushReceiptOID(sctx, currentOperation)
+			receiptOID, err := exactRecoveryPushReceiptOID(sctx, pushURL, currentOperation)
 			if err != nil {
 				return fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
 			}
@@ -287,9 +293,6 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		}
 		if verifiedRemote != headBeingPushed {
 			allowedOIDs := []string{headBeingPushed}
-			if currentOperation != nil {
-				allowedOIDs = append(allowedOIDs, currentOperation.StaleOID)
-			}
 			if err := persistExactRecoveryUnexpectedRemoteOID(sctx.DB, sctx.Run, ref, verifiedRemote, allowedOIDs...); err != nil {
 				return fmt.Errorf("verify successful push to %s: persist unexpected OID: %w", pushTarget, err)
 			}
@@ -403,19 +406,103 @@ func (s *PushStep) prepareExactRecoveryPushOperation(sctx *pipeline.StepContext,
 	return operation, nil
 }
 
-func exactRecoveryPushReceiptOID(sctx *pipeline.StepContext, operation *db.ExactRecoveryPushOperation) (string, error) {
+func exactRecoveryPushReceiptObservation(sctx *pipeline.StepContext, pushURL string, operation *db.ExactRecoveryPushOperation) (git.RemoteRefObservation, error) {
 	if operation == nil || strings.TrimSpace(operation.ReceiptRef) == "" {
-		return "", fmt.Errorf("exact recovery Push success receipt is missing")
+		return git.RemoteRefObservation{}, fmt.Errorf("exact recovery Push success receipt identity is missing")
 	}
-	oid, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", "--verify", operation.ReceiptRef)
+	observation, err := exactRecoveryLsRemote(
+		sctx.Ctx, sctx.WorkDir, pushURL, operation.ReceiptRef,
+	)
 	if err != nil {
-		return "", fmt.Errorf("exact recovery Push success receipt is missing: %w", err)
+		return git.RemoteRefObservation{}, fmt.Errorf("read exact recovery Push success receipt: %w", err)
 	}
-	oid = strings.TrimSpace(oid)
-	if oid != operation.TargetOID {
-		return "", fmt.Errorf("exact recovery Push success receipt is %s, want %s", oid, operation.TargetOID)
+	return observation, nil
+}
+
+func exactRecoveryPushReceiptOID(sctx *pipeline.StepContext, pushURL string, operation *db.ExactRecoveryPushOperation) (string, error) {
+	observation, err := exactRecoveryPushReceiptObservation(sctx, pushURL, operation)
+	if err != nil {
+		return "", err
 	}
-	return oid, nil
+	if observation.Invalid != "" {
+		observationErr := &git.RemoteRefObservationError{
+			Ref: operation.ReceiptRef, Observation: observation.Invalid,
+		}
+		if err := persistExactRecoveryRemoteRefError(sctx, operation, observationErr); err != nil {
+			return "", err
+		}
+		return "", observationErr
+	}
+	if observation.OID != operation.TargetOID {
+		if err := persistExactRecoveryUnexpectedRemoteOID(
+			sctx.DB, sctx.Run, operation.SourceRef, observation.OID,
+		); err != nil {
+			return "", fmt.Errorf("persist invalid exact recovery Push receipt OID: %w", err)
+		}
+		return "", fmt.Errorf(
+			"exact recovery Push success receipt is %s, want %s",
+			observation.OID, operation.TargetOID,
+		)
+	}
+	return observation.OID, nil
+}
+
+func reconcileExactRecoveryPushReceiptState(sctx *pipeline.StepContext, pushURL string, operation *db.ExactRecoveryPushOperation, remoteHead string) (bool, error) {
+	if operation == nil {
+		return false, nil
+	}
+	observation, err := exactRecoveryPushReceiptObservation(sctx, pushURL, operation)
+	if err != nil {
+		return false, err
+	}
+	if observation.Invalid != "" {
+		if observation.Invalid == git.RemoteRefMissing && remoteHead == operation.StaleOID {
+			return false, nil
+		}
+		observationErr := &git.RemoteRefObservationError{
+			Ref: operation.ReceiptRef, Observation: observation.Invalid,
+		}
+		if err := persistExactRecoveryRemoteRefError(sctx, operation, observationErr); err != nil {
+			return false, err
+		}
+		return false, observationErr
+	}
+	if observation.OID != operation.TargetOID {
+		if err := persistExactRecoveryUnexpectedRemoteOID(
+			sctx.DB, sctx.Run, operation.SourceRef, observation.OID,
+		); err != nil {
+			return false, fmt.Errorf("persist invalid exact recovery Push receipt OID: %w", err)
+		}
+		return false, fmt.Errorf(
+			"exact recovery Push receipt is %s, want %s",
+			observation.OID, operation.TargetOID,
+		)
+	}
+	if operation.Phase != db.ExactRecoveryPushInvoked {
+		if err := persistExactRecoveryUnexpectedRemoteOID(
+			sctx.DB, sctx.Run, operation.SourceRef, observation.OID,
+		); err != nil {
+			return false, fmt.Errorf("persist pre-invocation exact recovery Push receipt: %w", err)
+		}
+		return false, fmt.Errorf("exact recovery Push receipt predates invocation")
+	}
+	if remoteHead != operation.TargetOID {
+		if err := persistExactRecoveryUnexpectedRemoteOID(
+			sctx.DB, sctx.Run, operation.SourceRef, remoteHead,
+		); err != nil {
+			return false, fmt.Errorf("persist exact recovery Push rollback: %w", err)
+		}
+		return false, fmt.Errorf(
+			"exact recovery Push receipt exists while target is %s",
+			remoteHead,
+		)
+	}
+	if err := sctx.DB.RecordExactRecoveryPushSuccessReceipt(
+		sctx.Run.ID, operation.OperationID, operation.ReceiptRef, observation.OID,
+	); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func observeExactRecoveryAzureSourceRef(sctx *pipeline.StepContext, expected string) (string, error) {

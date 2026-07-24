@@ -17,10 +17,11 @@ import (
 )
 
 var (
-	exactRecoveryReconcilePoint = func(string) {}
-	exactRecoveryReconcileNow   = time.Now
-	exactRecoveryLsRemote       = git.LsRemoteExact
-	exactRecoveryReconcileWait  = func(ctx context.Context, delay time.Duration) error {
+	exactRecoveryReconcilePoint                   = func(string) {}
+	exactRecoveryReconcileNow                     = time.Now
+	exactRecoveryLsRemote                         = git.LsRemoteExact
+	exactRecoveryCheckAtomicPushReceiptCapability = git.CheckAtomicPushReceiptCapability
+	exactRecoveryReconcileWait                    = func(ctx context.Context, delay time.Duration) error {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
@@ -57,6 +58,64 @@ func persistExactRecoveryUnexpectedRemoteOID(database *db.DB, run *db.Run, sourc
 		return err
 	}
 	return fmt.Errorf("exact recovery remote ref observed unexpected OID %s", observedOID)
+}
+
+func validateBoundExactRecoveryPushReceipt(sctx *pipeline.StepContext) error {
+	if sctx == nil || sctx.Run == nil || sctx.Repo == nil || sctx.DB == nil {
+		return fmt.Errorf("validate exact recovery Push receipt: recovery context is incomplete")
+	}
+	event, err := sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil || event == nil {
+		return err
+	}
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		return err
+	}
+	if operation == nil || operation.Phase != db.ExactRecoveryPushBound ||
+		operation.ReceiptOID == nil || *operation.ReceiptOID != operation.TargetOID {
+		return fmt.Errorf("validate exact recovery Push receipt: bound operation provenance is incomplete")
+	}
+	pushURL := resolvePushURL(sctx)
+	targetObservation, err := exactRecoveryLsRemote(
+		sctx.Ctx, sctx.WorkDir, pushURL, operation.SourceRef,
+	)
+	if err != nil {
+		return fmt.Errorf("validate exact recovery Push target: %w", err)
+	}
+	receiptObservation, err := exactRecoveryPushReceiptObservation(sctx, pushURL, operation)
+	if err != nil {
+		return err
+	}
+	if targetObservation.Invalid != "" {
+		observationErr := &git.RemoteRefObservationError{
+			Ref: operation.SourceRef, Observation: targetObservation.Invalid,
+		}
+		if err := persistExactRecoveryRemoteRefError(sctx, operation, observationErr); err != nil {
+			return err
+		}
+		return observationErr
+	}
+	if receiptObservation.Invalid != "" {
+		observationErr := &git.RemoteRefObservationError{
+			Ref: operation.ReceiptRef, Observation: receiptObservation.Invalid,
+		}
+		if err := persistExactRecoveryRemoteRefError(sctx, operation, observationErr); err != nil {
+			return err
+		}
+		return observationErr
+	}
+	if targetObservation.OID != operation.TargetOID {
+		return persistExactRecoveryUnexpectedRemoteOID(
+			sctx.DB, sctx.Run, operation.SourceRef, targetObservation.OID,
+		)
+	}
+	if receiptObservation.OID != operation.TargetOID {
+		return persistExactRecoveryUnexpectedRemoteOID(
+			sctx.DB, sctx.Run, operation.SourceRef, receiptObservation.OID,
+		)
+	}
+	return nil
 }
 
 // ValidateExactFinalHeadRecoveryExternalState proves that the previously
@@ -144,6 +203,26 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, database *
 			}
 		}
 		return fmt.Errorf("published branch head matches neither recorded delivery phase")
+	}
+	if event != nil {
+		operation, err := database.GetExactRecoveryPushOperation(run.ID)
+		if err != nil {
+			return err
+		}
+		if operation != nil && operation.Phase == db.ExactRecoveryPushBound {
+			if err := validateBoundExactRecoveryPushReceipt(sctx); err != nil {
+				return err
+			}
+		}
+	}
+	capabilityReceiptRef := db.ExactRecoveryPushCapabilityReceiptRef(
+		run.ID, ref, *run.LastPushedSHA, run.HeadSHA, *run.PushTargetFingerprint,
+	)
+	if err := exactRecoveryCheckAtomicPushReceiptCapability(
+		ctx, workDir, pushURL, run.HeadSHA, ref,
+		*run.LastPushedSHA, capabilityReceiptRef,
+	); err != nil {
+		return fmt.Errorf("validate exact final-head recovery Push transport: %w", err)
 	}
 
 	provider := scm.DetectProviderContext(ctx, repo.UpstreamURL)
@@ -332,42 +411,18 @@ func ReconcileStaleExactFinalHeadPushCustody(ctx context.Context, database *db.D
 		if err != nil {
 			return false, err
 		}
-		if operation != nil && operation.Phase == db.ExactRecoveryPushInvoked &&
-			remoteHead == operation.TargetOID && operation.ReceiptOID == nil {
-			receiptOID, receiptErr := exactRecoveryPushReceiptOID(sctx, operation)
-			if receiptErr == nil {
-				if err := database.RecordExactRecoveryPushSuccessReceipt(
-					run.ID, operation.OperationID, operation.ReceiptRef, receiptOID,
-				); err != nil {
-					return false, err
-				}
+		if operation != nil && operation.Phase != db.ExactRecoveryPushBound {
+			attributed, err := reconcileExactRecoveryPushReceiptState(
+				sctx, pushURL, operation, remoteHead,
+			)
+			if err != nil {
+				return false, fmt.Errorf("reconcile stale exact recovery Push custody: %w", err)
+			}
+			if attributed {
 				operation, err = database.GetExactRecoveryPushOperation(run.ID)
 				if err != nil {
 					return false, err
 				}
-			} else {
-				observation, err := database.GetExactRecoveryRefObservation(run.ID)
-				if err != nil {
-					return false, err
-				}
-				now := exactRecoveryReconcileNow()
-				if observation != nil && observation.DeadlineAt > now.Unix() {
-					delay := exactRecoveryRefReconcilePollInterval
-					remaining := time.Unix(observation.DeadlineAt, 0).Sub(now)
-					if remaining < delay {
-						delay = remaining
-					}
-					if delay > 0 {
-						if err := exactRecoveryReconcileWait(ctx, delay); err != nil {
-							return false, err
-						}
-					}
-					continue
-				}
-				if err := database.RecordExactRecoveryUnexpectedRemoteOID(run.ID, ref, remoteHead); err != nil {
-					return false, fmt.Errorf("reconcile stale exact recovery Push custody: persist unattributed target: %w", err)
-				}
-				return false, fmt.Errorf("reconcile stale exact recovery Push custody: target lacks operation-bound success receipt")
 			}
 		}
 		if operation != nil && operation.Phase == db.ExactRecoveryPushInvoked &&

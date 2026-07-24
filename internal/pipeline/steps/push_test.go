@@ -410,6 +410,61 @@ func TestPushStep_ExactRecoveryRefusesConcurrentSameTargetAfterFailedPush(t *tes
 	}
 }
 
+func TestExactRecoveryReceiptRollbackIsTerminalAndNeverRepublished(t *testing.T) {
+	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
+	upstream := resolvePushURL(sctx)
+	gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run, _ = sctx.DB.GetRun(sctx.Run.ID)
+	step := &PushStep{successReceiptWritten: func() error {
+		return errors.New("simulated crash after atomic remote receipt")
+	}}
+	if _, err := step.Execute(sctx); err == nil {
+		t.Fatal("simulated post-publication crash did not interrupt Push")
+	}
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation == nil || operation.Phase != db.ExactRecoveryPushInvoked {
+		t.Fatalf("crashed operation = %#v", operation)
+	}
+	if got := gitCmd(t, upstream, "rev-parse", operation.ReceiptRef); got != sctx.Run.HeadSHA {
+		t.Fatalf("remote receipt = %s, want %s", got, sctx.Run.HeadSHA)
+	}
+	gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA, sctx.Run.HeadSHA)
+	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run, _ = sctx.DB.GetRun(sctx.Run.ID)
+	if _, err := ReconcileStaleExactFinalHeadPushCustody(
+		context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir,
+		3, types.AllSteps(),
+	); err == nil {
+		t.Fatal("receipt plus rolled-back target was accepted")
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity == nil || ambiguity.Classification != db.ExactRecoveryRemoteRefUnexpectedOID ||
+		ambiguity.ObservedOID != sctx.Run.BaseSHA {
+		t.Fatalf("rollback ambiguity = %#v", ambiguity)
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+		t.Fatalf("rollback recovery republished %s", got)
+	}
+	after, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Attempt != operation.Attempt || after.OperationID != operation.OperationID {
+		t.Fatalf("rollback rotated operation %#v to %#v", operation, after)
+	}
+}
+
 func TestPushStep_ExactRecoveryRefMoveBeforePushPreventsPublication(t *testing.T) {
 	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"}, true)
 	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)

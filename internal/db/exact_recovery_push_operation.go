@@ -1,6 +1,7 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -285,8 +286,36 @@ func validateExactRecoveryPushAttempts(operation *ExactRecoveryPushOperation, at
 	return nil
 }
 
-func ExactRecoveryPushReceiptRef(operationID string) string {
-	return "refs/no-mistakes/push-receipts/" + strings.TrimSpace(operationID)
+func ExactRecoveryPushReceiptRef(runID, provider, operationID, sourceRef, staleOID, targetOID, targetFingerprint string) string {
+	identity := strings.Join([]string{
+		"exact-recovery-push-receipt-v1",
+		strings.TrimSpace(runID),
+		strings.TrimSpace(provider),
+		strings.TrimSpace(operationID),
+		strings.TrimSpace(sourceRef),
+		strings.TrimSpace(staleOID),
+		strings.TrimSpace(targetOID),
+		strings.TrimSpace(targetFingerprint),
+	}, "\x00")
+	digest := sha256.Sum256([]byte(identity))
+	return fmt.Sprintf("refs/heads/no-mistakes-receipts/%x", digest[:])
+}
+
+func ExactRecoveryPushCapabilityReceiptRef(runID, sourceRef, staleOID, targetOID, targetFingerprint string) string {
+	return ExactRecoveryPushReceiptRef(
+		runID, "capability", "admission", sourceRef, staleOID, targetOID, targetFingerprint,
+	)
+}
+
+func exactRecoveryPushOperationReceiptRef(operation *ExactRecoveryPushOperation) string {
+	if operation == nil {
+		return ""
+	}
+	return ExactRecoveryPushReceiptRef(
+		operation.RunID, operation.Provider, operation.OperationID,
+		operation.SourceRef, operation.StaleOID, operation.TargetOID,
+		operation.TargetFingerprint,
+	)
 }
 
 func createExactRecoveryPushOperation(tx *sql.Tx, event *RunRecoveryEvent, provider string, deadlineAt int64) (*ExactRecoveryPushOperation, error) {
@@ -313,9 +342,12 @@ func createExactRecoveryPushOperation(tx *sql.Tx, event *RunRecoveryEvent, provi
 		PriorGeneration:   event.PushGeneration,
 		TargetGeneration:  event.PushGeneration + 1,
 		PriorPushedAt:     event.LastPushedAt,
-		ReceiptRef:        ExactRecoveryPushReceiptRef(operationID),
-		CreatedAt:         ts,
-		UpdatedAt:         ts,
+		ReceiptRef: ExactRecoveryPushReceiptRef(
+			event.RunID, provider, operationID, event.SourceRef,
+			event.LastPushedSHA, event.HeadSHA, event.PushTargetFingerprint,
+		),
+		CreatedAt: ts,
+		UpdatedAt: ts,
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO run_recovery_push_operations (
@@ -512,7 +544,10 @@ func rotateExactRecoveryPushOperation(tx *sql.Tx, operation *ExactRecoveryPushOp
 		return fmt.Errorf("rotate exact recovery Push operation: immutable attempt changed")
 	}
 	nextID := newID()
-	nextReceiptRef := ExactRecoveryPushReceiptRef(nextID)
+	nextReceiptRef := ExactRecoveryPushReceiptRef(
+		operation.RunID, operation.Provider, nextID, operation.SourceRef,
+		operation.StaleOID, operation.TargetOID, operation.TargetFingerprint,
+	)
 	result, err = tx.Exec(
 		`UPDATE run_recovery_push_operations
 		 SET operation_id = ?, attempt = attempt + 1, phase = ?,
@@ -569,7 +604,7 @@ func validateExactRecoveryPushOperationIdentity(operation *ExactRecoveryPushOper
 	if operation == nil || observation == nil || event == nil ||
 		operation.RunID != event.RunID || operation.OperationID == "" || operation.Attempt <= 0 ||
 		operation.Provider == "" || operation.Provider != observation.Provider ||
-		operation.ReceiptRef != ExactRecoveryPushReceiptRef(operation.OperationID) ||
+		operation.ReceiptRef != exactRecoveryPushOperationReceiptRef(operation) ||
 		operation.SourceRef != event.SourceRef || operation.StaleOID != event.LastPushedSHA ||
 		operation.TargetOID != event.HeadSHA || operation.TargetKind != event.PushTargetKind ||
 		operation.TargetFingerprint != event.PushTargetFingerprint ||
