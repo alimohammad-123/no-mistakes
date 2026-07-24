@@ -64,7 +64,7 @@ func (e *forcePushWouldDiscardError) Error() string {
 // history the run already knew (reachable from baseSHA) and is thus a deliberate
 // rewrite rather than a clobber. Anything else is refused rather than discarded.
 func resolveForcePushDecision(gitRun gitRunner, pushURL, ref, newHeadSHA, lastSeenSHA, baseSHA string) (forcePushDecision, error) {
-	current, err := lsRemoteSHA(gitRun, pushURL, ref)
+	current, err := lsRemoteSHA(gitRun, pushURL, ref, newHeadSHA)
 	if err != nil {
 		return forcePushDecision{}, fmt.Errorf("resolve remote head for %s: %w", ref, err)
 	}
@@ -85,26 +85,29 @@ func resolveForcePushDecision(gitRun gitRunner, pushURL, ref, newHeadSHA, lastSe
 	// refuse rather than discard it.
 	dropped, err := remoteCommitsNotIncorporated(gitRun, pushURL, ref, newHeadSHA, current, baseSHA)
 	if err != nil {
-		return forcePushDecision{}, fmt.Errorf("verify force-push safety for %s: %w", ref, err)
+		return forcePushDecision{remoteSHA: current}, fmt.Errorf("verify force-push safety for %s: %w", ref, err)
 	}
 	if len(dropped) == 0 {
 		return forcePushDecision{remoteSHA: current}, nil
 	}
-	return forcePushDecision{}, &forcePushWouldDiscardError{ref: ref, remoteSHA: current, dropped: dropped}
+	return forcePushDecision{remoteSHA: current}, &forcePushWouldDiscardError{ref: ref, remoteSHA: current, dropped: dropped}
 }
 
 // lsRemoteSHA returns the SHA a ref resolves to on a remote, or "" when the ref
 // does not exist there.
-func lsRemoteSHA(gitRun gitRunner, remote, ref string) (string, error) {
+func lsRemoteSHA(gitRun gitRunner, remote, ref, expectedOID string) (string, error) {
 	out, err := gitRun("ls-remote", remote, ref)
 	if err != nil {
 		return "", err
 	}
-	fields := strings.Fields(strings.TrimSpace(out))
-	if len(fields) == 0 {
+	observation := git.ParseExactRemoteRefOutputForOID(out, ref, expectedOID)
+	if observation.Invalid == git.RemoteRefMissing {
 		return "", nil
 	}
-	return fields[0], nil
+	if observation.Invalid != "" {
+		return "", &git.RemoteRefObservationError{Ref: ref, Observation: observation.Invalid}
+	}
+	return observation.OID, nil
 }
 
 // remoteCommitsNotIncorporated returns the commits reachable from remoteSHA

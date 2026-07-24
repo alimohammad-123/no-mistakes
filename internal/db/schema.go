@@ -70,6 +70,160 @@ CREATE TABLE IF NOT EXISTS run_head_transitions (
     created_at             INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS run_recovery_events (
+    id                    TEXT PRIMARY KEY,
+    run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    kind                  TEXT NOT NULL,
+    recovered_at          INTEGER NOT NULL,
+    evidence_token        TEXT NOT NULL,
+    prior_status          TEXT NOT NULL,
+    prior_error           TEXT NOT NULL,
+    head_sha              TEXT NOT NULL,
+    test_head_sha         TEXT NOT NULL,
+    validation_target_sha TEXT NOT NULL,
+    replay_count          INTEGER NOT NULL,
+    source_ref            TEXT NOT NULL,
+    pr_url                  TEXT NOT NULL,
+    last_pushed_sha         TEXT NOT NULL,
+    push_target_kind        TEXT NOT NULL,
+    push_target_fingerprint TEXT NOT NULL,
+    push_generation         INTEGER NOT NULL,
+    last_pushed_at          INTEGER NOT NULL,
+    document_step_id        TEXT NOT NULL,
+    prior_step_status     TEXT NOT NULL,
+    prior_step_error      TEXT NOT NULL,
+    delivery_protocol_version INTEGER NOT NULL DEFAULT 0,
+    anchor_ref            TEXT,
+    UNIQUE (run_id, kind)
+);
+
+CREATE TABLE IF NOT EXISTS run_recovery_pr_updates (
+    run_id               TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    step_result_id       TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+    target_url           TEXT NOT NULL,
+    head_sha             TEXT NOT NULL,
+    prior_content_hash   TEXT NOT NULL,
+    intended_content_hash TEXT NOT NULL,
+    intended_title       TEXT NOT NULL,
+    intended_body        TEXT NOT NULL,
+    state                TEXT NOT NULL,
+    prepared_at          INTEGER NOT NULL,
+    applied_at           INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS run_recovery_ref_observations (
+    run_id               TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    provider             TEXT NOT NULL,
+    source_ref           TEXT NOT NULL,
+    stale_oid            TEXT NOT NULL,
+    expected_oid         TEXT NOT NULL,
+    deadline_at          INTEGER NOT NULL,
+    attempts             INTEGER NOT NULL,
+    state                TEXT NOT NULL,
+    last_observation     TEXT NOT NULL,
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_recovery_remote_ref_ambiguities (
+    run_id                    TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    recovery_event_id          TEXT NOT NULL REFERENCES run_recovery_events(id) ON DELETE CASCADE,
+    source_ref                 TEXT NOT NULL,
+    stale_oid                  TEXT NOT NULL,
+    target_oid                 TEXT NOT NULL,
+    target_kind                TEXT NOT NULL,
+    target_fingerprint         TEXT NOT NULL,
+    observed_last_pushed_sha   TEXT NOT NULL,
+    observed_push_generation   INTEGER NOT NULL,
+    classification             TEXT NOT NULL,
+    observed_oid               TEXT NOT NULL DEFAULT '',
+    observed_push_active       INTEGER NOT NULL DEFAULT 0,
+    observed_push_step_status  TEXT NOT NULL DEFAULT '',
+    observed_operation_id      TEXT NOT NULL DEFAULT '',
+    observed_operation_phase   TEXT NOT NULL DEFAULT '',
+    observed_at                INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_recovery_push_operations (
+    run_id               TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    operation_id         TEXT NOT NULL UNIQUE,
+    attempt              INTEGER NOT NULL,
+    phase                TEXT NOT NULL,
+    provider             TEXT NOT NULL,
+    source_ref           TEXT NOT NULL,
+    stale_oid            TEXT NOT NULL,
+    target_oid           TEXT NOT NULL,
+    target_kind          TEXT NOT NULL,
+    target_fingerprint   TEXT NOT NULL,
+    prior_generation     INTEGER NOT NULL,
+    target_generation    INTEGER NOT NULL,
+    prior_pushed_at      INTEGER NOT NULL,
+    created_at           INTEGER NOT NULL,
+    invoked_at           INTEGER,
+    receipt_ref          TEXT NOT NULL,
+    receipt_oid          TEXT,
+    receipt_at           INTEGER,
+    bound_at             INTEGER,
+    updated_at           INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_recovery_push_operation_events (
+    run_id               TEXT NOT NULL REFERENCES run_recovery_push_operations(run_id) ON DELETE CASCADE,
+    sequence             INTEGER NOT NULL,
+    operation_id         TEXT NOT NULL,
+    attempt              INTEGER NOT NULL,
+    phase                TEXT NOT NULL,
+    occurred_at          INTEGER NOT NULL,
+    PRIMARY KEY (run_id, sequence)
+);
+
+CREATE TABLE IF NOT EXISTS run_recovery_push_attempts (
+    run_id               TEXT NOT NULL REFERENCES run_recovery_push_operations(run_id) ON DELETE CASCADE,
+    attempt              INTEGER NOT NULL,
+    operation_id         TEXT NOT NULL UNIQUE,
+    phase                TEXT NOT NULL,
+    provider             TEXT NOT NULL,
+    source_ref           TEXT NOT NULL,
+    stale_oid            TEXT NOT NULL,
+    target_oid           TEXT NOT NULL,
+    target_kind          TEXT NOT NULL,
+    target_fingerprint   TEXT NOT NULL,
+    prior_generation     INTEGER NOT NULL,
+    target_generation    INTEGER NOT NULL,
+    prior_pushed_at      INTEGER NOT NULL,
+    deadline_at          INTEGER NOT NULL,
+    disposition          TEXT,
+    prepared_at          INTEGER NOT NULL,
+    invoked_at           INTEGER,
+    receipt_ref          TEXT NOT NULL,
+    receipt_oid          TEXT,
+    receipt_at           INTEGER,
+    closed_at            INTEGER,
+    PRIMARY KEY (run_id, attempt)
+);
+
+CREATE TABLE IF NOT EXISTS run_recovery_push_attempt_observations (
+    run_id               TEXT NOT NULL,
+    attempt              INTEGER NOT NULL,
+    sequence             INTEGER NOT NULL,
+    operation_id         TEXT NOT NULL,
+    observation          TEXT NOT NULL,
+    state                TEXT NOT NULL,
+    observed_at          INTEGER NOT NULL,
+    PRIMARY KEY (run_id, attempt, sequence),
+    FOREIGN KEY (run_id, attempt) REFERENCES run_recovery_push_attempts(run_id, attempt) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS run_recovery_ref_observation_events (
+    run_id               TEXT NOT NULL REFERENCES run_recovery_ref_observations(run_id) ON DELETE CASCADE,
+    attempt              INTEGER NOT NULL,
+    observation          TEXT NOT NULL,
+    prior_state          TEXT NOT NULL,
+    state                TEXT NOT NULL,
+    observed_at          INTEGER NOT NULL,
+    PRIMARY KEY (run_id, attempt)
+);
+
 CREATE TABLE IF NOT EXISTS step_results (
     id               TEXT PRIMARY KEY,
     run_id           TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -223,6 +377,21 @@ var migrationStatements = []string{
 	`ALTER TABLE step_results ADD COLUMN last_activity TEXT`,
 	`ALTER TABLE step_results ADD COLUMN agent_pid INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN auto_fix_limit INTEGER`,
+	`ALTER TABLE run_recovery_events ADD COLUMN delivery_protocol_version INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE run_recovery_events ADD COLUMN anchor_ref TEXT`,
+	`ALTER TABLE run_recovery_remote_ref_ambiguities ADD COLUMN observed_oid TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_remote_ref_ambiguities ADD COLUMN observed_push_active INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE run_recovery_remote_ref_ambiguities ADD COLUMN observed_push_step_status TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_remote_ref_ambiguities ADD COLUMN observed_operation_id TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_remote_ref_ambiguities ADD COLUMN observed_operation_phase TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_push_operations ADD COLUMN provider TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_push_operations ADD COLUMN receipt_ref TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_push_operations ADD COLUMN receipt_oid TEXT`,
+	`ALTER TABLE run_recovery_push_operations ADD COLUMN receipt_at INTEGER`,
+	`ALTER TABLE run_recovery_push_attempts ADD COLUMN provider TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_push_attempts ADD COLUMN receipt_ref TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_recovery_push_attempts ADD COLUMN receipt_oid TEXT`,
+	`ALTER TABLE run_recovery_push_attempts ADD COLUMN receipt_at INTEGER`,
 	// Session-fidelity telemetry columns (all nullable so pre-existing rows read
 	// back as unknown, never a fabricated zero).
 	`ALTER TABLE agent_invocations ADD COLUMN model_provider TEXT`,

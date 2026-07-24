@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,12 +12,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -77,6 +83,1155 @@ func TestPRStep_AllowsExactBoundaryDeliveryWithStableIdentity(t *testing.T) {
 	}
 	if !strings.Contains(string(logData), "pr edit") {
 		t.Fatalf("existing PR was not updated: %s", logData)
+	}
+}
+
+type exactRecoveryPRHost struct {
+	pr               *scm.PR
+	content          scm.PRContent
+	updateCalls      int
+	snapshotCalls    int
+	repository       string
+	expectedRepo     string
+	state            scm.PRState
+	merged           bool
+	headSHA          string
+	headRef          string
+	baseRef          string
+	snapshotHook     func(int)
+	updateHook       func()
+	updateErr        error
+	stateErr         error
+	availableErr     error
+	recoverySnapshot bool
+	snapshotErr      error
+	snapshotRequests []scm.PRSnapshotRequest
+}
+
+func (h *exactRecoveryPRHost) Provider() scm.Provider { return scm.ProviderGitHub }
+func (h *exactRecoveryPRHost) Capabilities() scm.Capabilities {
+	return scm.Capabilities{RecoverySnapshot: h.recoverySnapshot}
+}
+func (h *exactRecoveryPRHost) Available(context.Context) error { return h.availableErr }
+func (h *exactRecoveryPRHost) FindPR(context.Context, string, string) (*scm.PR, error) {
+	return h.pr, nil
+}
+func (h *exactRecoveryPRHost) CreatePR(context.Context, string, string, scm.PRContent) (*scm.PR, error) {
+	return nil, fmt.Errorf("unexpected CreatePR")
+}
+func (h *exactRecoveryPRHost) UpdatePR(_ context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
+	h.updateCalls++
+	if h.updateErr != nil {
+		return nil, h.updateErr
+	}
+	h.content = content
+	if h.updateHook != nil {
+		h.updateHook()
+	}
+	return pr, nil
+}
+func (h *exactRecoveryPRHost) GetPRContent(context.Context, *scm.PR) (scm.PRContent, error) {
+	return h.content, nil
+}
+func (h *exactRecoveryPRHost) GetPRState(context.Context, *scm.PR) (scm.PRState, error) {
+	return h.state, h.stateErr
+}
+func (h *exactRecoveryPRHost) ExpectedRepository() string { return h.expectedRepo }
+func (h *exactRecoveryPRHost) GetPRSnapshot(_ context.Context, _ *scm.PR, request scm.PRSnapshotRequest) (scm.PRSnapshot, error) {
+	h.snapshotCalls++
+	h.snapshotRequests = append(h.snapshotRequests, request)
+	if h.snapshotErr != nil {
+		return scm.PRSnapshot{}, h.snapshotErr
+	}
+	if h.snapshotHook != nil {
+		h.snapshotHook(h.snapshotCalls)
+	}
+	return scm.PRSnapshot{
+		Repository: h.repository,
+		Number:     h.pr.Number,
+		URL:        h.pr.URL,
+		State:      h.state,
+		Merged:     h.merged,
+		HeadSHA:    h.headSHA,
+		HeadRef:    h.headRef,
+		BaseRef:    h.baseRef,
+		Title:      h.content.Title,
+		Body:       h.content.Body,
+	}, nil
+}
+func (h *exactRecoveryPRHost) GetChecks(context.Context, *scm.PR) ([]scm.Check, error) {
+	return nil, nil
+}
+func (h *exactRecoveryPRHost) GetMergeableState(context.Context, *scm.PR) (scm.MergeableState, error) {
+	return "", scm.ErrUnsupported
+}
+func (h *exactRecoveryPRHost) FetchFailedCheckLogs(context.Context, *scm.PR, string, string, []string) (string, error) {
+	return "", scm.ErrUnsupported
+}
+
+func TestPRStep_ExactRecoveryJournalAvoidsDuplicateMutation(t *testing.T) {
+	tests := []struct {
+		name        string
+		remote      scm.PRContent
+		updateCalls int
+	}{
+		{name: "already applied", remote: scm.PRContent{Title: "intended title", Body: "intended body"}, updateCalls: 0},
+		{name: "unchanged prior", remote: scm.PRContent{Title: "prior title", Body: "prior body"}, updateCalls: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sctx, host := exactRecoveryPRStepContext(t, tc.remote)
+			step := &PRStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+				return host, ""
+			}}
+			if _, err := step.Execute(sctx); err != nil {
+				t.Fatal(err)
+			}
+			if host.updateCalls != tc.updateCalls {
+				t.Fatalf("UpdatePR calls = %d, want %d", host.updateCalls, tc.updateCalls)
+			}
+			if _, err := step.Execute(sctx); err != nil {
+				t.Fatal(err)
+			}
+			if host.updateCalls != tc.updateCalls {
+				t.Fatalf("replayed UpdatePR calls = %d, want %d", host.updateCalls, tc.updateCalls)
+			}
+			update, err := sctx.DB.GetExactRecoveryPRUpdate(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if update == nil || update.State != db.ExactRecoveryPRUpdateApplied || update.AppliedAt == nil {
+				t.Fatalf("PR update provenance = %#v", update)
+			}
+		})
+	}
+}
+
+func TestPRStep_ExactRecoveryRevalidatesReceiptAroundMutation(t *testing.T) {
+	tests := []struct {
+		name            string
+		deleteAt        string
+		wantUpdateCalls int
+	}{
+		{name: "before update", deleteAt: "ownership", wantUpdateCalls: 0},
+		{name: "after update", deleteAt: "update", wantUpdateCalls: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sctx, host := exactRecoveryPRStepContext(
+				t, scm.PRContent{Title: "prior title", Body: "prior body"},
+			)
+			operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			deleteReceipt := func() {
+				gitCmd(t, resolvePushURL(sctx), "update-ref", "-d", operation.ReceiptRef)
+			}
+			step := &PRStep{
+				hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+					return host, ""
+				},
+			}
+			if tc.deleteAt == "ownership" {
+				step.ownershipClaimed = deleteReceipt
+			} else {
+				host.updateHook = deleteReceipt
+			}
+			if _, err := step.Execute(sctx); err == nil {
+				t.Fatal("lost exact recovery receipt was accepted")
+			}
+			if host.updateCalls != tc.wantUpdateCalls {
+				t.Fatalf("UpdatePR calls = %d, want %d", host.updateCalls, tc.wantUpdateCalls)
+			}
+			ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ambiguity == nil || ambiguity.Classification != db.ExactRecoveryRemoteRefMissing {
+				t.Fatalf("receipt ambiguity = %#v", ambiguity)
+			}
+			update, err := sctx.DB.GetExactRecoveryPRUpdate(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if update == nil || update.State != db.ExactRecoveryPRUpdatePrepared {
+				t.Fatalf("PR update provenance = %#v", update)
+			}
+		})
+	}
+}
+
+func TestExactRecoveryPRAdmissionRejectsUnsupportedOrStaleStateBeforeDelivery(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*exactRecoveryPRHost)
+	}{
+		{name: "unavailable snapshot", mutate: func(h *exactRecoveryPRHost) { h.snapshotErr = errors.New("provider unavailable") }},
+		{name: "unsupported capability", mutate: func(h *exactRecoveryPRHost) { h.recoverySnapshot = false }},
+		{name: "incomplete title", mutate: func(h *exactRecoveryPRHost) { h.content.Title = "" }},
+		{name: "incomplete body", mutate: func(h *exactRecoveryPRHost) { h.content.Body = "" }},
+		{name: "closed", mutate: func(h *exactRecoveryPRHost) { h.state = scm.PRStateClosed }},
+		{name: "merged", mutate: func(h *exactRecoveryPRHost) {
+			h.state = scm.PRStateMerged
+			h.merged = true
+		}},
+		{name: "wrong head", mutate: func(h *exactRecoveryPRHost) { h.headSHA = strings.Repeat("c", 40) }},
+		{name: "wrong branch", mutate: func(h *exactRecoveryPRHost) { h.headRef = "other" }},
+		{name: "wrong base", mutate: func(h *exactRecoveryPRHost) { h.baseRef = "release" }},
+		{name: "wrong repository", mutate: func(h *exactRecoveryPRHost) { h.repository = "other/repo" }},
+		{name: "unknown identity", mutate: func(h *exactRecoveryPRHost) {
+			h.pr.Number = ""
+			h.pr.URL = ""
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sctx, host := exactRecoveryDeliveryStepContext(
+				t, scm.PRContent{Title: "prior title", Body: "prior body"}, true,
+			)
+			gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+			host.headSHA = sctx.Run.BaseSHA
+			expectedURL := host.pr.URL
+			tc.mutate(host)
+			if _, err := validateExactRecoveryPRAdmission(
+				context.Background(), sctx, host, host.pr, expectedURL, sctx.Run.BaseSHA,
+			); err == nil {
+				t.Fatal("unsafe recovery PR admission was accepted")
+			}
+			if host.updateCalls != 0 {
+				t.Fatalf("admission mutated PR %d times", host.updateCalls)
+			}
+			if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+				t.Fatalf("admission published %s, want unchanged %s", got, sctx.Run.BaseSHA)
+			}
+		})
+	}
+}
+
+func TestExactRecoveryAdmissionRefusesMissingAtomicPushCapability(t *testing.T) {
+	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
+	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+	oldCheck := exactRecoveryCheckAtomicPushReceiptCapability
+	t.Cleanup(func() {
+		exactRecoveryCheckAtomicPushReceiptCapability = oldCheck
+	})
+	exactRecoveryCheckAtomicPushReceiptCapability = func(context.Context, string, string, string, string, string, string) error {
+		return errors.New("remote lacks atomic push")
+	}
+	if err := ValidateExactFinalHeadRecoveryExternalState(
+		context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir,
+		sctx.Config, false,
+	); err == nil {
+		t.Fatal("recovery admission accepted a remote without atomic Push capability")
+	}
+	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+		t.Fatalf("capability refusal published %s", got)
+	}
+}
+
+func TestExactRecoveryPRSnapshotVisibilityBoundPersistsAcrossRestart(t *testing.T) {
+	sctx, _ := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+	first, err := exactRecoveryPRSnapshotRequest(sctx, sctx.Run.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := *sctx
+	restarted.Run = persisted
+	second, err := exactRecoveryPRSnapshotRequest(&restarted, sctx.Run.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDeadline := time.Unix(*persisted.LastPushedAt, 0).Add(exactRecoveryRefReconcileWindow)
+	if first.ExpectedHead != sctx.Run.HeadSHA || !first.ReconcileUntil.Equal(wantDeadline) ||
+		second.ExpectedHead != first.ExpectedHead || second.AllowedStaleHead != first.AllowedStaleHead ||
+		!second.ReconcileUntil.Equal(first.ReconcileUntil) {
+		t.Fatalf("snapshot requests before/after restart = %#v / %#v, want deadline %s", first, second, wantDeadline)
+	}
+}
+
+func TestExactRecoveryAzureRefJournalPersistsAcrossRestart(t *testing.T) {
+	sctx, host := exactRecoveryDeliveryStepContext(
+		t, scm.PRContent{Title: "prior title", Body: "prior body"}, true,
+	)
+	sctx.Repo.UpstreamURL = "https://dev.azure.com/org/project/_git/repo"
+	deadline := time.Now().Add(30 * time.Second).Unix()
+	if _, err := sctx.DB.PrepareExactRecoveryRefObservation(
+		sctx.Run.ID, string(scm.ProviderAzureDevOps), "refs/heads/feature",
+		sctx.Run.HeadSHA, sctx.Run.BaseSHA, deadline,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exactRecoveryPRSnapshotRequest(sctx, sctx.Run.HeadSHA); err == nil {
+		t.Fatal("Azure target was admitted before its Push operation was bound")
+	}
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.MarkExactRecoveryPushInvoked(
+		sctx.Run.ID, operation.OperationID, sctx.Run.BaseSHA,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.RecordExactRecoveryPushSuccessReceipt(
+		sctx.Run.ID, operation.OperationID, operation.ReceiptRef, sctx.Run.HeadSHA,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.BindExactRecoveryPushOperation(sctx.Run.ID, operation.OperationID, db.PushBinding{
+		HeadSHA: sctx.Run.HeadSHA, TargetKind: "upstream",
+		TargetFingerprint: branchsync.TargetFingerprint(resolvePushURL(sctx)),
+		Ref:               "refs/heads/feature",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := *sctx
+	restarted.Run = persisted
+	request, err := exactRecoveryPRSnapshotRequest(&restarted, persisted.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.AllowedStaleHead != persisted.BaseSHA ||
+		!request.ReconcileUntil.Equal(time.Unix(deadline, 0)) ||
+		request.RecordObservation == nil {
+		t.Fatalf("restart request = %#v", request)
+	}
+	if err := request.RecordObservation(context.Background(), persisted.BaseSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := request.RecordObservation(context.Background(), strings.Repeat("c", 40)); err == nil {
+		t.Fatal("third OID was accepted after restart")
+	}
+	if _, err := exactRecoveryPRSnapshotRequest(&restarted, persisted.HeadSHA); err == nil {
+		t.Fatal("restart forgot durable Azure ref ambiguity")
+	}
+	if _, err := validateExactRecoveryPRAdmission(
+		context.Background(), &restarted, host, host.pr, host.pr.URL, persisted.HeadSHA,
+	); err == nil {
+		t.Fatal("ambiguous Azure journal admitted PR mutation")
+	}
+	if host.updateCalls != 0 || host.snapshotCalls != 0 {
+		t.Fatalf("ambiguous Azure journal reached remote PR: updates=%d snapshots=%d", host.updateCalls, host.snapshotCalls)
+	}
+}
+
+func TestPushStep_ExactRecoveryAzureRefJournalPreventsAmbiguousPublication(t *testing.T) {
+	t.Run("old to expected remains idempotent", func(t *testing.T) {
+		sctx, _ := exactRecoveryDeliveryStepContext(
+			t, scm.PRContent{Title: "prior title", Body: "prior body"}, true,
+		)
+		upstream := resolvePushURL(sctx)
+		gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+		sctx.Repo.UpstreamURL = "https://dev.azure.com/org/project/_git/repo"
+		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		run, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.Run = run
+		step := &PushStep{recoveryRefObserved: func(_ *pipeline.StepContext, _ string) (string, error) {
+			return gitCmd(t, upstream, "rev-parse", "refs/heads/feature"), nil
+		}}
+		if _, err := step.Execute(sctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := sctx.DB.RecordExactRecoveryRefObservation(sctx.Run.ID, sctx.Run.HeadSHA); err != nil {
+			t.Fatal(err)
+		}
+		operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if operation.Phase != db.ExactRecoveryPushBound || operation.BoundAt == nil {
+			t.Fatalf("successful Push operation = %#v", operation)
+		}
+		pushed, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		generation := *pushed.PushGeneration
+		if _, err := step.Execute(sctx); err != nil {
+			t.Fatal(err)
+		}
+		replayed, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if *replayed.PushGeneration != generation ||
+			gitCmd(t, upstream, "rev-parse", "refs/heads/feature") != sctx.Run.HeadSHA {
+			t.Fatalf("replayed Push changed delivery: %#v", replayed)
+		}
+	})
+	t.Run("old to third refuses publication", func(t *testing.T) {
+		sctx, _ := exactRecoveryDeliveryStepContext(
+			t, scm.PRContent{Title: "prior title", Body: "prior body"}, true,
+		)
+		upstream := resolvePushURL(sctx)
+		gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+		third := supersedingExactRecoveryCommit(t, sctx)
+		gitCmd(t, sctx.WorkDir, "push", "origin", third+":refs/heads/third")
+		sctx.Repo.UpstreamURL = "https://dev.azure.com/org/project/_git/repo"
+		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		run, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.Run = run
+		step := &PushStep{
+			beforeRemoteMutation: func() {
+				gitCmd(t, upstream, "update-ref", "refs/heads/feature", third)
+			},
+			recoveryRefObserved: func(_ *pipeline.StepContext, _ string) (string, error) {
+				return gitCmd(t, upstream, "rev-parse", "refs/heads/feature"), nil
+			},
+		}
+		if _, err := step.Execute(sctx); err == nil {
+			t.Fatal("ambiguous Azure ref was published")
+		}
+		if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != third {
+			t.Fatalf("ambiguous Push moved remote to %s", got)
+		}
+		journal, err := sctx.DB.GetExactRecoveryRefObservation(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if journal == nil || journal.State != db.ExactRecoveryRefObservationAmbiguous ||
+			journal.LastObservation != third {
+			t.Fatalf("ambiguous Push journal = %#v", journal)
+		}
+		before, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.HeadSHA)
+		if _, err := step.Execute(sctx); err == nil {
+			t.Fatal("later expected OID erased remembered ambiguity")
+		}
+		after, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if *after.PushGeneration != *before.PushGeneration ||
+			after.LastPushedSHA == nil || *after.LastPushedSHA != sctx.Run.BaseSHA {
+			t.Fatalf("ambiguous retry changed push binding: %#v", after)
+		}
+	})
+	t.Run("invoked operation retains attribution through late success", func(t *testing.T) {
+		sctx, _ := exactRecoveryDeliveryStepContext(
+			t, scm.PRContent{Title: "prior title", Body: "prior body"}, true,
+		)
+		upstream := resolvePushURL(sctx)
+		gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+		sctx.Repo.UpstreamURL = "https://dev.azure.com/org/project/_git/repo"
+		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		run, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.Run = run
+		step := &PushStep{
+			recoveryRefObserved: func(_ *pipeline.StepContext, _ string) (string, error) {
+				return gitCmd(t, upstream, "rev-parse", "refs/heads/feature"), nil
+			},
+			invocationMarked: func() error {
+				return errors.New("simulated process crash")
+			},
+		}
+		if _, err := step.Execute(sctx); err == nil {
+			t.Fatal("simulated crash did not interrupt Push")
+		}
+		if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+			t.Fatalf("pre-mutation crash published %s", got)
+		}
+		crashed, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		sctx.Run, err = sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldWait := exactRecoveryReconcileWait
+		t.Cleanup(func() {
+			exactRecoveryReconcileWait = oldWait
+		})
+		waitCalls := 0
+		exactRecoveryReconcileWait = func(ctx context.Context, _ time.Duration) error {
+			if err := context.Cause(ctx); err != nil {
+				return err
+			}
+			waitCalls++
+			if waitCalls == 2 {
+				gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.HeadSHA, sctx.Run.BaseSHA)
+				operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+				if err != nil {
+					return err
+				}
+				gitCmd(t, upstream, "update-ref", operation.ReceiptRef, sctx.Run.HeadSHA)
+			}
+			return nil
+		}
+		reconciled, err := ReconcileStaleExactFinalHeadPushCustody(
+			context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir,
+			3, types.AllSteps(),
+		)
+		if err != nil || !reconciled {
+			t.Fatalf("reconcile late success = %v, %v", reconciled, err)
+		}
+		operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if crashed.LastPushedSHA == nil || *crashed.LastPushedSHA != sctx.Run.BaseSHA ||
+			operation.Phase != db.ExactRecoveryPushBound || operation.Attempt != 1 ||
+			waitCalls != 2 {
+			t.Fatalf("late success attribution = %#v, waits=%d crashed=%#v", operation, waitCalls, crashed)
+		}
+		bound, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bound.LastPushedSHA == nil || *bound.LastPushedSHA != sctx.Run.HeadSHA ||
+			bound.PushGeneration == nil || *bound.PushGeneration != 2 {
+			t.Fatalf("late success binding = %#v", bound)
+		}
+		observations, err := sctx.DB.ListExactRecoveryPushAttemptObservations(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(observations) < 3 {
+			t.Fatalf("pending observation history = %#v", observations)
+		}
+	})
+	t.Run("operation receipt after successful Push binds without duplicate push", func(t *testing.T) {
+		sctx, _ := exactRecoveryDeliveryStepContext(
+			t, scm.PRContent{Title: "prior title", Body: "prior body"}, true,
+		)
+		upstream := resolvePushURL(sctx)
+		gitCmd(t, upstream, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+		sctx.Repo.UpstreamURL = "https://dev.azure.com/org/project/_git/repo"
+		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		run, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.Run = run
+		step := &PushStep{
+			recoveryRefObserved: func(_ *pipeline.StepContext, _ string) (string, error) {
+				return gitCmd(t, upstream, "rev-parse", "refs/heads/feature"), nil
+			},
+			successReceiptWritten: func() error {
+				return errors.New("simulated crash after operation receipt")
+			},
+		}
+		if _, err := step.Execute(sctx); err == nil {
+			t.Fatal("simulated post-mutation crash did not interrupt Push")
+		}
+		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		sctx.Run, err = sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reconciled, err := ReconcileStaleExactFinalHeadPushCustody(
+			context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir,
+			3, types.AllSteps(),
+		)
+		if err != nil || !reconciled {
+			t.Fatalf("reconcile post-mutation crash = %v, %v", reconciled, err)
+		}
+		bound, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		generation := *bound.PushGeneration
+		sctx.Run = bound
+		step.invocationMarked = nil
+		if _, err := step.Execute(sctx); err != nil {
+			t.Fatal(err)
+		}
+		replayed, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if *replayed.PushGeneration != generation ||
+			gitCmd(t, upstream, "rev-parse", "refs/heads/feature") != sctx.Run.HeadSHA {
+			t.Fatalf("replayed recovered Push changed delivery: %#v", replayed)
+		}
+	})
+}
+
+func TestPRStep_ExactRecoveryJournalRefusesAmbiguousRemoteContent(t *testing.T) {
+	sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "partial", Body: "superseded"})
+	step := &PRStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+		return host, ""
+	}}
+	if _, err := step.Execute(sctx); err == nil {
+		t.Fatal("ambiguous remote PR content was accepted")
+	}
+	if host.updateCalls != 0 {
+		t.Fatalf("ambiguous recovery mutated PR %d times", host.updateCalls)
+	}
+}
+
+func TestPRStep_ExactRecoveryRefusesProviderIndependentRemoteAmbiguity(t *testing.T) {
+	sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+	if err := sctx.DB.RecordExactRecoveryRemoteRefAmbiguity(sctx.Run.ID, db.ExactRecoveryRemoteRefIdentityMismatch); err != nil {
+		t.Fatal(err)
+	}
+	step := &PRStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+		return host, ""
+	}}
+	if _, err := step.Execute(sctx); err == nil {
+		t.Fatal("provider-independent remote ambiguity admitted PR mutation")
+	}
+	if host.updateCalls != 0 {
+		t.Fatalf("provider-independent remote ambiguity mutated PR %d times", host.updateCalls)
+	}
+}
+
+func TestPRStep_ExactRecoveryRefusesDeletedAtomicReceipt(t *testing.T) {
+	sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "-d", operation.ReceiptRef)
+	step := &PRStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+		return host, ""
+	}}
+	if _, err := step.Execute(sctx); err == nil {
+		t.Fatal("deleted atomic receipt admitted PR mutation")
+	}
+	if host.updateCalls != 0 {
+		t.Fatalf("deleted atomic receipt mutated PR %d times", host.updateCalls)
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity == nil || ambiguity.Classification != db.ExactRecoveryRemoteRefMissing {
+		t.Fatalf("deleted receipt ambiguity = %#v", ambiguity)
+	}
+}
+
+func TestExactRecoveryExternalStateRefusesDeletedAtomicReceipt(t *testing.T) {
+	sctx, _ := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "-d", operation.ReceiptRef)
+	if err := ValidateExactFinalHeadRecoveryExternalState(
+		context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir,
+		sctx.Config, true,
+	); err == nil {
+		t.Fatal("restart accepted a bound Push with a deleted atomic receipt")
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity == nil || ambiguity.Classification != db.ExactRecoveryRemoteRefMissing {
+		t.Fatalf("restart deleted-receipt ambiguity = %#v", ambiguity)
+	}
+}
+
+func TestPRStep_ExactRecoveryRefusesLifecycleIdentityAndHeadDrift(t *testing.T) {
+	tests := []struct {
+		name           string
+		mutate         func(*exactRecoveryPRHost)
+		classification string
+	}{
+		{name: "closed", mutate: func(h *exactRecoveryPRHost) { h.state = scm.PRStateClosed }},
+		{name: "merged", mutate: func(h *exactRecoveryPRHost) {
+			h.state = scm.PRStateMerged
+			h.merged = true
+		}},
+		{name: "head drift", mutate: func(h *exactRecoveryPRHost) { h.headSHA = strings.Repeat("a", 40) }, classification: db.ExactRecoveryRemoteRefUnexpectedOID},
+		{name: "missing head", mutate: func(h *exactRecoveryPRHost) { h.headSHA = "" }, classification: db.ExactRecoveryRemoteRefMissing},
+		{name: "malformed head", mutate: func(h *exactRecoveryPRHost) { h.headSHA = "not-an-oid" }, classification: db.ExactRecoveryRemoteRefMalformed},
+		{name: "source branch drift", mutate: func(h *exactRecoveryPRHost) { h.headRef = "other" }, classification: db.ExactRecoveryRemoteRefIdentityMismatch},
+		{name: "base drift", mutate: func(h *exactRecoveryPRHost) { h.baseRef = "release" }},
+		{name: "repository drift", mutate: func(h *exactRecoveryPRHost) { h.repository = "other/repo" }},
+		{name: "identity drift", mutate: func(h *exactRecoveryPRHost) { h.pr.URL = "https://github.com/test/repo/pull/99" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+			tc.mutate(host)
+			step := &PRStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+				return host, ""
+			}}
+			if _, err := step.Execute(sctx); err == nil {
+				t.Fatal("stale PR lifecycle or identity was accepted")
+			}
+			if host.updateCalls != 0 {
+				t.Fatalf("stale PR was mutated %d times", host.updateCalls)
+			}
+			if tc.classification != "" {
+				ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ambiguity == nil || ambiguity.Classification != tc.classification {
+					t.Fatalf("PR head drift ambiguity = %#v", ambiguity)
+				}
+				if tc.classification == db.ExactRecoveryRemoteRefUnexpectedOID &&
+					ambiguity.ObservedOID != host.headSHA {
+					t.Fatalf("PR head drift observed OID = %#v", ambiguity)
+				}
+				host.headSHA = sctx.Run.HeadSHA
+				if _, err := step.Execute(sctx); err == nil {
+					t.Fatal("restart forgot durable PR-head ambiguity")
+				}
+				if host.updateCalls != 0 {
+					t.Fatalf("restart after PR-head ambiguity mutated PR %d times", host.updateCalls)
+				}
+			}
+		})
+	}
+}
+
+func TestPRStep_ExactRecoveryVerifiesAuthoritativeStateAfterMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*exactRecoveryPRHost)
+	}{
+		{name: "closed", mutate: func(h *exactRecoveryPRHost) { h.state = scm.PRStateClosed }},
+		{name: "merged", mutate: func(h *exactRecoveryPRHost) {
+			h.state = scm.PRStateMerged
+			h.merged = true
+		}},
+		{name: "head drift", mutate: func(h *exactRecoveryPRHost) { h.headSHA = strings.Repeat("b", 40) }},
+		{name: "base drift", mutate: func(h *exactRecoveryPRHost) { h.baseRef = "release" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+			host.updateHook = func() { tc.mutate(host) }
+			step := &PRStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+				return host, ""
+			}}
+			if _, err := step.Execute(sctx); err == nil {
+				t.Fatal("ambiguous PR after-state was accepted")
+			}
+			if host.updateCalls != 1 || host.snapshotCalls != 2 {
+				t.Fatalf("update calls = %d, snapshot calls = %d", host.updateCalls, host.snapshotCalls)
+			}
+			if len(host.snapshotRequests) != 2 ||
+				host.snapshotRequests[0].ExpectedHead != sctx.Run.HeadSHA ||
+				host.snapshotRequests[1].ExpectedHead != host.snapshotRequests[0].ExpectedHead ||
+				host.snapshotRequests[1].AllowedStaleHead != host.snapshotRequests[0].AllowedStaleHead ||
+				!host.snapshotRequests[1].ReconcileUntil.Equal(host.snapshotRequests[0].ReconcileUntil) ||
+				host.snapshotRequests[0].ReconcileUntil.IsZero() {
+				t.Fatalf("before/after snapshot requests = %#v", host.snapshotRequests)
+			}
+			update, err := sctx.DB.GetExactRecoveryPRUpdate(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if update == nil || update.State != db.ExactRecoveryPRUpdatePrepared || update.AppliedAt != nil {
+				t.Fatalf("ambiguous PR mutation was marked applied: %#v", update)
+			}
+		})
+	}
+}
+
+func TestPRStep_ExactRecoveryOwnershipExcludesReceiveContention(t *testing.T) {
+	sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+	superseding := supersedingExactRecoveryCommit(t, sctx)
+	var competingErr error
+	step := &PRStep{
+		hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+			return host, ""
+		},
+		ownershipClaimed: func() {
+			cmd := exec.Command("git", "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
+			cmd.Dir = sctx.WorkDir
+			_, competingErr = cmd.CombinedOutput()
+		},
+	}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if competingErr == nil {
+		t.Fatal("receive-side source update crossed PR ownership claim")
+	}
+	if got := gitCmd(t, sctx.WorkDir, "rev-parse", "refs/heads/feature"); got != sctx.Run.HeadSHA {
+		t.Fatalf("source ref moved during PR update to %s", got)
+	}
+	gitCmd(t, sctx.WorkDir, "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
+}
+
+func TestPRStep_ExactRecoveryOwnershipReleasesAfterMutationFailure(t *testing.T) {
+	sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+	superseding := supersedingExactRecoveryCommit(t, sctx)
+	host.updateErr = errors.New("remote update failed")
+	step := &PRStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+		return host, ""
+	}}
+	if _, err := step.Execute(sctx); err == nil {
+		t.Fatal("failed PR mutation returned nil")
+	}
+	gitCmd(t, sctx.WorkDir, "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
+}
+
+func exactRecoveryPRStepContext(t *testing.T, remote scm.PRContent) (*pipeline.StepContext, *exactRecoveryPRHost) {
+	return exactRecoveryDeliveryStepContext(t, remote, false)
+}
+
+func exactRecoveryDeliveryStepContext(t *testing.T, remote scm.PRContent, stopAtPush bool) (*pipeline.StepContext, *exactRecoveryPRHost) {
+	t.Helper()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+	sctx := newTestContextWithDBRecords(
+		t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"},
+	)
+	sctx.Repo.UpstreamURL = upstream
+	const prURL = "https://github.com/test/repo/pull/23"
+	sctx.Run.HeadSHA = headSHA
+	exhaustHeadValidationCapacity(t, sctx, headSHA)
+	if err := sctx.DB.RecordSuccessfulTestHead(sctx.Run.ID, headSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, prURL); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
+		HeadSHA: baseSHA, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(upstream), Ref: "refs/heads/feature",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	results := make(map[types.StepName]*db.StepResult, len(types.AllSteps()))
+	for _, name := range types.AllSteps() {
+		result, err := sctx.DB.InsertStepResult(sctx.Run.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		results[name] = result
+		switch {
+		case name.Order() <= types.StepTest.Order():
+			if err := sctx.DB.CompleteStep(result.ID, 0, 1, string(name)+".log"); err != nil {
+				t.Fatal(err)
+			}
+		case name == types.StepDocument:
+			if err := sctx.DB.StartStep(result.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := sctx.DB.FailStep(result.ID, db.ExactFinalHeadCapacityStepError(3), 1); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := sctx.DB.UpdateRunErrorStatus(sctx.Run.ID, db.ExactFinalHeadCapacityRunError(3), types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	failure, err := sctx.DB.InspectExactFinalHeadCapacityFailure(sctx.Run.ID, 3, types.AllSteps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchorRef, err := sourceprovenance.ExactRecoveryAnchorRef(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceprovenance.EnsureExactRecoveryAnchor(context.Background(), dir, anchorRef, headSHA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.RestoreExactFinalHeadCapacityFailure(sctx.Run.ID, failure.EvidenceToken, 3, types.AllSteps()); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []types.StepName{types.StepDocument, types.StepLint} {
+		if err := sctx.DB.CompleteStep(results[name].ID, 0, 1, string(name)+".log"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sctx.DB.CompleteHeadValidation(sctx.Run.ID, headSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.StartStep(results[types.StepPush].ID); err != nil {
+		t.Fatal(err)
+	}
+	host := &exactRecoveryPRHost{
+		pr:               &scm.PR{Number: "23", URL: prURL},
+		content:          remote,
+		repository:       "test/repo",
+		expectedRepo:     "test/repo",
+		recoverySnapshot: true,
+		state:            scm.PRStateOpen,
+		headSHA:          headSHA,
+		headRef:          "feature",
+		baseRef:          "main",
+	}
+	if stopAtPush {
+		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		run, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.Run = run
+		sctx.StepResultID = results[types.StepPush].ID
+		return sctx, host
+	}
+	gitCmd(t, upstream, "update-ref", "refs/heads/feature", baseSHA)
+	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.PrepareExactRecoveryRefObservation(
+		sctx.Run.ID, string(scm.ProviderGitHub), "refs/heads/feature",
+		headSHA, baseSHA, time.Now().Add(time.Minute).Unix(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.MarkExactRecoveryPushInvoked(
+		sctx.Run.ID, operation.OperationID, baseSHA,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.PushSHAWithReceipt(
+		context.Background(), dir, upstream, headSHA, "refs/heads/feature",
+		baseSHA, true, operation.ReceiptRef,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.RecordExactRecoveryPushSuccessReceipt(
+		sctx.Run.ID, operation.OperationID, operation.ReceiptRef, headSHA,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.BindExactRecoveryPushOperation(sctx.Run.ID, operation.OperationID, db.PushBinding{
+		HeadSHA: headSHA, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(upstream), Ref: "refs/heads/feature",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.CompleteStep(results[types.StepPush].ID, 0, 1, "push.log"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.StartStep(results[types.StepPR].ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run = run
+	sctx.StepResultID = results[types.StepPR].ID
+	update, err := sctx.DB.PrepareExactRecoveryPRUpdate(
+		run.ID, sctx.StepResultID, prURL, headSHA,
+		"prior title", "prior body", "intended title", "intended body",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if update == nil {
+		t.Fatal("PR update journal missing")
+	}
+	return sctx, host
+}
+
+func supersedingExactRecoveryCommit(t *testing.T, sctx *pipeline.StepContext) string {
+	t.Helper()
+	gitCmd(t, sctx.WorkDir, "checkout", "--detach", sctx.Run.HeadSHA)
+	if err := os.WriteFile(filepath.Join(sctx.WorkDir, "superseding-source.txt"), []byte("new source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, sctx.WorkDir, "add", "superseding-source.txt")
+	gitCmd(t, sctx.WorkDir, "commit", "-m", "superseding source")
+	superseding := gitCmd(t, sctx.WorkDir, "rev-parse", "HEAD")
+	gitCmd(t, sctx.WorkDir, "checkout", "--detach", sctx.Run.HeadSHA)
+	return superseding
+}
+
+func TestPRStep_ExactRecoveryRefMoveBeforeUpdatePreventsMutation(t *testing.T) {
+	sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+	superseding := supersedingExactRecoveryCommit(t, sctx)
+	step := &PRStep{
+		hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+			return host, ""
+		},
+		beforeRemoteMutation: func() {
+			gitCmd(t, sctx.WorkDir, "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
+		},
+	}
+	if _, err := step.Execute(sctx); !errors.Is(err, pipeline.ErrSourceRefSuperseded) {
+		t.Fatalf("Execute() error = %v, want superseded source refusal", err)
+	}
+	if host.updateCalls != 0 {
+		t.Fatalf("superseded recovery mutated PR %d times", host.updateCalls)
+	}
+}
+
+func TestExactRecoveryReconciliationRefMovesPreventPublication(t *testing.T) {
+	oldPoint := exactRecoveryReconcilePoint
+	t.Cleanup(func() {
+		exactRecoveryReconcilePoint = oldPoint
+	})
+	for _, targetPoint := range []string{"remote-probed", "source-verified", "database-reconciled"} {
+		t.Run(targetPoint, func(t *testing.T) {
+			sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
+			gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+			superseding := supersedingExactRecoveryCommit(t, sctx)
+			exactRecoveryReconcilePoint = func(point string) {
+				if point == targetPoint {
+					gitCmd(t, sctx.WorkDir, "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
+				}
+			}
+			if _, err := ReconcileStaleExactFinalHeadPushCustody(
+				context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir, 3, types.AllSteps(),
+			); !errors.Is(err, pipeline.ErrSourceRefSuperseded) {
+				t.Fatalf("reconcile error = %v, want superseded source refusal", err)
+			}
+			if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+				t.Fatalf("reconciliation published %s, want unchanged %s", got, sctx.Run.BaseSHA)
+			}
+			exactRecoveryReconcilePoint = oldPoint
+		})
+	}
+}
+
+func TestExactRecoveryReconciliationPersistsProviderIndependentRemoteAmbiguity(t *testing.T) {
+	oldLsRemote := exactRecoveryLsRemote
+	t.Cleanup(func() {
+		exactRecoveryLsRemote = oldLsRemote
+	})
+	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
+	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+	if operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID); err != nil || operation != nil {
+		t.Fatalf("provider-neutral recovery unexpectedly has operation %#v, %v", operation, err)
+	}
+	exactRecoveryLsRemote = func(context.Context, string, string, string) (git.RemoteRefObservation, error) {
+		return git.RemoteRefObservation{Invalid: git.RemoteRefDuplicate}, nil
+	}
+	if _, err := ReconcileStaleExactFinalHeadPushCustody(
+		context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir, 3, types.AllSteps(),
+	); err == nil {
+		t.Fatal("duplicate remote-ref result was accepted")
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity == nil || ambiguity.Classification != git.RemoteRefDuplicate {
+		t.Fatalf("duplicate remote-ref result was not durably ambiguous: %#v", ambiguity)
+	}
+	restarted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run = restarted
+	exactRecoveryLsRemote = func(context.Context, string, string, string) (git.RemoteRefObservation, error) {
+		return git.RemoteRefObservation{OID: sctx.Run.HeadSHA}, nil
+	}
+	if _, err := ReconcileStaleExactFinalHeadPushCustody(
+		context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir, 3, types.AllSteps(),
+	); err == nil {
+		t.Fatal("later exact OID erased durable remote-ref ambiguity")
+	}
+	after, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after == nil || *after != *ambiguity {
+		t.Fatalf("later exact OID changed terminal ambiguity: before=%#v after=%#v", ambiguity, after)
+	}
+	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+		t.Fatalf("ambiguous recovery published %s, want unchanged %s", got, sctx.Run.BaseSHA)
+	}
+}
+
+func TestExactRecoveryReconciliationPersistsUnexpectedOIDAcrossRestart(t *testing.T) {
+	oldLsRemote := exactRecoveryLsRemote
+	t.Cleanup(func() {
+		exactRecoveryLsRemote = oldLsRemote
+	})
+	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
+	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+	thirdOID := supersedingExactRecoveryCommit(t, sctx)
+	exactRecoveryLsRemote = func(context.Context, string, string, string) (git.RemoteRefObservation, error) {
+		return git.RemoteRefObservation{OID: thirdOID}, nil
+	}
+	if _, err := ReconcileStaleExactFinalHeadPushCustody(
+		context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir, 3, types.AllSteps(),
+	); err == nil {
+		t.Fatal("unexpected remote OID was accepted")
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity == nil ||
+		ambiguity.Classification != db.ExactRecoveryRemoteRefUnexpectedOID ||
+		ambiguity.ObservedOID != thirdOID ||
+		ambiguity.SourceRef != "refs/heads/feature" {
+		t.Fatalf("unexpected remote OID was not durably recorded: %#v", ambiguity)
+	}
+	restarted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run = restarted
+	for _, later := range []string{sctx.Run.BaseSHA, sctx.Run.HeadSHA} {
+		exactRecoveryLsRemote = func(context.Context, string, string, string) (git.RemoteRefObservation, error) {
+			return git.RemoteRefObservation{OID: later}, nil
+		}
+		if _, err := ReconcileStaleExactFinalHeadPushCustody(
+			context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir, 3, types.AllSteps(),
+		); err == nil {
+			t.Fatalf("later OID %s erased unexpected remote OID", later)
+		}
+	}
+	after, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after == nil || *after != *ambiguity {
+		t.Fatalf("restart changed terminal unexpected OID: before=%#v after=%#v", ambiguity, after)
+	}
+	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+		t.Fatalf("unexpected OID recovery published %s, want unchanged %s", got, sctx.Run.BaseSHA)
+	}
+}
+
+func TestExactRecoveryReconcileWaitPreservesCancellationCause(t *testing.T) {
+	cause := errors.New("cancel recovery probe")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(cause)
+	if err := exactRecoveryReconcileWait(ctx, time.Hour); !errors.Is(err, cause) {
+		t.Fatalf("wait error = %v, want %v", err, cause)
 	}
 }
 

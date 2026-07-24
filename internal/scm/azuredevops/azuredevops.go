@@ -5,6 +5,7 @@ package azuredevops
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
@@ -45,11 +47,13 @@ type CmdFactory func(ctx context.Context, name string, args ...string) *exec.Cmd
 
 // Host talks to Azure DevOps through the az CLI (azure-devops extension).
 type Host struct {
-	cmd          CmdFactory
-	cliAvailable func() bool
-	org          string // organization URL, e.g. https://dev.azure.com/myorg
-	project      string // project name (may contain spaces)
-	repo         string // repository name
+	cmd                     CmdFactory
+	cliAvailable            func() bool
+	org                     string // organization URL, e.g. https://dev.azure.com/myorg
+	project                 string // project name (may contain spaces)
+	repo                    string // repository name
+	recoveryRefPollInterval time.Duration
+	recoveryRefObserved     func(string)
 }
 
 // New builds a Host. cliAvailable reports whether the az binary is resolvable
@@ -60,11 +64,12 @@ type Host struct {
 // fails on every poll. project and repo name the repository.
 func New(cmd CmdFactory, cliAvailable func() bool, org, project, repo string) *Host {
 	return &Host{
-		cmd:          cmd,
-		cliAvailable: cliAvailable,
-		org:          strings.TrimSpace(org),
-		project:      strings.TrimSpace(project),
-		repo:         strings.TrimSpace(repo),
+		cmd:                     cmd,
+		cliAvailable:            cliAvailable,
+		org:                     strings.TrimSpace(org),
+		project:                 strings.TrimSpace(project),
+		repo:                    strings.TrimSpace(repo),
+		recoveryRefPollInterval: 100 * time.Millisecond,
 	}
 }
 
@@ -75,7 +80,7 @@ func (h *Host) Provider() scm.Provider { return scm.ProviderAzureDevOps }
 // yet wired up - the az CLI has no first-class build-log command, so callers
 // gate on FailedCheckLogs and skip it.
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: false}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: false, RecoverySnapshot: true}
 }
 
 // orgArgs scopes a command to the organization. The show/update/policy-list
@@ -218,6 +223,176 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		return nil, fmt.Errorf("az repos pr update: %w", err)
 	}
 	return pr, nil
+}
+
+func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, error) {
+	got, err := h.showPR(ctx, pr)
+	if err != nil {
+		return scm.PRContent{}, err
+	}
+	return scm.PRContent{Title: got.Title, Body: got.Description}, nil
+}
+
+func (h *Host) ExpectedRepository() string {
+	return recoveryRepositoryIdentity(h.project, h.repo)
+}
+
+func (h *Host) GetPRSnapshot(ctx context.Context, pr *scm.PR, request scm.PRSnapshotRequest) (scm.PRSnapshot, error) {
+	got, err := h.showPR(ctx, pr)
+	if err != nil {
+		return scm.PRSnapshot{}, err
+	}
+	sourceRef := strings.TrimSpace(got.SourceRefName)
+	state := normalizePRState(got.Status)
+	headSHA := ""
+	if state == scm.PRStateMerged && request.AllowMergedSourceDeletion {
+		headSHA = strings.TrimSpace(got.LastMergeSourceCommit.CommitID)
+		if !validAzureObjectID(headSHA) || headSHA != strings.TrimSpace(request.ExpectedHead) {
+			return scm.PRSnapshot{}, fmt.Errorf("azure merged recovery source head is missing or unexpected")
+		}
+	} else {
+		headSHA, err = h.resolveRecoverySourceHead(ctx, sourceRef, request)
+		if err != nil {
+			return scm.PRSnapshot{}, err
+		}
+	}
+	number := ""
+	if got.PullRequestID > 0 {
+		number = strconv.Itoa(got.PullRequestID)
+	}
+	return scm.PRSnapshot{
+		Repository: recoveryRepositoryIdentity(got.Repository.Project.Name, got.Repository.Name),
+		Number:     number,
+		URL:        h.toPR(got).URL,
+		State:      state,
+		Merged:     state == scm.PRStateMerged,
+		HeadSHA:    headSHA,
+		HeadRef:    strings.TrimPrefix(sourceRef, "refs/heads/"),
+		BaseRef:    strings.TrimPrefix(strings.TrimSpace(got.TargetRefName), "refs/heads/"),
+		Title:      got.Title,
+		Body:       got.Description,
+	}, nil
+}
+
+func (h *Host) resolveRecoverySourceHead(ctx context.Context, sourceRef string, request scm.PRSnapshotRequest) (string, error) {
+	sourceRef = strings.TrimSpace(sourceRef)
+	expectedHead := strings.TrimSpace(request.ExpectedHead)
+	if !strings.HasPrefix(sourceRef, "refs/heads/") || strings.TrimPrefix(sourceRef, "refs/heads/") == "" {
+		return "", fmt.Errorf("azure recovery PR source ref is malformed")
+	}
+	if !validAzureObjectID(expectedHead) {
+		return "", fmt.Errorf("azure recovery expected head is malformed")
+	}
+	filter := strings.TrimPrefix(sourceRef, "refs/")
+	for {
+		refs, err := h.listRefs(ctx, filter)
+		if err != nil {
+			return "", err
+		}
+		if len(refs) != 1 {
+			observation := "multiple"
+			if len(refs) == 0 {
+				observation = "missing"
+			}
+			if err := recordRecoveryRefObservation(ctx, request, observation); err != nil {
+				return "", err
+			}
+			return "", fmt.Errorf("azure recovery source ref lookup returned %d matches", len(refs))
+		}
+		if strings.TrimSpace(refs[0].Name) != sourceRef {
+			if err := recordRecoveryRefObservation(ctx, request, "name-mismatch"); err != nil {
+				return "", err
+			}
+			return "", fmt.Errorf("azure recovery source ref lookup returned %q, want %q", refs[0].Name, sourceRef)
+		}
+		current := strings.TrimSpace(refs[0].ObjectID)
+		if !validAzureObjectID(current) {
+			if err := recordRecoveryRefObservation(ctx, request, "malformed"); err != nil {
+				return "", err
+			}
+			return "", fmt.Errorf("azure recovery source ref object ID is malformed")
+		}
+		if err := recordRecoveryRefObservation(ctx, request, current); err != nil {
+			return "", err
+		}
+		if current == expectedHead {
+			return current, nil
+		}
+		if current != strings.TrimSpace(request.AllowedStaleHead) {
+			return "", fmt.Errorf("azure recovery source ref is unexpected: %s", current)
+		}
+		if h.recoveryRefObserved != nil {
+			h.recoveryRefObserved(current)
+		}
+		remaining := time.Until(request.ReconcileUntil)
+		if request.ReconcileUntil.IsZero() {
+			return "", fmt.Errorf("azure recovery source ref is %s, want %s", current, expectedHead)
+		}
+		if remaining <= 0 {
+			if err := recordRecoveryRefObservation(ctx, request, "timeout"); err != nil {
+				return "", err
+			}
+			return "", fmt.Errorf("azure recovery source ref visibility timed out at %s, want %s", current, expectedHead)
+		}
+		delay := h.recoveryRefPollInterval
+		if delay <= 0 || delay > remaining {
+			delay = remaining
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func recordRecoveryRefObservation(ctx context.Context, request scm.PRSnapshotRequest, observed string) error {
+	if request.RecordObservation == nil {
+		return nil
+	}
+	if err := request.RecordObservation(ctx, observed); err != nil {
+		return fmt.Errorf("persist Azure recovery source ref observation %q: %w", observed, err)
+	}
+	return nil
+}
+
+func (h *Host) listRefs(ctx context.Context, filter string) ([]azRef, error) {
+	args := []string{"repos", "ref", "list", "--filter", filter}
+	args = append(args, h.scopeArgs()...)
+	args = append(args, "--output", "json")
+	out, err := outputJSON(h.cmd(ctx, "az", args...))
+	if err != nil {
+		return nil, fmt.Errorf("az repos ref list: %w", err)
+	}
+	var refs []azRef
+	if err := json.Unmarshal(out, &refs); err != nil {
+		return nil, fmt.Errorf("az repos ref list: parse response: %w", err)
+	}
+	return refs, nil
+}
+
+func validAzureObjectID(value string) bool {
+	if len(value) != 40 || strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func recoveryRepositoryIdentity(project, repo string) string {
+	project = strings.TrimSpace(project)
+	repo = strings.TrimSpace(repo)
+	if project == "" || repo == "" {
+		return ""
+	}
+	return project + "/" + repo
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {

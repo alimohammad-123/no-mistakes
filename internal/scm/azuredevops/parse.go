@@ -9,19 +9,29 @@ import (
 
 // azPR is the subset of `az repos pr show/list/create` JSON output we consume.
 type azPR struct {
-	PullRequestID int    `json:"pullRequestId"`
-	Status        string `json:"status"`      // active | completed | abandoned
-	MergeStatus   string `json:"mergeStatus"` // notSet | queued | conflicts | succeeded | rejectedByPolicy | failure
-	SourceRefName string `json:"sourceRefName"`
-	TargetRefName string `json:"targetRefName"`
-	URL           string `json:"url"` // _apis/... endpoint - NOT browsable
-	Repository    struct {
+	PullRequestID         int    `json:"pullRequestId"`
+	Title                 string `json:"title"`
+	Description           string `json:"description"`
+	Status                string `json:"status"`      // active | completed | abandoned
+	MergeStatus           string `json:"mergeStatus"` // notSet | queued | conflicts | succeeded | rejectedByPolicy | failure
+	SourceRefName         string `json:"sourceRefName"`
+	TargetRefName         string `json:"targetRefName"`
+	URL                   string `json:"url"` // _apis/... endpoint - NOT browsable
+	LastMergeSourceCommit struct {
+		CommitID string `json:"commitId"`
+	} `json:"lastMergeSourceCommit"`
+	Repository struct {
 		Name    string `json:"name"`
 		WebURL  string `json:"webUrl"` // .../_git/{repo} - browsable base
 		Project struct {
 			Name string `json:"name"`
 		} `json:"project"`
 	} `json:"repository"`
+}
+
+type azRef struct {
+	Name     string `json:"name"`
+	ObjectID string `json:"objectId"`
 }
 
 // policyEval is the subset of `az repos pr policy list` evaluation records we

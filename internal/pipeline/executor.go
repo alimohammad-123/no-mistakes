@@ -31,9 +31,10 @@ type EventFunc func(ipc.Event)
 const (
 	defaultGateReconcileInterval = 2 * time.Minute
 	defaultGateReconcileTimeout  = 30 * time.Second
-	// maxHeadValidationReplays bounds distinct stale candidate heads. Restarting
+	// MaxHeadValidationReplays bounds distinct stale candidate heads. Restarting
 	// the same persisted target is idempotent and does not consume the budget.
-	maxHeadValidationReplays = 3
+	MaxHeadValidationReplays = 3
+	maxHeadValidationReplays = MaxHeadValidationReplays
 )
 
 var errHeadValidationReplayRequired = errors.New("head validation replay required")
@@ -411,6 +412,17 @@ func ValidateHeadValidationRecovery(database *db.DB, run *db.Run, steps []Step) 
 	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince != nil || run.PushActive || run.CustodyReturnedAt != nil {
 		return fmt.Errorf("run is not an active pipeline-owned head-validation candidate")
 	}
+	recovery, err := database.GetRunRecoveryEvent(run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		return fmt.Errorf("read exact final-head recovery provenance: %w", err)
+	}
+	if recovery != nil {
+		expected := make([]types.StepName, len(steps))
+		for index, step := range steps {
+			expected[index] = step.Name()
+		}
+		return database.ValidateActiveExactFinalHeadCapacityRecovery(run.ID, maxHeadValidationReplays, expected)
+	}
 	results, err := database.GetStepsByRun(run.ID)
 	if err != nil {
 		return fmt.Errorf("get head-validation recovery steps: %w", err)
@@ -690,7 +702,45 @@ func (e *Executor) ResumeHeadValidation(ctx context.Context, run *db.Run, repo *
 	e.initializeRunScopes(run.ID)
 
 	start := -1
-	if run.ValidationTargetSHA != nil {
+	recovery, err := e.db.GetRunRecoveryEvent(run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		return e.failRun(run, repo, fmt.Errorf("read exact final-head recovery provenance: %w", err), ctx)
+	}
+	if recovery != nil {
+		documentIndex := e.stepIndex(types.StepDocument)
+		if documentIndex < 0 {
+			return e.failRun(run, repo, fmt.Errorf("exact final-head recovery has no Document step"), ctx)
+		}
+		results, readErr := e.db.GetStepsByRun(run.ID)
+		if readErr != nil {
+			return e.failRun(run, repo, fmt.Errorf("read exact final-head recovery suffix: %w", readErr), ctx)
+		}
+		start = -1
+		for index := documentIndex; index < len(results); index++ {
+			switch results[index].Status {
+			case types.StepStatusCompleted, types.StepStatusSkipped:
+				continue
+			case types.StepStatusRunning, types.StepStatusFixing:
+				if err := e.db.ResetActiveStepForRecovery(run.ID, results[index].StepName); err != nil {
+					return e.failRun(run, repo, err, ctx)
+				}
+				if results[index].StepName == types.StepCI {
+					if err := e.db.SetRunCIReady(run.ID, false); err != nil {
+						return e.failRun(run, repo, err, ctx)
+					}
+				}
+				start = index
+			case types.StepStatusPending:
+				start = index
+			default:
+				return e.failRun(run, repo, fmt.Errorf("exact final-head recovery suffix step %s is %s", results[index].StepName, results[index].Status), ctx)
+			}
+			break
+		}
+		if start < 0 {
+			start = len(e.steps)
+		}
+	} else if run.ValidationTargetSHA != nil {
 		if err := e.scheduleHeadValidationReplay(run); err != nil {
 			return e.failRun(run, repo, err, ctx)
 		}
@@ -1106,7 +1156,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
 			if daemonShutdownCancellation(ctx, err) && e.configuredTestRequired() &&
-				(run.ValidationTargetSHA != nil || stepName == types.StepCI) {
+				(run.ValidationTargetSHA != nil || stepName == types.StepCI || e.hasExactFinalHeadRecovery(run.ID)) {
 				return false, fmt.Errorf("%w: %s", ErrValidationRunInterrupted, stepName)
 			}
 			durationMS := executionMS + roundDuration
@@ -1125,6 +1175,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "", redactedErr, &durationMS)
 			if cause := authoritativeContextCause(ctx, err); cause != nil {
 				return false, fmt.Errorf("step %s failed: %w", stepName, cause)
+			}
+			if errors.Is(err, ErrSourceRefSuperseded) {
+				return false, fmt.Errorf("step %s failed: %w", stepName, ErrSourceRefSuperseded)
 			}
 			return false, fmt.Errorf("step %s failed: %s", stepName, redactedErr)
 		}
@@ -1620,7 +1673,7 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if errors.Is(err, ErrParkedRunInterrupted) || errors.Is(err, ErrValidationRunInterrupted) {
 		return err
 	}
-	if e.configuredTestRequired() && run.ValidationTargetSHA != nil {
+	if e.configuredTestRequired() && (run.ValidationTargetSHA != nil || e.hasExactFinalHeadRecovery(run.ID)) {
 		for _, ctx := range ctxs {
 			if daemonShutdownCancellation(ctx, err) {
 				return fmt.Errorf("%w: %v", ErrValidationRunInterrupted, err)
@@ -1638,9 +1691,13 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	}
 	runStatus := types.RunFailed
 	if errors.Is(cancellationCause, context.Canceled) ||
+		errors.Is(err, ErrSourceRefSuperseded) ||
 		errMsg == types.RunCancelReasonAbortedByUser ||
 		errMsg == types.RunCancelReasonSuperseded {
 		runStatus = types.RunCancelled
+	}
+	if errors.Is(err, ErrSourceRefSuperseded) {
+		errMsg = types.RunCancelReasonSuperseded
 	}
 	if dbErr := e.db.UpdateRunErrorStatus(run.ID, errMsg, runStatus); dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
@@ -1649,6 +1706,11 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	run.Error = &errMsg
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	return err
+}
+
+func (e *Executor) hasExactFinalHeadRecovery(runID string) bool {
+	event, err := e.db.GetRunRecoveryEvent(runID, db.RunRecoveryExactFinalHeadCapacity)
+	return err == nil && event != nil
 }
 
 // authoritativeContextCause returns a context cause only when the step error

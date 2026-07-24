@@ -1,17 +1,22 @@
 package git
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
@@ -58,15 +63,128 @@ func Run(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd.Dir = dir
 	cmd.Env = NonInteractiveEnv(dir)
 	winproc.Harden(cmd)
+	// exec.Cmd reports a context-driven SIGKILL as an ExitError. Record only a
+	// successful CommandContext leader kill so callers can distinguish it from
+	// an unrelated Git failure that merely raced with cancellation.
+	var leaderKillApplied atomic.Bool
+	cancelCommand := cmd.Cancel
+	cmd.Cancel = func() error {
+		err := cancelCommand()
+		if err == nil {
+			leaderKillApplied.Store(true)
+		}
+		return err
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""
 		if ee, ok := err.(*exec.ExitError); ok {
 			stderr = strings.TrimSpace(string(ee.Stderr))
 		}
+		if shellenv.CommandLeaderCanceled(cmd, err, leaderKillApplied.Load()) {
+			if cause := context.Cause(ctx); cause != nil {
+				return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), cause, safeurl.RedactText(stderr))
+			}
+		}
 		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func WithPreparedRefLock(ctx context.Context, dir, ref, expectedOID string, fn func() error) error {
+	if trustedGitExecutableErr != nil {
+		return trustedGitExecutableErr
+	}
+	ref = strings.TrimSpace(ref)
+	expectedOID = strings.TrimSpace(expectedOID)
+	if ref == "" || expectedOID == "" || fn == nil {
+		return fmt.Errorf("prepared ref lock requires a ref, expected object, and operation")
+	}
+	args := []string{"update-ref", "--stdin"}
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	cmd := exec.CommandContext(ctx, trustedGitExecutable, args...)
+	cmd.Dir = dir
+	cmd.Env = NonInteractiveEnv(dir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("prepare ref lock stdin: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("prepare ref lock stdout: %w", err)
+	}
+	shellenv.ConfigureShellCommand(cmd)
+	if err := shellenv.StartShellCommand(cmd); err != nil {
+		return fmt.Errorf("start prepared ref lock: %w", err)
+	}
+	defer shellenv.TerminateShellCommandGroup(cmd)
+	reader := bufio.NewReader(stdout)
+	write := func(value string) error {
+		if _, err := io.WriteString(stdin, value); err != nil {
+			return err
+		}
+		return nil
+	}
+	expect := func(want string) error {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(line) != want {
+			return fmt.Errorf("unexpected update-ref response %q", strings.TrimSpace(line))
+		}
+		return nil
+	}
+	finish := func(command, response string) error {
+		if err := write(command + "\n"); err != nil {
+			return err
+		}
+		if err := expect(response); err != nil {
+			return err
+		}
+		if err := stdin.Close(); err != nil {
+			return err
+		}
+		if err := cmd.Wait(); err != nil {
+			return fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		}
+		return nil
+	}
+	abort := true
+	defer func() {
+		if abort {
+			_ = stdin.Close()
+			_ = cmd.Wait()
+		}
+	}()
+	if err := write("start\n"); err != nil {
+		return fmt.Errorf("start ref transaction: %w", err)
+	}
+	if err := expect("start: ok"); err != nil {
+		return fmt.Errorf("start ref transaction: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if err := write(fmt.Sprintf("update %s %s %s\nprepare\n", ref, expectedOID, expectedOID)); err != nil {
+		return fmt.Errorf("prepare ref transaction: %w", err)
+	}
+	if err := expect("prepare: ok"); err != nil {
+		return fmt.Errorf("prepare ref transaction: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if err := fn(); err != nil {
+		if abortErr := finish("abort", "abort: ok"); abortErr != nil {
+			return fmt.Errorf("%w; release prepared ref lock: %v", err, abortErr)
+		}
+		abort = false
+		return err
+	}
+	if err := finish("commit", "commit: ok"); err != nil {
+		return fmt.Errorf("commit prepared ref lock: %w", err)
+	}
+	abort = false
+	return nil
 }
 
 // isBareGitDir reports whether dir is itself a git directory (a bare repo),
@@ -455,6 +573,64 @@ func PushSHA(ctx context.Context, dir, remote, sourceSHA, ref, expectedSHA strin
 	return PushSHAWithOptions(ctx, dir, remote, sourceSHA, ref, expectedSHA, forceWithLease, nil)
 }
 
+func PushSHAWithReceipt(ctx context.Context, dir, remote, sourceSHA, ref, expectedSHA string, forceWithLease bool, receiptRef string) error {
+	if !forceWithLease {
+		return fmt.Errorf("push receipt requires an exact force-with-lease")
+	}
+	args, err := atomicPushReceiptArgs(remote, sourceSHA, ref, expectedSHA, receiptRef, false)
+	if err != nil {
+		return err
+	}
+	out, err := Run(ctx, dir, args...)
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) >= 2 && fields[0] == "=" && strings.HasSuffix(fields[1], ":"+ref) {
+			return fmt.Errorf("%w: %s", ErrAtomicPushTargetUnchanged, ref)
+		}
+	}
+	return nil
+}
+
+var ErrAtomicPushTargetUnchanged = errors.New("atomic Push target was already current")
+
+func CheckAtomicPushReceiptCapability(ctx context.Context, dir, remote, sourceSHA, ref, expectedSHA, receiptRef string) error {
+	args, err := atomicPushReceiptArgs(remote, sourceSHA, ref, expectedSHA, receiptRef, true)
+	if err != nil {
+		return err
+	}
+	if _, err := Run(ctx, dir, args...); err != nil {
+		return fmt.Errorf("atomic Push receipt capability is unavailable: %w", err)
+	}
+	return nil
+}
+
+func atomicPushReceiptArgs(remote, sourceSHA, ref, expectedSHA, receiptRef string, dryRun bool) ([]string, error) {
+	remote = strings.TrimSpace(remote)
+	sourceSHA = strings.TrimSpace(sourceSHA)
+	ref = strings.TrimSpace(ref)
+	expectedSHA = strings.TrimSpace(expectedSHA)
+	receiptRef = strings.TrimSpace(receiptRef)
+	if remote == "" || (len(sourceSHA) != 40 && len(sourceSHA) != 64) ||
+		ref == "" || (len(expectedSHA) != 40 && len(expectedSHA) != 64) ||
+		len(sourceSHA) != len(expectedSHA) || receiptRef == "" || receiptRef == ref {
+		return nil, fmt.Errorf("atomic Push receipt identity is incomplete")
+	}
+	zeroOID := strings.Repeat("0", len(sourceSHA))
+	args := []string{
+		"push", "--atomic", "--porcelain",
+		fmt.Sprintf("--force-with-lease=%s:%s", ref, expectedSHA),
+		fmt.Sprintf("--force-with-lease=%s:%s", receiptRef, zeroOID),
+	}
+	if dryRun {
+		args = append(args, "--dry-run", "--no-verify")
+	}
+	args = append(args, remote, sourceSHA+":"+ref, sourceSHA+":"+receiptRef)
+	return args, nil
+}
+
 // PushSHAWithOptions is PushSHA with per-push options.
 func PushSHAWithOptions(ctx context.Context, dir, remote, sourceSHA, ref, expectedSHA string, forceWithLease bool, pushOptions []string) error {
 	args := []string{"push"}
@@ -474,21 +650,115 @@ func PushSHAWithOptions(ctx context.Context, dir, remote, sourceSHA, ref, expect
 	return err
 }
 
+const (
+	RemoteRefMissing          = "missing"
+	RemoteRefDuplicate        = "duplicate"
+	RemoteRefPeeled           = "peeled"
+	RemoteRefIdentityMismatch = "identity-mismatch"
+	RemoteRefMalformed        = "malformed"
+)
+
+type RemoteRefObservation struct {
+	OID     string
+	Invalid string
+}
+
+func (o RemoteRefObservation) Value() string {
+	if o.Invalid != "" {
+		return o.Invalid
+	}
+	return o.OID
+}
+
+type RemoteRefObservationError struct {
+	Ref         string
+	Observation string
+}
+
+func (e *RemoteRefObservationError) Error() string {
+	return fmt.Sprintf("remote ref %s returned %s state", e.Ref, e.Observation)
+}
+
+func ParseExactRemoteRefOutput(out, ref, objectFormat string) RemoteRefObservation {
+	ref = strings.TrimSpace(ref)
+	if out == "" {
+		return RemoteRefObservation{Invalid: RemoteRefMissing}
+	}
+	lines := strings.Split(out, "\n")
+	if len(lines) != 1 {
+		return RemoteRefObservation{Invalid: RemoteRefDuplicate}
+	}
+	fields := strings.Split(lines[0], "\t")
+	if len(fields) != 2 || fields[0] == "" || fields[1] == "" ||
+		strings.TrimSpace(fields[0]) != fields[0] ||
+		strings.TrimSpace(fields[1]) != fields[1] {
+		return RemoteRefObservation{Invalid: RemoteRefMalformed}
+	}
+	if strings.HasSuffix(fields[1], "^{}") {
+		return RemoteRefObservation{Invalid: RemoteRefPeeled}
+	}
+	if ref == "" || fields[1] != ref {
+		return RemoteRefObservation{Invalid: RemoteRefIdentityMismatch}
+	}
+	oidLength := 0
+	switch strings.TrimSpace(objectFormat) {
+	case "sha1":
+		oidLength = 40
+	case "sha256":
+		oidLength = 64
+	default:
+		return RemoteRefObservation{Invalid: RemoteRefMalformed}
+	}
+	if len(fields[0]) != oidLength {
+		return RemoteRefObservation{Invalid: RemoteRefMalformed}
+	}
+	for _, char := range fields[0] {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return RemoteRefObservation{Invalid: RemoteRefMalformed}
+		}
+	}
+	return RemoteRefObservation{OID: fields[0]}
+}
+
+func ParseExactRemoteRefOutputForOID(out, ref, expectedOID string) RemoteRefObservation {
+	objectFormat := ""
+	switch len(strings.TrimSpace(expectedOID)) {
+	case 40:
+		objectFormat = "sha1"
+	case 64:
+		objectFormat = "sha256"
+	}
+	return ParseExactRemoteRefOutput(out, ref, objectFormat)
+}
+
+func LsRemoteExact(ctx context.Context, dir, remote, ref string) (RemoteRefObservation, error) {
+	out, err := Run(ctx, dir, "ls-remote", remote, ref)
+	if err != nil {
+		return RemoteRefObservation{}, err
+	}
+	if strings.TrimSpace(out) == "" {
+		return RemoteRefObservation{Invalid: RemoteRefMissing}, nil
+	}
+	objectFormat, err := Run(ctx, dir, "rev-parse", "--show-object-format")
+	if err != nil {
+		return RemoteRefObservation{}, fmt.Errorf("resolve repository object format: %w", err)
+	}
+	return ParseExactRemoteRefOutput(out, ref, objectFormat), nil
+}
+
 // LsRemote returns the SHA of a ref on a remote. Returns empty string if the ref doesn't exist.
 func LsRemote(ctx context.Context, dir, remote, ref string) (string, error) {
-	out, err := Run(ctx, dir, "ls-remote", remote, ref)
+	observation, err := LsRemoteExact(ctx, dir, remote, ref)
 	if err != nil {
 		return "", err
 	}
-	if out == "" {
+	if observation.Invalid == RemoteRefMissing {
 		return "", nil
 	}
-	// Output format: "<sha>\t<ref>"
-	parts := strings.Fields(out)
-	if len(parts) < 1 {
-		return "", nil
+	if observation.Invalid != "" {
+		return "", &RemoteRefObservationError{Ref: ref, Observation: observation.Invalid}
 	}
-	return parts[0], nil
+	return observation.OID, nil
 }
 
 // HasUncommittedChanges reports whether the working tree or index differs from HEAD.

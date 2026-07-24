@@ -2,10 +2,12 @@ package azuredevops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,6 +86,225 @@ func TestFindPRReturnsBrowsableURL(t *testing.T) {
 	if pr.URL != "https://dev.azure.com/myorg/myproject/_git/myrepo/pullrequest/42" {
 		t.Fatalf("FindPR() URL = %q, want browsable pullrequest URL", pr.URL)
 	}
+}
+
+func TestGetPRSnapshotReadsAuthoritativeRecoveryState(t *testing.T) {
+	t.Parallel()
+	const (
+		staleMergeHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		liveHead       = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	h := newTestHost(map[string]azdoTestResponse{
+		"az repos pr show --id 42 --organization " + testOrg + " --output json": {
+			stdout: `{"pullRequestId":42,"title":"fix: exact recovery","description":"body","status":"active","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main","lastMergeSourceCommit":{"commitId":"` + staleMergeHead + `"},"repository":{"name":"myrepo","webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo","project":{"name":"myproject"}}}` + "\n",
+		},
+		"az repos ref list --filter heads/feature --organization " + testOrg + " --project " + testProject + " --repository " + testRepo + " --output json": {
+			stdout: `[{"name":"refs/heads/feature","objectId":"` + liveHead + `"}]` + "\n",
+		},
+	})
+	snapshot, err := h.GetPRSnapshot(
+		context.Background(), &scm.PR{Number: "42"}, scm.PRSnapshotRequest{ExpectedHead: liveHead},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.Capabilities().RecoverySnapshot || h.ExpectedRepository() != "myproject/myrepo" ||
+		snapshot.Repository != "myproject/myrepo" || snapshot.Number != "42" ||
+		snapshot.URL != "https://dev.azure.com/myorg/myproject/_git/myrepo/pullrequest/42" ||
+		snapshot.State != scm.PRStateOpen || snapshot.Merged ||
+		snapshot.HeadSHA != liveHead || snapshot.HeadRef != "feature" ||
+		snapshot.BaseRef != "main" || snapshot.Title != "fix: exact recovery" ||
+		snapshot.Body != "body" {
+		t.Fatalf("PR snapshot = %#v", snapshot)
+	}
+}
+
+func TestGetPRSnapshotProvesMergedDeletedSourceFromMergeMetadata(t *testing.T) {
+	t.Parallel()
+	const mergedHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	showKey := "az repos pr show --id 42 --organization " + testOrg + " --output json"
+	for _, tc := range []struct {
+		name string
+		head string
+		ok   bool
+	}{
+		{name: "exact merged head", head: mergedHead, ok: true},
+		{name: "unexpected merged head", head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{name: "missing merged head"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHost(map[string]azdoTestResponse{
+				showKey: {
+					stdout: `{"pullRequestId":42,"title":"title","description":"body","status":"completed","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main","lastMergeSourceCommit":{"commitId":"` + tc.head + `"},"repository":{"name":"myrepo","webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo","project":{"name":"myproject"}}}` + "\n",
+				},
+			})
+			snapshot, err := h.GetPRSnapshot(
+				context.Background(), &scm.PR{Number: "42"}, scm.PRSnapshotRequest{
+					ExpectedHead: mergedHead, AllowMergedSourceDeletion: true,
+				},
+			)
+			if tc.ok {
+				if err != nil || snapshot.State != scm.PRStateMerged || !snapshot.Merged || snapshot.HeadSHA != mergedHead {
+					t.Fatalf("merged snapshot = %#v, %v", snapshot, err)
+				}
+			} else if err == nil {
+				t.Fatalf("merged snapshot accepted head %q", tc.head)
+			}
+		})
+	}
+}
+
+func TestGetPRSnapshotRejectsAmbiguousRecoveryRefs(t *testing.T) {
+	t.Parallel()
+	const expectedHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	tests := []struct {
+		name            string
+		refs            string
+		wantObservation string
+	}{
+		{name: "missing", refs: `[]`, wantObservation: "missing"},
+		{name: "duplicate", refs: `[{"name":"refs/heads/feature","objectId":"` + expectedHead + `"},{"name":"refs/heads/feature/child","objectId":"` + expectedHead + `"}]`, wantObservation: "multiple"},
+		{name: "wrong name", refs: `[{"name":"refs/heads/feature/child","objectId":"` + expectedHead + `"}]`, wantObservation: "name-mismatch"},
+		{name: "malformed object", refs: `[{"name":"refs/heads/feature","objectId":"not-a-sha"}]`, wantObservation: "malformed"},
+		{name: "force moved", refs: `[{"name":"refs/heads/feature","objectId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]`, wantObservation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			recorded := ""
+			h := newTestHost(map[string]azdoTestResponse{
+				"az repos pr show --id 42 --organization " + testOrg + " --output json": {
+					stdout: `{"pullRequestId":42,"title":"title","description":"body","status":"active","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main","repository":{"name":"myrepo","webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo","project":{"name":"myproject"}}}` + "\n",
+				},
+				"az repos ref list --filter heads/feature --organization " + testOrg + " --project " + testProject + " --repository " + testRepo + " --output json": {
+					stdout: tc.refs + "\n",
+				},
+			})
+			if _, err := h.GetPRSnapshot(
+				context.Background(), &scm.PR{Number: "42"}, scm.PRSnapshotRequest{
+					ExpectedHead: expectedHead,
+					RecordObservation: func(_ context.Context, observed string) error {
+						recorded = observed
+						return errors.New("durable ambiguity")
+					},
+				},
+			); err == nil {
+				t.Fatal("ambiguous Azure recovery ref was accepted")
+			}
+			if recorded != tc.wantObservation {
+				t.Fatalf("recorded observation = %q, want %q", recorded, tc.wantObservation)
+			}
+		})
+	}
+}
+
+func TestGetPRSnapshotBoundsLiveRefReconciliation(t *testing.T) {
+	t.Parallel()
+	const (
+		staleHead    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		expectedHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	showKey := "az repos pr show --id 42 --organization " + testOrg + " --output json"
+	refKey := "az repos ref list --filter heads/feature --organization " + testOrg + " --project " + testProject + " --repository " + testRepo + " --output json"
+	show := azdoTestResponse{
+		stdout: `{"pullRequestId":42,"title":"title","description":"body","status":"active","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main","repository":{"name":"myrepo","webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo","project":{"name":"myproject"}}}` + "\n",
+	}
+	t.Run("delayed advancement", func(t *testing.T) {
+		var observations []string
+		h := New(azdoSequenceCmdFactory(map[string][]azdoTestResponse{
+			showKey: {show},
+			refKey: {
+				{stdout: `[{"name":"refs/heads/feature","objectId":"` + staleHead + `"}]` + "\n"},
+				{stdout: `[{"name":"refs/heads/feature","objectId":"` + expectedHead + `"}]` + "\n"},
+			},
+		}), func() bool { return true }, testOrg, testProject, testRepo)
+		h.recoveryRefPollInterval = time.Millisecond
+		snapshot, err := h.GetPRSnapshot(
+			context.Background(), &scm.PR{Number: "42"},
+			scm.PRSnapshotRequest{
+				ExpectedHead: expectedHead, AllowedStaleHead: staleHead,
+				ReconcileUntil: time.Now().Add(100 * time.Millisecond),
+				RecordObservation: func(_ context.Context, observed string) error {
+					observations = append(observations, observed)
+					return nil
+				},
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.HeadSHA != expectedHead {
+			t.Fatalf("snapshot head = %s, want %s", snapshot.HeadSHA, expectedHead)
+		}
+		if strings.Join(observations, ",") != staleHead+","+expectedHead {
+			t.Fatalf("observations = %v", observations)
+		}
+	})
+	t.Run("third OID cannot be forgotten", func(t *testing.T) {
+		const thirdHead = "cccccccccccccccccccccccccccccccccccccccc"
+		var observations []string
+		h := New(azdoSequenceCmdFactory(map[string][]azdoTestResponse{
+			showKey: {show},
+			refKey: {
+				{stdout: `[{"name":"refs/heads/feature","objectId":"` + staleHead + `"}]` + "\n"},
+				{stdout: `[{"name":"refs/heads/feature","objectId":"` + thirdHead + `"}]` + "\n"},
+				{stdout: `[{"name":"refs/heads/feature","objectId":"` + expectedHead + `"}]` + "\n"},
+			},
+		}), func() bool { return true }, testOrg, testProject, testRepo)
+		h.recoveryRefPollInterval = time.Millisecond
+		_, err := h.GetPRSnapshot(
+			context.Background(), &scm.PR{Number: "42"},
+			scm.PRSnapshotRequest{
+				ExpectedHead: expectedHead, AllowedStaleHead: staleHead,
+				ReconcileUntil: time.Now().Add(100 * time.Millisecond),
+				RecordObservation: func(_ context.Context, observed string) error {
+					observations = append(observations, observed)
+					if observed == thirdHead {
+						return errors.New("durable ambiguity")
+					}
+					return nil
+				},
+			},
+		)
+		if err == nil || strings.Join(observations, ",") != staleHead+","+thirdHead {
+			t.Fatalf("third-OID result = %v, observations = %v", err, observations)
+		}
+	})
+	t.Run("timeout", func(t *testing.T) {
+		h := New(azdoSequenceCmdFactory(map[string][]azdoTestResponse{
+			showKey: {show},
+			refKey:  {{stdout: `[{"name":"refs/heads/feature","objectId":"` + staleHead + `"}]` + "\n"}},
+		}), func() bool { return true }, testOrg, testProject, testRepo)
+		h.recoveryRefPollInterval = time.Millisecond
+		_, err := h.GetPRSnapshot(
+			context.Background(), &scm.PR{Number: "42"},
+			scm.PRSnapshotRequest{
+				ExpectedHead: expectedHead, AllowedStaleHead: staleHead,
+				ReconcileUntil: time.Now().Add(5 * time.Millisecond),
+			},
+		)
+		if err == nil || !strings.Contains(err.Error(), "visibility timed out") {
+			t.Fatalf("timeout error = %v", err)
+		}
+	})
+	t.Run("cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		h := New(azdoSequenceCmdFactory(map[string][]azdoTestResponse{
+			showKey: {show},
+			refKey:  {{stdout: `[{"name":"refs/heads/feature","objectId":"` + staleHead + `"}]` + "\n"}},
+		}), func() bool { return true }, testOrg, testProject, testRepo)
+		h.recoveryRefPollInterval = time.Hour
+		h.recoveryRefObserved = func(string) { cancel() }
+		_, err := h.GetPRSnapshot(
+			ctx, &scm.PR{Number: "42"},
+			scm.PRSnapshotRequest{
+				ExpectedHead: expectedHead, AllowedStaleHead: staleHead,
+				ReconcileUntil: time.Now().Add(time.Hour),
+			},
+		)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation error = %v, want context canceled", err)
+		}
+	})
 }
 
 func TestFindPRNoMatch(t *testing.T) {
@@ -516,6 +737,89 @@ func azdoTestCmdFactory(responses map[string]azdoTestResponse) CmdFactory {
 			fmt.Sprintf("AZDO_TEST_EXIT_CODE=%d", response.code),
 		)
 		return cmd
+	}
+}
+
+func azdoSequenceCmdFactory(responses map[string][]azdoTestResponse) CmdFactory {
+	var mu sync.Mutex
+	positions := make(map[string]int)
+	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		key := strings.TrimSpace(name + " " + strings.Join(args, " "))
+		mu.Lock()
+		sequence := responses[key]
+		index := positions[key]
+		if index < len(sequence)-1 {
+			positions[key] = index + 1
+		}
+		mu.Unlock()
+		response := azdoTestResponse{stderr: "unexpected command: " + key, code: 1}
+		if len(sequence) > 0 {
+			if index >= len(sequence) {
+				index = len(sequence) - 1
+			}
+			response = sequence[index]
+		}
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestAzdoHelperProcess", "--", key)
+		cmd.Env = azdoSequenceHelperEnv(response)
+		return cmd
+	}
+}
+
+func azdoSequenceHelperEnv(response azdoTestResponse) []string {
+	raceOptions := make([]string, 0, len(strings.Fields(os.Getenv("GORACE")))+1)
+	for _, option := range strings.Fields(os.Getenv("GORACE")) {
+		if !strings.HasPrefix(option, "atexit_sleep_ms=") {
+			raceOptions = append(raceOptions, option)
+		}
+	}
+	raceOptions = append(raceOptions, "atexit_sleep_ms=0")
+
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "GORACE=") {
+			env = append(env, entry)
+		}
+	}
+	return append(env,
+		"GORACE="+strings.Join(raceOptions, " "),
+		"AZDO_TEST_HELPER=1",
+		"AZDO_TEST_STDOUT="+response.stdout,
+		"AZDO_TEST_STDERR="+response.stderr,
+		fmt.Sprintf("AZDO_TEST_EXIT_CODE=%d", response.code),
+	)
+}
+
+func TestAzdoSequenceHelperEnvDisablesRaceExitSleep(t *testing.T) {
+	tests := []struct {
+		name string
+		have string
+		want string
+	}{
+		{name: "unset", want: "atexit_sleep_ms=0"},
+		{
+			name: "preserves other options",
+			have: "halt_on_error=1 strip_path_prefix=/tmp",
+			want: "halt_on_error=1 strip_path_prefix=/tmp atexit_sleep_ms=0",
+		},
+		{
+			name: "replaces existing options",
+			have: "atexit_sleep_ms=1000 halt_on_error=1 atexit_sleep_ms=7",
+			want: "halt_on_error=1 atexit_sleep_ms=0",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GORACE", tc.have)
+			var got []string
+			for _, entry := range azdoSequenceHelperEnv(azdoTestResponse{}) {
+				if strings.HasPrefix(entry, "GORACE=") {
+					got = append(got, strings.TrimPrefix(entry, "GORACE="))
+				}
+			}
+			if len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("GORACE entries = %q, want [%q]", got, tc.want)
+			}
+		})
 	}
 }
 

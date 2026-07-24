@@ -15,6 +15,89 @@ const EnvironmentVariable = "NO_MISTAKES_SOURCE_REF"
 
 const headsPrefix = "refs/heads/"
 
+const recoveryAnchorPrefix = "refs/no-mistakes/recovery/"
+
+func ExactRecoveryAnchorRef(runID string) (string, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" || strings.ContainsAny(runID, "/\\ \t\r\n") {
+		return "", fmt.Errorf("exact recovery run identity is malformed")
+	}
+	ref := recoveryAnchorPrefix + runID + "/exact-final-head"
+	if _, err := gitpkg.Run(context.Background(), ".", "check-ref-format", ref); err != nil {
+		return "", fmt.Errorf("exact recovery anchor ref is malformed: %w", err)
+	}
+	return ref, nil
+}
+
+func EnsureExactRecoveryAnchor(ctx context.Context, workDir, anchorRef, headSHA string) error {
+	if !strings.HasPrefix(anchorRef, recoveryAnchorPrefix) || strings.TrimSpace(headSHA) == "" {
+		return fmt.Errorf("exact recovery anchor identity is invalid")
+	}
+	if _, err := gitpkg.Run(ctx, workDir, "rev-parse", "--verify", headSHA+"^{commit}"); err != nil {
+		return fmt.Errorf("verify exact recovery anchor commit: %w", err)
+	}
+	resolved, err := gitpkg.ResolveRef(ctx, workDir, anchorRef)
+	if err == nil {
+		if resolved != headSHA {
+			return fmt.Errorf("exact recovery anchor %s resolves to %s, want %s", anchorRef, resolved, headSHA)
+		}
+		return nil
+	}
+	if _, err := gitpkg.Run(ctx, workDir, "update-ref", anchorRef, headSHA, "0000000000000000000000000000000000000000"); err != nil {
+		return fmt.Errorf("create exact recovery anchor: %w", err)
+	}
+	resolved, err = gitpkg.ResolveRef(ctx, workDir, anchorRef)
+	if err != nil || resolved != headSHA {
+		return fmt.Errorf("verify exact recovery anchor")
+	}
+	return nil
+}
+
+func VerifyExactRecoveryAnchor(ctx context.Context, workDir, anchorRef, headSHA string) error {
+	if !strings.HasPrefix(anchorRef, recoveryAnchorPrefix) {
+		return fmt.Errorf("exact recovery anchor ref is outside the private namespace")
+	}
+	resolved, err := gitpkg.ResolveRef(ctx, workDir, anchorRef)
+	if err != nil {
+		return fmt.Errorf("resolve exact recovery anchor: %w", err)
+	}
+	if resolved != headSHA {
+		return fmt.Errorf("exact recovery anchor %s resolves to %s, want %s", anchorRef, resolved, headSHA)
+	}
+	return nil
+}
+
+func RetireExactRecoveryAnchor(ctx context.Context, workDir, anchorRef, headSHA, equivalentRef string) (bool, error) {
+	if err := VerifyExactRecoveryAnchor(ctx, workDir, anchorRef, headSHA); err != nil {
+		return false, err
+	}
+	equivalent, err := gitpkg.ResolveRef(ctx, workDir, equivalentRef)
+	if err != nil || equivalent != headSHA {
+		return false, nil
+	}
+	if err := gitpkg.WithPreparedRefLock(ctx, workDir, equivalentRef, headSHA, func() error {
+		if _, err := gitpkg.Run(ctx, workDir, "update-ref", "-d", anchorRef, headSHA); err != nil {
+			return fmt.Errorf("retire exact recovery anchor: %w", err)
+		}
+		if resolved, err := gitpkg.ResolveRef(ctx, workDir, anchorRef); err == nil || resolved != "" {
+			return fmt.Errorf("retire exact recovery anchor: private ref remains")
+		}
+		return nil
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func WithExactRecoveryOwnership(ctx context.Context, workDir, sourceRef, headSHA string, fn func() error) error {
+	if err := VerifyCandidateBinding(ctx, workDir, sourceRef, headSHA); err != nil {
+		return err
+	}
+	return gitpkg.WithPreparedRefLock(ctx, workDir, sourceRef, headSHA, func() error {
+		return fn()
+	})
+}
+
 // CanonicalSourceRefFromBranch derives the only accepted source-ref identity
 // from the branch name frozen at authoritative run intake.
 func CanonicalSourceRefFromBranch(branch string) (string, error) {

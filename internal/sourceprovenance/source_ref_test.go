@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCanonicalSourceRefFromBranch(t *testing.T) {
@@ -141,6 +142,203 @@ func TestBindCandidateIfUnchangedRefusesMovedRefWithoutRewind(t *testing.T) {
 	}
 	if got := gitTest(t, dir, "rev-parse", ref); got != first {
 		t.Fatalf("moved source ref was rewound to %s, want %s", got, first)
+	}
+}
+
+func TestExactRecoveryOwnershipExcludesConcurrentRefUpdate(t *testing.T) {
+	dir := t.TempDir()
+	gitTest(t, dir, "init")
+	gitTest(t, dir, "config", "user.name", "test")
+	gitTest(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", ".")
+	gitTest(t, dir, "commit", "-m", "one")
+	first := gitTest(t, dir, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "commit", "-am", "two")
+	second := gitTest(t, dir, "rev-parse", "HEAD")
+	gitTest(t, dir, "checkout", "--detach", first)
+	ref := "refs/heads/feature"
+	gitTest(t, dir, "update-ref", ref, first)
+
+	var competingErr error
+	err := WithExactRecoveryOwnership(context.Background(), dir, ref, first, func() error {
+		cmd := exec.Command("git", "update-ref", ref, second, first)
+		cmd.Dir = dir
+		_, competingErr = cmd.CombinedOutput()
+		if competingErr == nil {
+			t.Fatal("concurrent source update crossed prepared ownership lock")
+		}
+		if got := gitTest(t, dir, "rev-parse", ref); got != first {
+			t.Fatalf("source ref moved under ownership to %s", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if competingErr == nil {
+		t.Fatal("concurrent source update unexpectedly succeeded")
+	}
+	gitTest(t, dir, "update-ref", ref, second, first)
+}
+
+func TestExactRecoveryOwnershipReleasesAfterCancellation(t *testing.T) {
+	dir := t.TempDir()
+	gitTest(t, dir, "init")
+	gitTest(t, dir, "config", "user.name", "test")
+	gitTest(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", ".")
+	gitTest(t, dir, "commit", "-m", "one")
+	head := gitTest(t, dir, "rev-parse", "HEAD")
+	ref := "refs/heads/feature"
+	gitTest(t, dir, "update-ref", ref, head)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- WithExactRecoveryOwnership(ctx, dir, ref, head, func() error {
+			cancel()
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled ownership returned nil")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled ownership deadlocked")
+	}
+	gitTest(t, dir, "update-ref", ref, head, head)
+}
+
+func TestExactRecoveryOwnershipReleasesAfterProcessCrash(t *testing.T) {
+	dir := t.TempDir()
+	gitTest(t, dir, "init")
+	gitTest(t, dir, "config", "user.name", "test")
+	gitTest(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", ".")
+	gitTest(t, dir, "commit", "-m", "one")
+	first := gitTest(t, dir, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "commit", "-am", "two")
+	second := gitTest(t, dir, "rev-parse", "HEAD")
+	gitTest(t, dir, "checkout", "--detach", first)
+	ref := "refs/heads/feature"
+	gitTest(t, dir, "update-ref", ref, first)
+	marker := filepath.Join(t.TempDir(), "claimed")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExactRecoveryOwnershipCrashHelper$")
+	cmd.Env = append(os.Environ(),
+		"NM_EXACT_RECOVERY_CRASH_HELPER=1",
+		"NM_EXACT_RECOVERY_CRASH_DIR="+dir,
+		"NM_EXACT_RECOVERY_CRASH_REF="+ref,
+		"NM_EXACT_RECOVERY_CRASH_HEAD="+first,
+		"NM_EXACT_RECOVERY_CRASH_MARKER="+marker,
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			t.Fatal("crash helper did not acquire ownership")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	competing := exec.Command("git", "update-ref", ref, second, first)
+	competing.Dir = dir
+	if out, err := competing.CombinedOutput(); err == nil {
+		t.Fatalf("source moved while crash helper held ownership: %s", out)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		update := exec.Command("git", "update-ref", ref, second, first)
+		update.Dir = dir
+		if _, err := update.CombinedOutput(); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("prepared ref lock survived owner process crash")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestExactRecoveryOwnershipCrashHelper(t *testing.T) {
+	if os.Getenv("NM_EXACT_RECOVERY_CRASH_HELPER") != "1" {
+		return
+	}
+	err := WithExactRecoveryOwnership(
+		context.Background(),
+		os.Getenv("NM_EXACT_RECOVERY_CRASH_DIR"),
+		os.Getenv("NM_EXACT_RECOVERY_CRASH_REF"),
+		os.Getenv("NM_EXACT_RECOVERY_CRASH_HEAD"),
+		func() error {
+			if err := os.WriteFile(os.Getenv("NM_EXACT_RECOVERY_CRASH_MARKER"), []byte("claimed"), 0o644); err != nil {
+				return err
+			}
+			select {}
+		},
+	)
+	t.Fatalf("crash helper ownership ended: %v", err)
+}
+
+func TestExactRecoveryAnchorRetainsUnreachableCandidateUntilEquivalentRefExists(t *testing.T) {
+	dir := t.TempDir()
+	gitTest(t, dir, "init")
+	gitTest(t, dir, "config", "user.name", "test")
+	gitTest(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", ".")
+	gitTest(t, dir, "commit", "-m", "one")
+	head := gitTest(t, dir, "rev-parse", "HEAD")
+	gitTest(t, dir, "checkout", "--orphan", "new-source")
+	gitTest(t, dir, "rm", "-rf", ".")
+	if err := os.WriteFile(filepath.Join(dir, "y"), []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", ".")
+	gitTest(t, dir, "commit", "-m", "unrelated")
+	unrelated := gitTest(t, dir, "rev-parse", "HEAD")
+	sourceRef := "refs/heads/feature"
+	gitTest(t, dir, "update-ref", sourceRef, unrelated)
+	anchorRef, err := ExactRecoveryAnchorRef("run-anchor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureExactRecoveryAnchor(context.Background(), dir, anchorRef, head); err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := RetireExactRecoveryAnchor(context.Background(), dir, anchorRef, head, sourceRef); err != nil || retired {
+		t.Fatalf("unreachable anchor retirement = %v, %v", retired, err)
+	}
+	gitTest(t, dir, "update-ref", sourceRef, head, unrelated)
+	if retired, err := RetireExactRecoveryAnchor(context.Background(), dir, anchorRef, head, sourceRef); err != nil || !retired {
+		t.Fatalf("equivalent anchor retirement = %v, %v", retired, err)
 	}
 }
 

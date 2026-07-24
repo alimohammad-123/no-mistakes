@@ -21,7 +21,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
-	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -86,6 +85,7 @@ type recoveredRunPlan struct {
 	steps          []pipeline.Step
 	reconstruction *interruptedWorktreeReconstruction
 	headValidation bool
+	exactRecovery  bool
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) ([]recoveredRunPlan, map[string]struct{}) {
@@ -139,8 +139,7 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil || run.Branch == "" {
 		return nil, fmt.Errorf("run is not a parked running run")
 	}
-	sourceRef, err := m.db.EnsureActiveRunSourceRef(run)
-	if err != nil {
+	if _, err := m.db.EnsureActiveRunSourceRef(run); err != nil {
 		return nil, err
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
@@ -166,12 +165,18 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if !samePath(resolveGitPath(workDir, commonDir), gateDir) {
 		return nil, fmt.Errorf("worktree does not belong to its gate repository")
 	}
-	if err := sourceprovenance.VerifyCandidateBinding(ctx, workDir, sourceRef, run.HeadSHA); err != nil {
+	if err := m.validateRecoveredSourceOwnership(ctx, run, repo, workDir); err != nil {
 		return nil, fmt.Errorf("worktree source ref does not match run head: %w", err)
 	}
 	execSteps := m.steps()
 	if err := pipeline.ValidateRecoveredRun(m.db, run, execSteps); err != nil {
 		return nil, err
+	}
+	exactRecovery := false
+	if event, err := m.db.GetRunRecoveryEvent(run.ID, db.RunRecoveryExactFinalHeadCapacity); err != nil {
+		return nil, fmt.Errorf("read exact final-head recovery provenance: %w", err)
+	} else {
+		exactRecovery = event != nil
 	}
 	cfg, err := m.loadRecoveredConfig(ctx, run, repo, workDir)
 	if err != nil {
@@ -201,6 +206,7 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		agent:          ag,
 		steps:          execSteps,
 		reconstruction: reconstruction,
+		exactRecovery:  exactRecovery,
 	}, nil
 }
 
@@ -208,8 +214,7 @@ func (m *RunManager) prepareRecoveredHeadValidationRun(ctx context.Context, run 
 	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince != nil || run.Branch == "" {
 		return nil, fmt.Errorf("run is not an active head-validation run")
 	}
-	sourceRef, err := m.db.EnsureActiveRunSourceRef(run)
-	if err != nil {
+	if _, err := m.db.EnsureActiveRunSourceRef(run); err != nil {
 		return nil, err
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
@@ -243,8 +248,12 @@ func (m *RunManager) prepareRecoveredHeadValidationRun(ctx context.Context, run 
 	if err != nil || headSHA != run.HeadSHA {
 		return nil, fmt.Errorf("worktree head does not match run head")
 	}
-	if err := sourceprovenance.VerifyCandidateBinding(ctx, workDir, sourceRef, run.HeadSHA); err != nil {
+	if err := m.validateRecoveredSourceOwnership(ctx, run, repo, workDir); err != nil {
 		return nil, fmt.Errorf("worktree source ref does not match run head: %w", err)
+	}
+	run, err = m.reconcileRecoveredPushCustody(ctx, run, repo, workDir, execSteps)
+	if err != nil {
+		return nil, err
 	}
 	if err := pipeline.ValidateHeadValidationRecovery(m.db, run, execSteps); err != nil {
 		return nil, err
@@ -255,6 +264,15 @@ func (m *RunManager) prepareRecoveredHeadValidationRun(ctx context.Context, run 
 	}
 	if cfg.Commands.Test == "" {
 		return nil, fmt.Errorf("head-validation recovery requires a trusted configured Test command")
+	}
+	exactRecovery := false
+	if event, err := m.db.GetRunRecoveryEvent(run.ID, db.RunRecoveryExactFinalHeadCapacity); err != nil {
+		return nil, fmt.Errorf("read exact final-head recovery provenance: %w", err)
+	} else if event != nil {
+		exactRecovery = true
+		if err := validateExactFinalHeadRecoveryExternalState(ctx, m.db, run, repo, workDir, cfg, true); err != nil {
+			return nil, fmt.Errorf("revalidate exact final-head recovery delivery state: %w", m.markRecoveredSourceSuperseded(run, err))
+		}
 	}
 	ag, err := newPipelineAgent(ctx, cfg, exec.LookPath)
 	if err != nil {
@@ -275,6 +293,7 @@ func (m *RunManager) prepareRecoveredHeadValidationRun(ctx context.Context, run 
 		agent:          ag,
 		steps:          execSteps,
 		headValidation: true,
+		exactRecovery:  exactRecovery,
 	}, nil
 }
 
@@ -449,6 +468,20 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		_ = plan.agent.Close()
 		return
 	}
+	if plan.exactRecovery {
+		exactRecoveryAdmissionPoint()
+		if err := m.validateRecoveredSourceOwnership(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
+			m.mu.Unlock()
+			cancel(err)
+			_ = plan.agent.Close()
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cleanupCancel()
+			if cleanupErr := git.WorktreeRemove(cleanupCtx, plan.gateDir, plan.workDir); cleanupErr != nil {
+				slog.Warn("failed to remove superseded recovery worktree", "path", plan.workDir, "error", cleanupErr)
+			}
+			return
+		}
+	}
 	// Admission, publication, and WaitGroup accounting are one lifecycle
 	// transaction with Shutdown's cancellation snapshot.
 	m.wg.Add(1)
@@ -479,6 +512,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			cancel(nil)
 			_ = plan.agent.Close()
 			m.closeSubscribers(plan.run.ID)
+			if plan.exactRecovery {
+				m.retireCompletedExactRecoveryAnchor(plan.run.ID, plan.gateDir)
+			}
 			if !preserveWorktree {
 				transition, err := m.db.GetRunHeadTransition(plan.run.ID)
 				preserveWorktree = err != nil || transition != nil

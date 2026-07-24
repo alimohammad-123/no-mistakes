@@ -97,6 +97,36 @@ type PRContent struct {
 	Body  string
 }
 
+type PRContentReader interface {
+	GetPRContent(ctx context.Context, pr *PR) (PRContent, error)
+}
+
+type PRSnapshot struct {
+	Repository string
+	Number     string
+	URL        string
+	State      PRState
+	Merged     bool
+	HeadSHA    string
+	HeadRef    string
+	BaseRef    string
+	Title      string
+	Body       string
+}
+
+type PRSnapshotRequest struct {
+	ExpectedHead              string
+	AllowedStaleHead          string
+	ReconcileUntil            time.Time
+	RecordObservation         func(context.Context, string) error
+	AllowMergedSourceDeletion bool
+}
+
+type PRSnapshotReader interface {
+	GetPRSnapshot(ctx context.Context, pr *PR, request PRSnapshotRequest) (PRSnapshot, error)
+	ExpectedRepository() string
+}
+
 // PRState is the normalized lifecycle state of a PR.
 type PRState string
 
@@ -151,8 +181,9 @@ func (c Check) Pending() bool { return c.Bucket == CheckBucketPending }
 // Capabilities declares which optional Host methods return meaningful data.
 // Callers must consult Capabilities before invoking optional methods.
 type Capabilities struct {
-	MergeableState  bool
-	FailedCheckLogs bool
+	MergeableState   bool
+	FailedCheckLogs  bool
+	RecoverySnapshot bool
 }
 
 // ErrUnsupported is returned by optional Host methods that the provider

@@ -8,6 +8,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
@@ -226,13 +227,15 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		if err != nil {
 			return fmt.Errorf("verify successful push: %w", err)
 		}
-		fields := strings.Fields(remoteOut)
-		if len(fields) == 0 || fields[0] != newHeadSHA {
-			observed := "missing"
-			if len(fields) > 0 {
-				observed = fields[0]
-			}
-			return fmt.Errorf("verify successful push: remote head %s does not equal pushed head %s", observed, newHeadSHA)
+		observation := git.ParseExactRemoteRefOutputForOID(remoteOut, ref, newHeadSHA)
+		if observation.Invalid != "" {
+			return fmt.Errorf(
+				"verify successful push: %w",
+				&git.RemoteRefObservationError{Ref: ref, Observation: observation.Invalid},
+			)
+		}
+		if observation.OID != newHeadSHA {
+			return fmt.Errorf("verify successful push: remote head %s does not equal pushed head %s", observation.OID, newHeadSHA)
 		}
 		return sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
 			HeadSHA:           newHeadSHA,

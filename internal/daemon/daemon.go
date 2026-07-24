@@ -520,6 +520,18 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return &ipc.RecoverInterruptedRunResult{RunID: runID, Matched: matched}, nil
 	})
 
+	srv.Handle(ipc.MethodRecoverExactFinalHeadRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		var p ipc.RecoverExactFinalHeadRunParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		runID, err := mgr.HandleRecoverExactFinalHeadCapacity(ctx, p.RepoID, p.RunID)
+		if err != nil {
+			return nil, err
+		}
+		return &ipc.RecoverExactFinalHeadRunResult{RunID: runID}, nil
+	})
+
 	srv.Handle(ipc.MethodRerun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		var p ipc.RerunParams
 		if err := json.Unmarshal(params, &p); err != nil {

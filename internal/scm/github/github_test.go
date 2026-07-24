@@ -176,6 +176,43 @@ func TestUpdatePRStreamsBodyThroughStdin(t *testing.T) {
 	}
 }
 
+func TestGetPRContentReadsCanonicalRemoteState(t *testing.T) {
+	t.Parallel()
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 42 --repo test/repo --json title,body": {
+			stdout: `{"title":"fix: exact recovery","body":"## What Changed\n\n- durable update"}`,
+		},
+	}), nil, "", "test/repo")
+	content, err := host.GetPRContent(context.Background(), &scm.PR{Number: "42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content.Title != "fix: exact recovery" || !strings.Contains(content.Body, "durable update") {
+		t.Fatalf("PR content = %#v", content)
+	}
+}
+
+func TestGetPRSnapshotReadsAuthoritativeDeliveryState(t *testing.T) {
+	t.Parallel()
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 42 --repo test/repo --json number,url,state,mergedAt,headRefOid,headRefName,baseRefName,title,body": {
+			stdout: `{"number":42,"url":"https://github.com/test/repo/pull/42","state":"OPEN","mergedAt":null,"headRefOid":"abc123","headRefName":"feature","baseRefName":"main","title":"fix: exact recovery","body":"body"}`,
+		},
+	}), nil, "", "test/repo")
+	snapshot, err := host.GetPRSnapshot(context.Background(), &scm.PR{Number: "42"}, scm.PRSnapshotRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Repository != "test/repo" || snapshot.Number != "42" ||
+		snapshot.URL != "https://github.com/test/repo/pull/42" ||
+		snapshot.State != scm.PRStateOpen || snapshot.Merged ||
+		snapshot.HeadSHA != "abc123" || snapshot.HeadRef != "feature" ||
+		snapshot.BaseRef != "main" || snapshot.Title != "fix: exact recovery" ||
+		snapshot.Body != "body" {
+		t.Fatalf("PR snapshot = %#v", snapshot)
+	}
+}
+
 // UpdatePR shares the same explicit-PR selector boundary as the read methods:
 // when the number is absent it must target the canonical PR URL, never an empty
 // positional that makes `gh pr edit` resolve the cwd branch (main) from the

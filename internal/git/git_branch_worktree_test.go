@@ -286,6 +286,164 @@ func TestPushWithOptionsForwardsPushOptions(t *testing.T) {
 	}
 }
 
+func TestPushSHAWithReceiptBindsSuccessfulExactPush(t *testing.T) {
+	ctx := context.Background()
+	src := initTestRepo(t)
+	bare := filepath.Join(t.TempDir(), "dest.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	run(t, src, "git", "remote", "add", "dest", bare)
+	if err := Push(ctx, src, "dest", "refs/heads/main", "", false); err != nil {
+		t.Fatal(err)
+	}
+	prior := run(t, src, "git", "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(src, "receipt.txt"), []byte("receipt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, src, "git", "add", "receipt.txt")
+	run(t, src, "git", "commit", "-m", "receipt target")
+	target := run(t, src, "git", "rev-parse", "HEAD")
+	receiptRef := "refs/heads/no-mistakes-receipts/test-operation"
+	hookRecord := filepath.Join(t.TempDir(), "pre-push.txt")
+	hook := "#!/bin/sh\ncat > " + shellSingleQuote(hookRecord) + "\n"
+	if err := os.WriteFile(filepath.Join(src, ".git", "hooks", "pre-push"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := PushSHAWithReceipt(
+		ctx, src, "dest", target, "refs/heads/main", prior, true, receiptRef,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Run(ctx, bare, "rev-parse", "refs/heads/main"); err != nil || got != target {
+		t.Fatalf("remote target = %q, %v; want %q", got, err, target)
+	}
+	if got, err := Run(ctx, bare, "rev-parse", receiptRef); err != nil || got != target {
+		t.Fatalf("success receipt = %q, %v; want %q", got, err, target)
+	}
+	if _, err := Run(ctx, src, "rev-parse", "--verify", receiptRef); err == nil {
+		t.Fatal("atomic remote receipt leaked into the local repository")
+	}
+	hookInput, err := os.ReadFile(hookRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(hookInput)), "\n")
+	if len(lines) != 2 ||
+		!strings.Contains(lines[0]+"\n"+lines[1], "refs/heads/main") ||
+		!strings.Contains(lines[0]+"\n"+lines[1], receiptRef) {
+		t.Fatalf("pre-push hook input = %q", hookInput)
+	}
+}
+
+func TestPushSHAWithReceiptHookRejectionIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	src := initTestRepo(t)
+	bare := filepath.Join(t.TempDir(), "dest.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	run(t, src, "git", "remote", "add", "dest", bare)
+	if err := Push(ctx, src, "dest", "refs/heads/main", "", false); err != nil {
+		t.Fatal(err)
+	}
+	prior := run(t, src, "git", "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(src, "rejected.txt"), "rejected\n")
+	run(t, src, "git", "add", "rejected.txt")
+	run(t, src, "git", "commit", "-m", "rejected target")
+	target := run(t, src, "git", "rev-parse", "HEAD")
+	receiptRef := "refs/heads/no-mistakes-receipts/rejected"
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	hook := "#!/bin/sh\ntouch " + shellSingleQuote(marker) + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(src, ".git", "hooks", "pre-push"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := PushSHAWithReceipt(
+		ctx, src, "dest", target, "refs/heads/main", prior, true, receiptRef,
+	); err == nil {
+		t.Fatal("pre-push hook rejection was ignored")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("pre-push hook did not run: %v", err)
+	}
+	if got, err := Run(ctx, bare, "rev-parse", "refs/heads/main"); err != nil || got != prior {
+		t.Fatalf("hook rejection moved target to %q, %v", got, err)
+	}
+	if _, err := Run(ctx, bare, "rev-parse", "--verify", receiptRef); err == nil {
+		t.Fatal("hook rejection created a receipt")
+	}
+}
+
+func TestPushSHAWithReceiptRejectsCollisionAtomically(t *testing.T) {
+	ctx := context.Background()
+	src := initTestRepo(t)
+	bare := filepath.Join(t.TempDir(), "dest.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	run(t, src, "git", "remote", "add", "dest", bare)
+	if err := Push(ctx, src, "dest", "refs/heads/main", "", false); err != nil {
+		t.Fatal(err)
+	}
+	prior := run(t, src, "git", "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(src, "receipt-collision.txt"), []byte("target\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, src, "git", "add", "receipt-collision.txt")
+	run(t, src, "git", "commit", "-m", "receipt collision target")
+	target := run(t, src, "git", "rev-parse", "HEAD")
+	receiptRef := "refs/heads/no-mistakes-receipts/collision"
+	run(t, bare, "git", "update-ref", receiptRef, prior)
+	if err := PushSHAWithReceipt(
+		ctx, src, "dest", target, "refs/heads/main", prior, true, receiptRef,
+	); err == nil {
+		t.Fatal("receipt collision was accepted")
+	}
+	if got, err := Run(ctx, bare, "rev-parse", "refs/heads/main"); err != nil || got != prior {
+		t.Fatalf("atomic collision moved target to %q, %v; want %q", got, err, prior)
+	}
+	if got, err := Run(ctx, bare, "rev-parse", receiptRef); err != nil || got != prior {
+		t.Fatalf("atomic collision changed receipt to %q, %v; want %q", got, err, prior)
+	}
+}
+
+func TestCheckAtomicPushReceiptCapabilityDoesNotPublish(t *testing.T) {
+	ctx := context.Background()
+	src := initTestRepo(t)
+	bare := filepath.Join(t.TempDir(), "dest.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	run(t, src, "git", "remote", "add", "dest", bare)
+	if err := Push(ctx, src, "dest", "refs/heads/main", "", false); err != nil {
+		t.Fatal(err)
+	}
+	head := run(t, src, "git", "rev-parse", "HEAD")
+	receiptRef := "refs/heads/no-mistakes-receipts/capability"
+	hookMarker := filepath.Join(t.TempDir(), "capability-hook")
+	hook := "#!/bin/sh\ntouch " + shellSingleQuote(hookMarker) + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(src, ".git", "hooks", "pre-push"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckAtomicPushReceiptCapability(
+		ctx, src, "dest", head, "refs/heads/main", head, receiptRef,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
+		t.Fatalf("capability probe invoked pre-push hook: %v", err)
+	}
+	if _, err := Run(ctx, bare, "rev-parse", "--verify", receiptRef); err == nil {
+		t.Fatal("atomic capability probe published its receipt")
+	}
+	run(t, bare, "git", "config", "receive.advertiseAtomic", "false")
+	if err := CheckAtomicPushReceiptCapability(
+		ctx, src, "dest", head, "refs/heads/main", head, receiptRef,
+	); err == nil {
+		t.Fatal("remote without atomic capability was accepted")
+	}
+}
+
 func TestPushForceWithLease(t *testing.T) {
 	ctx := context.Background()
 	src := initTestRepo(t)
@@ -356,6 +514,41 @@ func TestLsRemoteNotFound(t *testing.T) {
 	}
 	if sha != "" {
 		t.Fatalf("expected empty string for missing ref, got %q", sha)
+	}
+}
+
+func TestParseExactRemoteRefOutput(t *testing.T) {
+	oid := strings.Repeat("a", 40)
+	other := strings.Repeat("b", 40)
+	ref := "refs/heads/feature"
+	tests := []struct {
+		name    string
+		out     string
+		format  string
+		wantOID string
+		invalid string
+	}{
+		{name: "exact one", out: oid + "\t" + ref, format: "sha1", wantOID: oid},
+		{name: "empty", format: "sha1", invalid: RemoteRefMissing},
+		{name: "duplicate identical", out: oid + "\t" + ref + "\n" + oid + "\t" + ref, format: "sha1", invalid: RemoteRefDuplicate},
+		{name: "duplicate reverse order", out: other + "\t" + ref + "\n" + oid + "\t" + ref, format: "sha1", invalid: RemoteRefDuplicate},
+		{name: "wrong ref", out: oid + "\trefs/heads/other", format: "sha1", invalid: RemoteRefIdentityMismatch},
+		{name: "peeled ref", out: oid + "\t" + ref + "^{}", format: "sha1", invalid: RemoteRefPeeled},
+		{name: "space separated", out: oid + " " + ref, format: "sha1", invalid: RemoteRefMalformed},
+		{name: "leading whitespace", out: " " + oid + "\t" + ref, format: "sha1", invalid: RemoteRefMalformed},
+		{name: "trailing whitespace", out: oid + "\t" + ref + " ", format: "sha1", invalid: RemoteRefMalformed},
+		{name: "extra field", out: oid + "\t" + ref + "\textra", format: "sha1", invalid: RemoteRefMalformed},
+		{name: "short oid", out: "abc\t" + ref, format: "sha1", invalid: RemoteRefMalformed},
+		{name: "non hexadecimal oid", out: strings.Repeat("g", 40) + "\t" + ref, format: "sha1", invalid: RemoteRefMalformed},
+		{name: "wrong object format", out: oid + "\t" + ref, format: "sha256", invalid: RemoteRefMalformed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParseExactRemoteRefOutput(tc.out, ref, tc.format)
+			if got.OID != tc.wantOID || got.Invalid != tc.invalid {
+				t.Fatalf("observation = %#v, want OID %q invalid %q", got, tc.wantOID, tc.invalid)
+			}
+		})
 	}
 }
 

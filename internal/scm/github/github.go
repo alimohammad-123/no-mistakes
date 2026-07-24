@@ -158,7 +158,7 @@ func repoOwner(slug string) string {
 func (h *Host) Provider() scm.Provider { return scm.ProviderGitHub }
 
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, RecoverySnapshot: true}
 }
 
 func (h *Host) Available(ctx context.Context) error {
@@ -274,6 +274,74 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		return nil, fmt.Errorf("gh pr edit: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return pr, nil
+}
+
+func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, error) {
+	selector, err := prSelector(pr)
+	if err != nil {
+		return scm.PRContent{}, err
+	}
+	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
+	args = append(args, "--json", "title,body")
+	out, err := h.cmd(ctx, "gh", args...).Output()
+	if err != nil {
+		return scm.PRContent{}, fmt.Errorf("gh pr view content: %w", err)
+	}
+	var content struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if err := json.Unmarshal(out, &content); err != nil {
+		return scm.PRContent{}, fmt.Errorf("gh pr view content: parse response: %w", err)
+	}
+	return scm.PRContent{Title: content.Title, Body: content.Body}, nil
+}
+
+func (h *Host) ExpectedRepository() string {
+	return strings.TrimSpace(h.repo)
+}
+
+func (h *Host) GetPRSnapshot(ctx context.Context, pr *scm.PR, _ scm.PRSnapshotRequest) (scm.PRSnapshot, error) {
+	selector, err := prSelector(pr)
+	if err != nil {
+		return scm.PRSnapshot{}, err
+	}
+	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
+	args = append(args, "--json", "number,url,state,mergedAt,headRefOid,headRefName,baseRefName,title,body")
+	out, err := h.cmd(ctx, "gh", args...).Output()
+	if err != nil {
+		return scm.PRSnapshot{}, fmt.Errorf("gh pr view snapshot: %w", err)
+	}
+	var snapshot struct {
+		Number      int     `json:"number"`
+		URL         string  `json:"url"`
+		State       string  `json:"state"`
+		MergedAt    *string `json:"mergedAt"`
+		HeadRefOID  string  `json:"headRefOid"`
+		HeadRefName string  `json:"headRefName"`
+		BaseRefName string  `json:"baseRefName"`
+		Title       string  `json:"title"`
+		Body        string  `json:"body"`
+	}
+	if err := json.Unmarshal(out, &snapshot); err != nil {
+		return scm.PRSnapshot{}, fmt.Errorf("gh pr view snapshot: parse response: %w", err)
+	}
+	number := ""
+	if snapshot.Number > 0 {
+		number = fmt.Sprintf("%d", snapshot.Number)
+	}
+	return scm.PRSnapshot{
+		Repository: HostPrefixedSlugForHost(snapshot.URL, h.host),
+		Number:     number,
+		URL:        strings.TrimSpace(snapshot.URL),
+		State:      normalizePRState(snapshot.State),
+		Merged:     snapshot.MergedAt != nil && strings.TrimSpace(*snapshot.MergedAt) != "",
+		HeadSHA:    strings.TrimSpace(snapshot.HeadRefOID),
+		HeadRef:    strings.TrimSpace(snapshot.HeadRefName),
+		BaseRef:    strings.TrimSpace(snapshot.BaseRefName),
+		Title:      snapshot.Title,
+		Body:       snapshot.Body,
+	}, nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {

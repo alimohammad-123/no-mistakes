@@ -133,6 +133,26 @@ Use `no-mistakes rerun` only after that monitor is no longer running, such as a 
 Successful outcomes (`checks-passed` and `passed`) also carry `help` instructions telling the agent to summarize the run.
 When the pipeline applied fixes, they include a `fixes` table and a `help` instruction to acknowledge the misses and list those fixes for the user's review.
 
+## no-mistakes axi recover-final-head
+
+Revive the same terminal run only for the exact final-head replay-capacity failure reported by AXI:
+
+```sh
+no-mistakes axi recover-final-head --run <id>
+```
+
+| Flag    | Type     | Default | Description                              |
+| ------- | -------- | ------- | ---------------------------------------- |
+| `--run` | `string` | (none)  | Exact terminal run ID to recover; required |
+
+This is an explicit, narrow recovery operation, not a general terminal-run retry.
+It requires the failed capacity error, exact `head == test_head == validation_target` proof at replay count three, no pending head transition, inactive push custody, the frozen source ref and gate ref at that head, a stable open PR still published at the recorded earlier head, completed Test, a pre-round Document capacity failure, and pristine pending delivery steps.
+On success it preserves the run and PR identities and resumes at Document.
+A repeated call reattaches only while that explicitly recovered run is still active; a second terminal recovery is refused.
+Missing, ambiguous, changed, already-delivered, differently failed, or unrelated historical states remain unchanged.
+
+See [Exact final-head capacity recovery](/no-mistakes/concepts/daemon/#exact-final-head-capacity-recovery) for the guarded transition, audit, delivery, and crash-recovery model. See [Pipeline Steps](/no-mistakes/reference/pipeline-steps/) for the exact Test proof and replay-boundary Document behavior.
+
 ## no-mistakes axi respond
 
 Answer the current approval gate and continue until the next gate, CI-ready decision point, or final outcome.
