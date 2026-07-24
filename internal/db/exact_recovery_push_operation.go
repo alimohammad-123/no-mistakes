@@ -12,6 +12,9 @@ const (
 	ExactRecoveryPushPrepared = "prepared"
 	ExactRecoveryPushInvoked  = "invoked"
 	ExactRecoveryPushBound    = "bound"
+
+	ExactRecoveryPushNotApplied = "not_applied"
+	ExactRecoveryPushApplied    = "applied"
 )
 
 type ExactRecoveryPushOperation struct {
@@ -42,6 +45,36 @@ type ExactRecoveryPushOperationEvent struct {
 	OccurredAt  int64
 }
 
+type ExactRecoveryPushAttempt struct {
+	RunID             string
+	Attempt           int
+	OperationID       string
+	Phase             string
+	SourceRef         string
+	StaleOID          string
+	TargetOID         string
+	TargetKind        string
+	TargetFingerprint string
+	PriorGeneration   int64
+	TargetGeneration  int64
+	PriorPushedAt     int64
+	DeadlineAt        int64
+	Disposition       *string
+	PreparedAt        int64
+	InvokedAt         *int64
+	ClosedAt          *int64
+}
+
+type ExactRecoveryPushAttemptObservation struct {
+	RunID       string
+	Attempt     int
+	Sequence    int
+	OperationID string
+	Observation string
+	State       string
+	ObservedAt  int64
+}
+
 func (d *DB) GetExactRecoveryPushOperation(runID string) (*ExactRecoveryPushOperation, error) {
 	operation, err := getExactRecoveryPushOperation(d.sql, runID)
 	if err != nil || operation == nil {
@@ -52,6 +85,17 @@ func (d *DB) GetExactRecoveryPushOperation(runID string) (*ExactRecoveryPushOper
 		return nil, err
 	}
 	if err := validateExactRecoveryPushOperationEvents(operation, events); err != nil {
+		return nil, err
+	}
+	attempts, err := d.ListExactRecoveryPushAttempts(runID)
+	if err != nil {
+		return nil, err
+	}
+	observations, err := d.ListExactRecoveryPushAttemptObservations(runID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateExactRecoveryPushAttempts(operation, attempts, observations); err != nil {
 		return nil, err
 	}
 	return operation, nil
@@ -145,7 +189,74 @@ func validateExactRecoveryPushOperationEvents(operation *ExactRecoveryPushOperat
 	return nil
 }
 
-func createExactRecoveryPushOperation(tx *sql.Tx, event *RunRecoveryEvent) (*ExactRecoveryPushOperation, error) {
+func validateExactRecoveryPushAttempts(operation *ExactRecoveryPushOperation, attempts []ExactRecoveryPushAttempt, observations []ExactRecoveryPushAttemptObservation) error {
+	if operation == nil || len(attempts) != operation.Attempt || len(observations) < len(attempts) {
+		return fmt.Errorf("exact recovery Push attempt history is incomplete")
+	}
+	observationsByAttempt := make(map[int][]ExactRecoveryPushAttemptObservation, len(attempts))
+	for _, observation := range observations {
+		observationsByAttempt[observation.Attempt] = append(observationsByAttempt[observation.Attempt], observation)
+	}
+	for index := range attempts {
+		attempt := &attempts[index]
+		number := index + 1
+		if attempt.RunID != operation.RunID || attempt.Attempt != number ||
+			attempt.OperationID == "" || attempt.SourceRef != operation.SourceRef ||
+			attempt.StaleOID != operation.StaleOID || attempt.TargetOID != operation.TargetOID ||
+			attempt.TargetKind != operation.TargetKind ||
+			attempt.TargetFingerprint != operation.TargetFingerprint ||
+			attempt.PriorGeneration != operation.PriorGeneration ||
+			attempt.TargetGeneration != operation.TargetGeneration ||
+			attempt.PriorPushedAt != operation.PriorPushedAt ||
+			attempt.DeadlineAt <= attempt.PreparedAt {
+			return fmt.Errorf("exact recovery Push attempt identity is inconsistent")
+		}
+		history := observationsByAttempt[number]
+		for observationIndex, observation := range history {
+			if observation.RunID != operation.RunID || observation.Attempt != number ||
+				observation.Sequence != observationIndex+1 ||
+				observation.OperationID != attempt.OperationID ||
+				observation.Observation == "" || observation.State == "" {
+				return fmt.Errorf("exact recovery Push attempt observation history is inconsistent")
+			}
+		}
+		if len(history) == 0 {
+			return fmt.Errorf("exact recovery Push attempt observation history is incomplete")
+		}
+		if number < operation.Attempt {
+			if attempt.Phase != ExactRecoveryPushInvoked || attempt.InvokedAt == nil ||
+				attempt.Disposition == nil || *attempt.Disposition != ExactRecoveryPushNotApplied ||
+				attempt.ClosedAt == nil {
+				return fmt.Errorf("exact recovery Push prior attempt is not terminal")
+			}
+			continue
+		}
+		if attempt.OperationID != operation.OperationID || attempt.Phase != operation.Phase ||
+			attempt.PreparedAt != operation.CreatedAt {
+			return fmt.Errorf("exact recovery Push current attempt is inconsistent")
+		}
+		switch operation.Phase {
+		case ExactRecoveryPushPrepared:
+			if attempt.InvokedAt != nil || attempt.Disposition != nil || attempt.ClosedAt != nil {
+				return fmt.Errorf("exact recovery Push prepared attempt is terminal")
+			}
+		case ExactRecoveryPushInvoked:
+			if attempt.InvokedAt == nil || attempt.Disposition != nil || attempt.ClosedAt != nil {
+				return fmt.Errorf("exact recovery Push invoked attempt is inconsistent")
+			}
+		case ExactRecoveryPushBound:
+			if attempt.InvokedAt == nil || attempt.Disposition == nil ||
+				*attempt.Disposition != ExactRecoveryPushApplied || attempt.ClosedAt == nil {
+				return fmt.Errorf("exact recovery Push bound attempt is incomplete")
+			}
+		default:
+			return fmt.Errorf("exact recovery Push current attempt phase is invalid")
+		}
+	}
+	return nil
+}
+
+func createExactRecoveryPushOperation(tx *sql.Tx, event *RunRecoveryEvent, deadlineAt int64) (*ExactRecoveryPushOperation, error) {
 	if event == nil {
 		return nil, fmt.Errorf("create exact recovery Push operation: recovery provenance is missing")
 	}
@@ -184,7 +295,114 @@ func createExactRecoveryPushOperation(tx *sql.Tx, event *RunRecoveryEvent) (*Exa
 	if err := appendExactRecoveryPushOperationEvent(tx, operation); err != nil {
 		return nil, err
 	}
+	if err := insertExactRecoveryPushAttempt(tx, operation, deadlineAt); err != nil {
+		return nil, err
+	}
 	return operation, nil
+}
+
+func insertExactRecoveryPushAttempt(tx *sql.Tx, operation *ExactRecoveryPushOperation, deadlineAt int64) error {
+	if operation == nil || deadlineAt <= operation.CreatedAt {
+		return fmt.Errorf("create exact recovery Push attempt: deadline is invalid")
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO run_recovery_push_attempts (
+			run_id, attempt, operation_id, phase, source_ref, stale_oid, target_oid,
+			target_kind, target_fingerprint, prior_generation, target_generation,
+			prior_pushed_at, deadline_at, prepared_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		operation.RunID, operation.Attempt, operation.OperationID, operation.Phase,
+		operation.SourceRef, operation.StaleOID, operation.TargetOID,
+		operation.TargetKind, operation.TargetFingerprint,
+		operation.PriorGeneration, operation.TargetGeneration,
+		operation.PriorPushedAt, deadlineAt, operation.CreatedAt,
+	); err != nil {
+		return fmt.Errorf("create exact recovery Push attempt: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) ListExactRecoveryPushAttempts(runID string) ([]ExactRecoveryPushAttempt, error) {
+	rows, err := d.sql.Query(
+		`SELECT run_id, attempt, operation_id, phase, source_ref, stale_oid, target_oid,
+		        target_kind, target_fingerprint, prior_generation, target_generation,
+		        prior_pushed_at, deadline_at, disposition, prepared_at, invoked_at, closed_at
+		 FROM run_recovery_push_attempts WHERE run_id = ? ORDER BY attempt`,
+		runID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list exact recovery Push attempts: %w", err)
+	}
+	defer rows.Close()
+	var attempts []ExactRecoveryPushAttempt
+	for rows.Next() {
+		var attempt ExactRecoveryPushAttempt
+		if err := rows.Scan(
+			&attempt.RunID, &attempt.Attempt, &attempt.OperationID, &attempt.Phase,
+			&attempt.SourceRef, &attempt.StaleOID, &attempt.TargetOID,
+			&attempt.TargetKind, &attempt.TargetFingerprint,
+			&attempt.PriorGeneration, &attempt.TargetGeneration, &attempt.PriorPushedAt,
+			&attempt.DeadlineAt, &attempt.Disposition, &attempt.PreparedAt,
+			&attempt.InvokedAt, &attempt.ClosedAt,
+		); err != nil {
+			return nil, fmt.Errorf("list exact recovery Push attempts: %w", err)
+		}
+		attempts = append(attempts, attempt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list exact recovery Push attempts: %w", err)
+	}
+	return attempts, nil
+}
+
+func (d *DB) ListExactRecoveryPushAttemptObservations(runID string) ([]ExactRecoveryPushAttemptObservation, error) {
+	rows, err := d.sql.Query(
+		`SELECT run_id, attempt, sequence, operation_id, observation, state, observed_at
+		 FROM run_recovery_push_attempt_observations
+		 WHERE run_id = ? ORDER BY attempt, sequence`,
+		runID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list exact recovery Push attempt observations: %w", err)
+	}
+	defer rows.Close()
+	var observations []ExactRecoveryPushAttemptObservation
+	for rows.Next() {
+		var observation ExactRecoveryPushAttemptObservation
+		if err := rows.Scan(
+			&observation.RunID, &observation.Attempt, &observation.Sequence,
+			&observation.OperationID, &observation.Observation,
+			&observation.State, &observation.ObservedAt,
+		); err != nil {
+			return nil, fmt.Errorf("list exact recovery Push attempt observations: %w", err)
+		}
+		observations = append(observations, observation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list exact recovery Push attempt observations: %w", err)
+	}
+	return observations, nil
+}
+
+func appendExactRecoveryPushAttemptObservation(tx *sql.Tx, operation *ExactRecoveryPushOperation, observed, state string) error {
+	var sequence int
+	if err := tx.QueryRow(
+		`SELECT COALESCE(MAX(sequence), 0) + 1
+		 FROM run_recovery_push_attempt_observations WHERE run_id = ? AND attempt = ?`,
+		operation.RunID, operation.Attempt,
+	).Scan(&sequence); err != nil {
+		return fmt.Errorf("append exact recovery Push attempt observation: sequence: %w", err)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO run_recovery_push_attempt_observations (
+			run_id, attempt, sequence, operation_id, observation, state, observed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		operation.RunID, operation.Attempt, sequence, operation.OperationID,
+		observed, state, now(),
+	); err != nil {
+		return fmt.Errorf("append exact recovery Push attempt observation: %w", err)
+	}
+	return nil
 }
 
 func appendExactRecoveryPushOperationEvent(tx *sql.Tx, operation *ExactRecoveryPushOperation) error {
@@ -208,13 +426,35 @@ func appendExactRecoveryPushOperationEvent(tx *sql.Tx, operation *ExactRecoveryP
 	return nil
 }
 
-func rotateExactRecoveryPushOperation(tx *sql.Tx, operation *ExactRecoveryPushOperation) error {
+func rotateExactRecoveryPushOperation(tx *sql.Tx, operation *ExactRecoveryPushOperation, observation *ExactRecoveryRefObservation, deadlineAt int64, maxAttempts int) error {
 	if operation == nil || operation.Phase != ExactRecoveryPushInvoked {
 		return fmt.Errorf("rotate exact recovery Push operation: invocation is missing")
 	}
 	ts := now()
-	nextID := newID()
+	if observation == nil || observation.State != ExactRecoveryRefObservationStale ||
+		observation.LastObservation != operation.StaleOID || deadlineAt <= ts {
+		return fmt.Errorf("rotate exact recovery Push operation: exact no-change proof or fresh deadline is missing")
+	}
+	if operation.Attempt >= maxAttempts {
+		return fmt.Errorf("rotate exact recovery Push operation: attempt budget exhausted")
+	}
+	disposition := ExactRecoveryPushNotApplied
 	result, err := tx.Exec(
+		`UPDATE run_recovery_push_attempts
+		 SET disposition = ?, closed_at = ?
+		 WHERE run_id = ? AND attempt = ? AND operation_id = ? AND phase = ?
+		   AND disposition IS NULL AND invoked_at IS NOT NULL AND closed_at IS NULL`,
+		disposition, ts, operation.RunID, operation.Attempt, operation.OperationID,
+		ExactRecoveryPushInvoked,
+	)
+	if err != nil {
+		return fmt.Errorf("rotate exact recovery Push operation: close attempt: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("rotate exact recovery Push operation: immutable attempt changed")
+	}
+	nextID := newID()
+	result, err = tx.Exec(
 		`UPDATE run_recovery_push_operations
 		 SET operation_id = ?, attempt = attempt + 1, phase = ?,
 		     created_at = ?, invoked_at = NULL, bound_at = NULL, updated_at = ?
@@ -236,7 +476,27 @@ func rotateExactRecoveryPushOperation(tx *sql.Tx, operation *ExactRecoveryPushOp
 	operation.InvokedAt = nil
 	operation.BoundAt = nil
 	operation.UpdatedAt = ts
-	return appendExactRecoveryPushOperationEvent(tx, operation)
+	if err := insertExactRecoveryPushAttempt(tx, operation, deadlineAt); err != nil {
+		return err
+	}
+	result, err = tx.Exec(
+		`UPDATE run_recovery_ref_observations
+		 SET deadline_at = ?, state = ?, last_observation = ?, updated_at = ?
+		 WHERE run_id = ? AND deadline_at = ? AND state = ? AND last_observation = ?`,
+		deadlineAt, ExactRecoveryRefObservationStale, operation.StaleOID, ts,
+		operation.RunID, observation.DeadlineAt,
+		ExactRecoveryRefObservationStale, operation.StaleOID,
+	)
+	if err != nil {
+		return fmt.Errorf("rotate exact recovery Push operation: refresh deadline: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("rotate exact recovery Push operation: observation deadline changed")
+	}
+	if err := appendExactRecoveryPushOperationEvent(tx, operation); err != nil {
+		return err
+	}
+	return appendExactRecoveryPushAttemptObservation(tx, operation, operation.StaleOID, ExactRecoveryRefObservationStale)
 }
 
 func validateExactRecoveryPushOperationIdentity(operation *ExactRecoveryPushOperation, observation *ExactRecoveryRefObservation, event *RunRecoveryEvent) error {
@@ -331,6 +591,20 @@ func (d *DB) MarkExactRecoveryPushInvoked(runID, operationID, observedRemote str
 	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 		return fmt.Errorf("mark exact recovery Push invoked: durable operation changed")
 	}
+	result, err = tx.Exec(
+		`UPDATE run_recovery_push_attempts
+		 SET phase = ?, invoked_at = ?
+		 WHERE run_id = ? AND attempt = ? AND operation_id = ? AND phase = ?
+		   AND disposition IS NULL AND invoked_at IS NULL AND closed_at IS NULL`,
+		ExactRecoveryPushInvoked, ts, runID, operation.Attempt,
+		operation.OperationID, ExactRecoveryPushPrepared,
+	)
+	if err != nil {
+		return fmt.Errorf("mark exact recovery Push invoked: update attempt: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("mark exact recovery Push invoked: immutable attempt changed")
+	}
 	operation.Phase = ExactRecoveryPushInvoked
 	operation.InvokedAt = &ts
 	operation.UpdatedAt = ts
@@ -403,6 +677,20 @@ func bindExactRecoveryPushOperation(tx *sql.Tx, run *Run, operation *ExactRecove
 	}
 	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 		return fmt.Errorf("bind exact recovery Push operation: operation changed")
+	}
+	result, err = tx.Exec(
+		`UPDATE run_recovery_push_attempts
+		 SET phase = ?, disposition = ?, closed_at = ?
+		 WHERE run_id = ? AND attempt = ? AND operation_id = ? AND phase = ?
+		   AND disposition IS NULL AND invoked_at IS NOT NULL AND closed_at IS NULL`,
+		ExactRecoveryPushBound, ExactRecoveryPushApplied, ts, run.ID,
+		operation.Attempt, operation.OperationID, ExactRecoveryPushInvoked,
+	)
+	if err != nil {
+		return fmt.Errorf("bind exact recovery Push operation: update attempt: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("bind exact recovery Push operation: immutable attempt changed")
 	}
 	operation.Phase = ExactRecoveryPushBound
 	operation.BoundAt = &ts

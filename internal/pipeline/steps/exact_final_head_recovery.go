@@ -258,7 +258,8 @@ func ReconcileStaleExactFinalHeadPushCustody(ctx context.Context, database *db.D
 	if _, err := sctx.BindSourceRef(); err != nil {
 		return false, err
 	}
-	reconciled, err := database.ReconcileStaleExactRecoveryPushCustody(run.ID, remoteHead, ref, run.HeadSHA, maxReplays, expected)
+	nextDeadlineAt := time.Now().Add(exactRecoveryRefReconcileWindow).Unix()
+	reconciled, err := database.ReconcileStaleExactRecoveryPushCustody(run.ID, remoteHead, ref, run.HeadSHA, nextDeadlineAt, maxReplays, expected)
 	if err != nil {
 		return false, err
 	}

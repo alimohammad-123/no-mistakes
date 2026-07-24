@@ -222,10 +222,10 @@ func (d *DB) ExactRecoveryPushAlreadyBound(runID, headSHA string) (bool, error) 
 	return true, nil
 }
 
-func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef, sourceHead string, maxReplays int, expected []types.StepName) (bool, error) {
+func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef, sourceHead string, nextDeadlineAt int64, maxReplays int, expected []types.StepName) (bool, error) {
 	if strings.TrimSpace(runID) == "" || strings.TrimSpace(remoteHead) == "" ||
 		strings.TrimSpace(sourceRef) == "" || strings.TrimSpace(sourceHead) == "" ||
-		maxReplays <= 0 || len(expected) == 0 {
+		nextDeadlineAt <= now() || maxReplays <= 0 || len(expected) == 0 {
 		return false, fmt.Errorf("reconcile stale exact recovery Push custody: identities, remote head, replay bound, and topology are required")
 	}
 	tx, err := d.sql.Begin()
@@ -346,7 +346,7 @@ func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef
 			switch operation.Phase {
 			case ExactRecoveryPushPrepared:
 			case ExactRecoveryPushInvoked:
-				if err := rotateExactRecoveryPushOperation(tx, operation); err != nil {
+				if err := rotateExactRecoveryPushOperation(tx, operation, observation, nextDeadlineAt, maxReplays); err != nil {
 					return false, err
 				}
 			default:

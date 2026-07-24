@@ -642,7 +642,8 @@ func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.
 				}
 			}
 			reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
-				restored.ID, tc.remoteHead, "refs/heads/feature", restored.HeadSHA, 3, types.AllSteps(),
+				restored.ID, tc.remoteHead, "refs/heads/feature", restored.HeadSHA,
+				now()+30, 3, types.AllSteps(),
 			)
 			if tc.wantError {
 				if err == nil || reconciled {
@@ -678,7 +679,8 @@ func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.
 			}
 			if !tc.wantError {
 				if again, err := f.d.ReconcileStaleExactRecoveryPushCustody(
-					restored.ID, tc.remoteHead, "refs/heads/feature", restored.HeadSHA, 3, types.AllSteps(),
+					restored.ID, tc.remoteHead, "refs/heads/feature", restored.HeadSHA,
+					now()+30, 3, types.AllSteps(),
 				); err != nil || again {
 					t.Fatalf("repeated reconciliation = %v, %v", again, err)
 				}
@@ -690,7 +692,8 @@ func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.
 func TestReconcileStaleExactRecoveryPushCustodyRejectsChangedSourceClaim(t *testing.T) {
 	f, restored, _ := prepareExactRecoveryPushCrash(t)
 	reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
-		restored.ID, f.pushed, "refs/heads/feature", "superseding-head", 3, types.AllSteps(),
+		restored.ID, f.pushed, "refs/heads/feature", "superseding-head",
+		now()+30, 3, types.AllSteps(),
 	)
 	if err == nil || reconciled {
 		t.Fatalf("changed source claim reconciled: reconciled=%v err=%v", reconciled, err)
@@ -701,6 +704,184 @@ func TestReconcileStaleExactRecoveryPushCustodyRejectsChangedSourceClaim(t *test
 	}
 	if !got.PushActive || got.LastPushedSHA == nil || *got.LastPushedSHA != f.pushed {
 		t.Fatalf("changed source claim mutated recovery: %#v", got)
+	}
+}
+
+func TestReconcileStaleExactRecoveryPushCustodyRotatesFreshAttemptDeadline(t *testing.T) {
+	f, restored, _ := prepareExactRecoveryPushCrash(t)
+	firstDeadline := now() + 30
+	if _, err := f.d.PrepareExactRecoveryRefObservation(
+		restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+		f.pushed, firstDeadline,
+	); err != nil {
+		t.Fatal(err)
+	}
+	first, err := f.d.GetExactRecoveryPushOperation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.MarkExactRecoveryPushInvoked(restored.ID, first.OperationID, f.pushed); err != nil {
+		t.Fatal(err)
+	}
+	expiredPreparedAt := now() - 60
+	expiredDeadline := now() - 30
+	if _, err := f.d.sql.Exec(
+		`UPDATE run_recovery_ref_observations SET deadline_at = ? WHERE run_id = ?`,
+		expiredDeadline, restored.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.d.sql.Exec(
+		`UPDATE run_recovery_push_attempts
+		 SET prepared_at = ?, deadline_at = ?
+		 WHERE run_id = ? AND attempt = 1`,
+		expiredPreparedAt, expiredDeadline, restored.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	nextDeadline := now() + 90
+	reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+		restored.ID, f.pushed, "refs/heads/feature", restored.HeadSHA,
+		nextDeadline, 3, types.AllSteps(),
+	)
+	if err != nil || !reconciled {
+		t.Fatalf("delayed restart reconciliation = %v, %v", reconciled, err)
+	}
+	attempts, err := f.d.ListExactRecoveryPushAttempts(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("attempt history length = %d, want 2", len(attempts))
+	}
+	if attempts[0].OperationID != first.OperationID ||
+		attempts[0].DeadlineAt != expiredDeadline ||
+		attempts[0].Disposition == nil ||
+		*attempts[0].Disposition != ExactRecoveryPushNotApplied ||
+		attempts[0].ClosedAt == nil {
+		t.Fatalf("closed attempt history changed: %#v", attempts[0])
+	}
+	if attempts[1].OperationID == first.OperationID ||
+		attempts[1].DeadlineAt != nextDeadline ||
+		attempts[1].Phase != ExactRecoveryPushPrepared ||
+		attempts[1].Disposition != nil {
+		t.Fatalf("fresh attempt is inconsistent: %#v", attempts[1])
+	}
+	journal, err := f.d.GetExactRecoveryRefObservation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if journal.DeadlineAt != nextDeadline || journal.State != ExactRecoveryRefObservationStale {
+		t.Fatalf("rotated observation journal = %#v", journal)
+	}
+	observations, err := f.d.ListExactRecoveryPushAttemptObservations(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observations) < 2 ||
+		observations[0].OperationID != attempts[0].OperationID ||
+		observations[len(observations)-1].OperationID != attempts[1].OperationID {
+		t.Fatalf("attempt-scoped observations = %#v", observations)
+	}
+	if err := f.d.SetRunPushActive(restored.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.d.PrepareExactRecoveryRefObservation(
+		restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+		f.pushed, now()+10,
+	); err != nil {
+		t.Fatalf("fresh attempt reused expired deadline: %v", err)
+	}
+}
+
+func TestReconcileStaleExactRecoveryPushCustodyBoundsAttemptRotation(t *testing.T) {
+	f, restored, _ := prepareExactRecoveryPushCrash(t)
+	if _, err := f.d.PrepareExactRecoveryRefObservation(
+		restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+		f.pushed, now()+30,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		operation, err := f.d.GetExactRecoveryPushOperation(restored.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if operation.Attempt != attempt {
+			t.Fatalf("operation attempt = %d, want %d", operation.Attempt, attempt)
+		}
+		if err := f.d.MarkExactRecoveryPushInvoked(restored.ID, operation.OperationID, f.pushed); err != nil {
+			t.Fatal(err)
+		}
+		reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+			restored.ID, f.pushed, "refs/heads/feature", restored.HeadSHA,
+			now()+int64(60+attempt), 3, types.AllSteps(),
+		)
+		if attempt < 3 {
+			if err != nil || !reconciled {
+				t.Fatalf("attempt %d rotation = %v, %v", attempt, reconciled, err)
+			}
+			if err := f.d.SetRunPushActive(restored.ID, true); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err == nil || reconciled {
+			t.Fatalf("exhausted attempt rotated: reconciled=%v err=%v", reconciled, err)
+		}
+	}
+	run, err := f.d.GetRun(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !run.PushActive {
+		t.Fatal("attempt exhaustion released Push custody")
+	}
+	attempts, err := f.d.ListExactRecoveryPushAttempts(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 3 || attempts[2].Disposition != nil {
+		t.Fatalf("attempt budget history = %#v", attempts)
+	}
+}
+
+func TestExactRecoveryPushOperationInvocationCASIsSingleOwner(t *testing.T) {
+	f, restored, _ := prepareExactRecoveryPushCrash(t)
+	if _, err := f.d.PrepareExactRecoveryRefObservation(
+		restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+		f.pushed, now()+30,
+	); err != nil {
+		t.Fatal(err)
+	}
+	first, err := f.d.GetExactRecoveryPushOperation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.MarkExactRecoveryPushInvoked(restored.ID, first.OperationID, f.pushed); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.MarkExactRecoveryPushInvoked(restored.ID, first.OperationID, f.pushed); err == nil {
+		t.Fatal("second owner marked the same operation invoked")
+	}
+	if reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+		restored.ID, f.pushed, "refs/heads/feature", restored.HeadSHA,
+		now()+60, 3, types.AllSteps(),
+	); err != nil || !reconciled {
+		t.Fatalf("rotate first owner = %v, %v", reconciled, err)
+	}
+	if err := f.d.SetRunPushActive(restored.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.MarkExactRecoveryPushInvoked(restored.ID, first.OperationID, f.pushed); err == nil {
+		t.Fatal("stale operation owner crossed the rotation CAS")
+	}
+	current, err := f.d.GetExactRecoveryPushOperation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Attempt != 2 || current.Phase != ExactRecoveryPushPrepared {
+		t.Fatalf("competing owner changed current operation: %#v", current)
 	}
 }
 

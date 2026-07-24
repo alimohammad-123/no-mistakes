@@ -154,6 +154,39 @@ CREATE TABLE IF NOT EXISTS run_recovery_push_operation_events (
     PRIMARY KEY (run_id, sequence)
 );
 
+CREATE TABLE IF NOT EXISTS run_recovery_push_attempts (
+    run_id               TEXT NOT NULL REFERENCES run_recovery_push_operations(run_id) ON DELETE CASCADE,
+    attempt              INTEGER NOT NULL,
+    operation_id         TEXT NOT NULL UNIQUE,
+    phase                TEXT NOT NULL,
+    source_ref           TEXT NOT NULL,
+    stale_oid            TEXT NOT NULL,
+    target_oid           TEXT NOT NULL,
+    target_kind          TEXT NOT NULL,
+    target_fingerprint   TEXT NOT NULL,
+    prior_generation     INTEGER NOT NULL,
+    target_generation    INTEGER NOT NULL,
+    prior_pushed_at      INTEGER NOT NULL,
+    deadline_at          INTEGER NOT NULL,
+    disposition          TEXT,
+    prepared_at          INTEGER NOT NULL,
+    invoked_at           INTEGER,
+    closed_at            INTEGER,
+    PRIMARY KEY (run_id, attempt)
+);
+
+CREATE TABLE IF NOT EXISTS run_recovery_push_attempt_observations (
+    run_id               TEXT NOT NULL,
+    attempt              INTEGER NOT NULL,
+    sequence             INTEGER NOT NULL,
+    operation_id         TEXT NOT NULL,
+    observation          TEXT NOT NULL,
+    state                TEXT NOT NULL,
+    observed_at          INTEGER NOT NULL,
+    PRIMARY KEY (run_id, attempt, sequence),
+    FOREIGN KEY (run_id, attempt) REFERENCES run_recovery_push_attempts(run_id, attempt) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS run_recovery_ref_observation_events (
     run_id               TEXT NOT NULL REFERENCES run_recovery_ref_observations(run_id) ON DELETE CASCADE,
     attempt              INTEGER NOT NULL,

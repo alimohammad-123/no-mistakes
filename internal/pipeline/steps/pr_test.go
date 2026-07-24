@@ -483,7 +483,7 @@ func TestPushStep_ExactRecoveryAzureRefJournalPreventsAmbiguousPublication(t *te
 		}
 		reconciled, err := sctx.DB.ReconcileStaleExactRecoveryPushCustody(
 			sctx.Run.ID, sctx.Run.BaseSHA, "refs/heads/feature", sctx.Run.HeadSHA,
-			3, types.AllSteps(),
+			time.Now().Add(time.Minute).Unix(), 3, types.AllSteps(),
 		)
 		if err != nil || !reconciled {
 			t.Fatalf("reconcile pre-mutation crash = %v, %v", reconciled, err)
@@ -529,7 +529,7 @@ func TestPushStep_ExactRecoveryAzureRefJournalPreventsAmbiguousPublication(t *te
 		}
 		reconciled, err := sctx.DB.ReconcileStaleExactRecoveryPushCustody(
 			sctx.Run.ID, sctx.Run.HeadSHA, "refs/heads/feature", sctx.Run.HeadSHA,
-			3, types.AllSteps(),
+			time.Now().Add(time.Minute).Unix(), 3, types.AllSteps(),
 		)
 		if err != nil || !reconciled {
 			t.Fatalf("reconcile post-mutation crash = %v, %v", reconciled, err)

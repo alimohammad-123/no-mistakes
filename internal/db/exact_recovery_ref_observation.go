@@ -243,7 +243,11 @@ func (d *DB) PrepareExactRecoveryRefObservation(runID, provider, sourceRef, expe
 	); err != nil {
 		return nil, fmt.Errorf("prepare exact recovery ref observation: persist event: %w", err)
 	}
-	if _, err := createExactRecoveryPushOperation(tx, event); err != nil {
+	operation, err := createExactRecoveryPushOperation(tx, event, deadlineAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := appendExactRecoveryPushAttemptObservation(tx, operation, observedOID, state); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -345,6 +349,9 @@ func recordExactRecoveryRefObservation(tx *sql.Tx, observation *ExactRecoveryRef
 		observation.RunID, observation.Attempts+1, observed, observation.State, state, now(),
 	); err != nil {
 		return fmt.Errorf("record exact recovery ref observation event: %w", err)
+	}
+	if err := appendExactRecoveryPushAttemptObservation(tx, operation, observed, state); err != nil {
+		return err
 	}
 	if state == ExactRecoveryRefObservationAmbiguous {
 		return fmt.Errorf("exact recovery ref observation %q is ambiguous after %s", observed, observation.State)
