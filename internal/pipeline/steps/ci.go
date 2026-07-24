@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -161,7 +162,10 @@ func (s *CIStep) validateExactRecoveryCITerminalPair(sctx *pipeline.StepContext,
 	snapshot, err := reader.GetPRSnapshot(sctx.Ctx, pr, request)
 	s.afterPoll("merged-snapshot")
 	if err != nil {
-		return fmt.Errorf("read merged exact recovery PR snapshot: %w", err)
+		return preferExactRecoveryCICustodyError(
+			sctx,
+			fmt.Errorf("read merged exact recovery PR snapshot: %w", err),
+		)
 	}
 	expectedNumber := strings.TrimSpace(pr.Number)
 	if expectedNumber == "" {
@@ -232,13 +236,24 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 	host, skipReason := hostFactory(sctx, provider)
 	if host == nil {
+		unavailableErr := fmt.Errorf("cannot monitor CI: %s", skipReason)
+		required, err := exactRecoveryCIRequired(sctx)
+		if err != nil {
+			return nil, err
+		}
+		if required {
+			return nil, preferExactRecoveryCICustodyError(sctx, unavailableErr)
+		}
 		sctx.Log(fmt.Sprintf("skipping CI: %s", skipReason))
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
 	if err := host.Available(ctx); err != nil {
-		if custodyErr := validateExactRecoveryCICustodyBounded(sctx); custodyErr != nil {
-			clearCIMonitorReady(sctx)
-			return nil, custodyErr
+		required, recoveryErr := exactRecoveryCIRequired(sctx)
+		if recoveryErr != nil {
+			return nil, recoveryErr
+		}
+		if required {
+			return nil, preferExactRecoveryCICustodyError(sctx, err)
 		}
 		sctx.Log(fmt.Sprintf("skipping CI: %v", err))
 		return &pipeline.StepOutcome{Skipped: true}, nil
@@ -258,6 +273,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		}
 	}
 	if prURL == "" {
+		required, err := exactRecoveryCIRequired(sctx)
+		if err != nil {
+			return nil, err
+		}
+		if required {
+			return nil, fmt.Errorf("exact recovery CI requires the existing PR URL")
+		}
 		sctx.Log("no PR URL found, skipping CI")
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
@@ -307,10 +329,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		state, stateErr := host.GetPRState(ctx, pr)
 		s.afterPoll("timeout-state")
 		if stateErr != nil {
-			if err := validateExactRecoveryCICustodyBounded(sctx); err != nil {
-				clearCIMonitorReady(sctx)
-				return nil, err
-			}
+			return nil, preferExactRecoveryCICustodyError(sctx, stateErr)
 		} else if err := s.validateExactRecoveryCITerminalPair(sctx, host, pr, state); err != nil {
 			clearCIMonitorReady(sctx)
 			return nil, err
@@ -374,7 +393,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		state, err := host.GetPRState(ctx, pr)
 		s.afterPoll("state")
 		if err != nil {
-			if pairErr := validateExactRecoveryCICustodyBounded(sctx); pairErr != nil {
+			if pairErr := preferExactRecoveryCICustodyError(sctx, err); !errors.Is(pairErr, err) {
 				clearCIMonitorReady(sctx)
 				return nil, pairErr
 			}
@@ -409,7 +428,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			s.afterPoll("mergeable")
 			var custodyErr error
 			if mergeErr != nil {
-				custodyErr = validateExactRecoveryCICustodyBounded(sctx)
+				custodyErr = preferExactRecoveryCICustodyError(sctx, mergeErr)
+				if errors.Is(custodyErr, mergeErr) {
+					custodyErr = nil
+				}
 			} else {
 				custodyErr = validateBoundExactRecoveryPushReceipt(sctx)
 			}
@@ -440,7 +462,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		s.afterPoll("checks")
 		var pairErr error
 		if err != nil {
-			pairErr = validateExactRecoveryCICustodyBounded(sctx)
+			pairErr = preferExactRecoveryCICustodyError(sctx, err)
+			if errors.Is(pairErr, err) {
+				pairErr = nil
+			}
 		} else {
 			pairErr = validateBoundExactRecoveryPushReceipt(sctx)
 		}
@@ -599,11 +624,35 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 }
 
 func preferExactRecoveryCICustodyError(sctx *pipeline.StepContext, fallback error) error {
-	if err := validateExactRecoveryCICustodyBounded(sctx); err != nil {
+	_ = validateExactRecoveryCICustodyBounded(sctx)
+	if err := confirmedExactRecoveryCIAmbiguity(sctx); err != nil {
 		clearCIMonitorReady(sctx)
 		return err
 	}
+	required, _ := exactRecoveryCIRequired(sctx)
+	if required {
+		clearCIMonitorReady(sctx)
+	}
 	return fallback
+}
+
+func confirmedExactRecoveryCIAmbiguity(sctx *pipeline.StepContext) error {
+	if sctx == nil || sctx.DB == nil || sctx.Run == nil {
+		return nil
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil || ambiguity == nil {
+		return nil
+	}
+	return fmt.Errorf("exact recovery remote ref is terminally ambiguous: %s", ambiguity.Classification)
+}
+
+func exactRecoveryCIRequired(sctx *pipeline.StepContext) (bool, error) {
+	if sctx == nil || sctx.DB == nil || sctx.Run == nil {
+		return false, nil
+	}
+	event, err := sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	return event != nil, err
 }
 
 func validateExactRecoveryCICustodyBounded(sctx *pipeline.StepContext) error {

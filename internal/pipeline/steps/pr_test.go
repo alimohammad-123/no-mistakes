@@ -102,6 +102,7 @@ type exactRecoveryPRHost struct {
 	updateHook       func()
 	updateErr        error
 	stateErr         error
+	availableErr     error
 	recoverySnapshot bool
 	snapshotErr      error
 	snapshotRequests []scm.PRSnapshotRequest
@@ -111,7 +112,7 @@ func (h *exactRecoveryPRHost) Provider() scm.Provider { return scm.ProviderGitHu
 func (h *exactRecoveryPRHost) Capabilities() scm.Capabilities {
 	return scm.Capabilities{RecoverySnapshot: h.recoverySnapshot}
 }
-func (h *exactRecoveryPRHost) Available(context.Context) error { return nil }
+func (h *exactRecoveryPRHost) Available(context.Context) error { return h.availableErr }
 func (h *exactRecoveryPRHost) FindPR(context.Context, string, string) (*scm.PR, error) {
 	return h.pr, nil
 }

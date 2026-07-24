@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -264,6 +265,176 @@ func TestCIStep_ReconcileExactRecoveryCancellationChecksCustody(t *testing.T) {
 	if ambiguity == nil || ambiguity.Classification != db.ExactRecoveryRemoteRefMissing {
 		t.Fatalf("cancellation ambiguity = %#v", ambiguity)
 	}
+}
+
+func TestCIStep_ReconcileExactRecoveryCancellationPreservesCauseWhenCustodyUncheckable(t *testing.T) {
+	sctx, host := exactRecoveryCIContext(t)
+	if err := sctx.DB.SetRunCIReady(sctx.Run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	oldLsRemote := exactRecoveryLsRemote
+	t.Cleanup(func() {
+		exactRecoveryLsRemote = oldLsRemote
+	})
+	exactRecoveryLsRemote = func(context.Context, string, string, string) (git.RemoteRefObservation, error) {
+		return git.RemoteRefObservation{}, errors.New("https://user:secret@example.invalid transient custody failure")
+	}
+	cancelled, cancel := context.WithCancel(sctx.Ctx)
+	cancel()
+	sctx.Ctx = cancelled
+	step := &CIStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+		return host, ""
+	}}
+	completed, err := step.ReconcileApprovalGate(sctx)
+	if completed || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation provenance: completed=%v err=%v", completed, err)
+	}
+	if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "custody failure") {
+		t.Fatalf("secondary custody diagnostic leaked into cancellation: %v", err)
+	}
+	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.CIReadyAt != nil {
+		t.Fatalf("cancellation retained readiness at %d", *persisted.CIReadyAt)
+	}
+}
+
+func TestCIStep_ReconcileExactRecoveryMergedSnapshotErrorChecksCustody(t *testing.T) {
+	snapshotErr := errors.New("snapshot provider unavailable")
+	for _, test := range []struct {
+		name          string
+		deleteReceipt bool
+		wantSnapshot  bool
+	}{
+		{name: "intact pair preserves snapshot error", wantSnapshot: true},
+		{name: "missing receipt takes precedence", deleteReceipt: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sctx, host := exactRecoveryCIContext(t)
+			host.state = scm.PRStateMerged
+			host.merged = true
+			host.snapshotErr = snapshotErr
+			operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sctx.DB.SetRunCIReady(sctx.Run.ID, true); err != nil {
+				t.Fatal(err)
+			}
+			step := &CIStep{
+				hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+					return host, ""
+				},
+				afterProviderPoll: func(name string) {
+					if test.deleteReceipt && name == "merged-snapshot" {
+						gitCmd(t, resolvePushURL(sctx), "update-ref", "-d", operation.ReceiptRef)
+					}
+				},
+			}
+			completed, err := step.ReconcileApprovalGate(sctx)
+			if completed || err == nil {
+				t.Fatalf("snapshot error reconciliation: completed=%v err=%v", completed, err)
+			}
+			if errors.Is(err, snapshotErr) != test.wantSnapshot {
+				t.Fatalf("snapshot error precedence = %v, want %v: %v", errors.Is(err, snapshotErr), test.wantSnapshot, err)
+			}
+			persisted, getErr := sctx.DB.GetRun(sctx.Run.ID)
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			if persisted.CIReadyAt != nil {
+				t.Fatalf("snapshot failure retained readiness at %d", *persisted.CIReadyAt)
+			}
+			if test.deleteReceipt {
+				ambiguity, ambiguityErr := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+				if ambiguityErr != nil {
+					t.Fatal(ambiguityErr)
+				}
+				if ambiguity == nil || ambiguity.Classification != db.ExactRecoveryRemoteRefMissing {
+					t.Fatalf("snapshot-error ambiguity = %#v", ambiguity)
+				}
+			}
+		})
+	}
+}
+
+func TestCIStep_ReconcileExactRecoverySnapshotErrorSurvivesUncheckableCustody(t *testing.T) {
+	sctx, host := exactRecoveryCIContext(t)
+	host.state = scm.PRStateMerged
+	host.merged = true
+	snapshotErr := errors.New("snapshot provider unavailable")
+	host.snapshotErr = snapshotErr
+	oldLsRemote := exactRecoveryLsRemote
+	t.Cleanup(func() {
+		exactRecoveryLsRemote = oldLsRemote
+	})
+	exactRecoveryLsRemote = func(context.Context, string, string, string) (git.RemoteRefObservation, error) {
+		return git.RemoteRefObservation{}, context.DeadlineExceeded
+	}
+	step := &CIStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+		return host, ""
+	}}
+	completed, err := step.ReconcileApprovalGate(sctx)
+	if completed || !errors.Is(err, snapshotErr) {
+		t.Fatalf("snapshot fallback provenance: completed=%v err=%v", completed, err)
+	}
+}
+
+func TestCIStep_ProviderAvailabilityRecoveryRequirement(t *testing.T) {
+	providerErr := errors.New("provider CLI unavailable")
+	for _, test := range []struct {
+		name              string
+		deleteReceipt     bool
+		wantProviderError bool
+	}{
+		{name: "exact recovery preserves provider error", wantProviderError: true},
+		{name: "exact recovery ambiguity takes precedence", deleteReceipt: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sctx, host := exactRecoveryCIContext(t)
+			host.availableErr = providerErr
+			if test.deleteReceipt {
+				operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, resolvePushURL(sctx), "update-ref", "-d", operation.ReceiptRef)
+			}
+			step := &CIStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+				return host, ""
+			}}
+			outcome, err := step.Execute(sctx)
+			if outcome != nil || err == nil {
+				t.Fatalf("exact recovery availability: outcome=%#v err=%v", outcome, err)
+			}
+			if errors.Is(err, providerErr) != test.wantProviderError {
+				t.Fatalf("availability error precedence = %v, want %v: %v", errors.Is(err, providerErr), test.wantProviderError, err)
+			}
+			persisted, getErr := sctx.DB.GetRun(sctx.Run.ID)
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			if persisted.CIReadyAt != nil {
+				t.Fatalf("provider unavailability retained readiness at %d", *persisted.CIReadyAt)
+			}
+		})
+	}
+	t.Run("ordinary run skips", func(t *testing.T) {
+		dir, baseSHA, headSHA := setupGitRepo(t)
+		sctx := newTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+		prURL := "https://github.com/test/repo/pull/42"
+		sctx.Run.PRURL = &prURL
+		host := &exactRecoveryPRHost{availableErr: providerErr}
+		step := &CIStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+			return host, ""
+		}}
+		outcome, err := step.Execute(sctx)
+		if err != nil || outcome == nil || !outcome.Skipped {
+			t.Fatalf("ordinary availability: outcome=%#v err=%v", outcome, err)
+		}
+	})
 }
 
 func TestCIStep_ExactRecoveryTimeoutChecksCustody(t *testing.T) {
