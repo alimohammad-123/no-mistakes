@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -22,6 +23,9 @@ import (
 func TestAxiRecoverFinalHeadCapacityJourney(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude"})
 	t.Setenv("NM_E2E_SYNTHETIC_EXACT_FINAL_HEAD_RECOVERY", "1")
+	t.Setenv("FAKEAGENT_GH_MODE", "exact-recovery")
+	t.Setenv("FAKEAGENT_GH_LOG", filepath.Join(filepath.Dir(h.AgentLog), "gh-exact-recovery.log"))
+	t.Setenv("FAKEAGENT_GH_STATE_DIR", filepath.Dir(h.AgentLog))
 
 	trustedConfig := "allow_repo_commands: true\ncommands:\n  test: \"true\"\n"
 	h.CommitChange("main", ".no-mistakes.yaml", trustedConfig, "configure exact test")
@@ -33,6 +37,7 @@ func TestAxiRecoverFinalHeadCapacityJourney(t *testing.T) {
 		t.Fatalf("push published feature head: %v\n%s", err, out)
 	}
 	exact := h.CommitChange("feature/exact-final-head", "exact.txt", "exact\n", "unpublished exact candidate")
+	t.Setenv("FAKEAGENT_GH_HEAD", exact)
 	base := strings.TrimSpace(string(mustGitOutput(t, h, h.WorkDir, "rev-parse", "main")))
 
 	if out, err := h.Run("init"); err != nil {
@@ -51,6 +56,10 @@ func TestAxiRecoverFinalHeadCapacityJourney(t *testing.T) {
 	repo, err := database.GetRepoByPath(workingPath)
 	if err != nil || repo == nil {
 		t.Fatalf("registered repo = %#v, err %v", repo, err)
+	}
+	repo, err = database.UpdateRepoMetadata(repo.ID, "https://github.com/test/project.git", repo.DefaultBranch)
+	if err != nil {
+		t.Fatalf("bind synthetic GitHub repository identity: %v", err)
 	}
 	gate := p.RepoDir(repo.ID)
 	if out, err := h.runGit(context.Background(), gate, "fetch", h.WorkDir, exact); err != nil {
@@ -89,7 +98,7 @@ func TestAxiRecoverFinalHeadCapacityJourney(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := database.UpdateRunPushBinding(run.ID, db.PushBinding{
-		HeadSHA: published, TargetKind: "upstream", TargetFingerprint: "e2e-target", Ref: "refs/heads/feature/exact-final-head",
+		HeadSHA: published, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(h.UpstreamDir), Ref: "refs/heads/feature/exact-final-head",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -121,8 +130,10 @@ func TestAxiRecoverFinalHeadCapacityJourney(t *testing.T) {
 
 	out, err := h.Run("axi", "recover-final-head", "--run", run.ID)
 	if err != nil {
-		t.Fatalf("recover final head: %v\n%s", err, out)
+		ghLog, _ := os.ReadFile(filepath.Join(filepath.Dir(h.AgentLog), "gh-exact-recovery.log"))
+		t.Fatalf("recover final head: %v\nrepo upstream: %s\ngh log:\n%s\n%s", err, repo.UpstreamURL, ghLog, out)
 	}
+	t.Logf("recover-final-head CLI output:\n%s", out)
 	for _, want := range []string{"outcome: passed", run.ID} {
 		if !strings.Contains(out, want) {
 			t.Errorf("recovery output missing %q:\n%s", want, out)

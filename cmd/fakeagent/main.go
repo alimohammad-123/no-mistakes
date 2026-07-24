@@ -14,6 +14,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,9 @@ func run(argv []string) int {
 // returns non-zero (so SCM detection treats GitHub as unauthenticated)
 // and any other subcommand prints a clear error.
 func runGhStub(args []string) int {
+	if os.Getenv("FAKEAGENT_GH_MODE") == "exact-recovery" {
+		return runGhExactRecoveryStub(args)
+	}
 	if os.Getenv("FAKEAGENT_GH_MODE") == "fork-pr" {
 		return runGhForkPRStub(args)
 	}
@@ -115,6 +119,81 @@ func runGhForkPRStub(args []string) int {
 	}
 
 	fmt.Fprintf(os.Stderr, "fakeagent gh fork-pr: subcommand not implemented: %v\n", args)
+	return 1
+}
+
+func runGhExactRecoveryStub(args []string) int {
+	recordGhStubInvocation(args)
+	stateDir := os.Getenv("FAKEAGENT_GH_STATE_DIR")
+	titlePath := filepath.Join(stateDir, "title")
+	bodyPath := filepath.Join(stateDir, "body")
+	mergedPath := filepath.Join(stateDir, "merged")
+
+	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
+		return 0
+	}
+	if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {
+		fmt.Println(`[{"number":42,"url":"https://github.com/test/project/pull/42"}]`)
+		return 0
+	}
+	if len(args) >= 2 && args[0] == "pr" && args[1] == "edit" {
+		body, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fakeagent gh exact-recovery: read body: %v\n", err)
+			return 1
+		}
+		if err := os.WriteFile(titlePath, []byte(argAfter(args, "--title")), 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "fakeagent gh exact-recovery: write title: %v\n", err)
+			return 1
+		}
+		if err := os.WriteFile(bodyPath, body, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "fakeagent gh exact-recovery: write body: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	if len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
+		title := "fix: exact recovery"
+		body := "prior recovery body"
+		if data, err := os.ReadFile(titlePath); err == nil {
+			title = string(data)
+		}
+		if data, err := os.ReadFile(bodyPath); err == nil {
+			body = string(data)
+		}
+		if hasArgValue(args, "--json", "number,url,state,mergedAt,headRefOid,headRefName,baseRefName,title,body") {
+			_, mergedErr := os.Stat(mergedPath)
+			state := "OPEN"
+			var mergedAt any
+			if mergedErr == nil {
+				state = "MERGED"
+				mergedAt = "2026-01-01T00:00:00Z"
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
+				"number": 42, "url": "https://github.com/test/project/pull/42",
+				"state": state, "mergedAt": mergedAt,
+				"headRefOid": os.Getenv("FAKEAGENT_GH_HEAD"),
+				"headRefName": "feature/exact-final-head", "baseRefName": "main",
+				"title": title, "body": body,
+			})
+			return 0
+		}
+		if hasArgValue(args, "--json", "title,body") {
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"title": title, "body": body})
+			return 0
+		}
+		if hasArgValue(args, "--json", "state") {
+			if _, err := os.Stat(titlePath); err == nil {
+				_ = os.WriteFile(mergedPath, []byte("merged"), 0o644)
+				fmt.Println("MERGED")
+			} else {
+				fmt.Println("OPEN")
+			}
+			return 0
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "fakeagent gh exact-recovery: subcommand not implemented: %v\n", args)
 	return 1
 }
 
