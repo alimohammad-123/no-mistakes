@@ -1,0 +1,38 @@
+docs/src/content/docs/concepts/daemon.md
+  s_7b0dcaa05c2128::t_d51f27ae5e2da2 130
+internal/db/exact_final_head_delivery.go
+  s_7b0dcaa05c2128::t_9c467c7671b831 245-246,290,299
+  s_7b0dcaa05c2128::t_d51f27ae5e2da2 199-212,221-244,247-289,291-298,300-339
+  s_7b0dcaa05c2128::t_b5cf8537c4f6da 213-220
+internal/daemon/exact_final_head_recovery.go
+  s_7b0dcaa05c2128::t_d51f27ae5e2da2 26,30-34,36-59
+  s_7b0dcaa05c2128::t_b5cf8537c4f6da 35
+  s_7b0dcaa05c2128::t_b8d7d76d193d34 60
+docs/src/content/docs/reference/cli.md
+  s_7b0dcaa05c2128::t_d51f27ae5e2da2 158
+internal/db/exact_final_head_recovery_test.go
+  s_7b0dcaa05c2128::t_32049a72e8caab 360-361
+  s_7b0dcaa05c2128::t_9c467c7671b831 325-359,362-416
+internal/daemon/exact_final_head_recovery_test.go
+  s_7b0dcaa05c2128::t_9c467c7671b831 307-327
+internal/pipeline/steps/exact_final_head_recovery.go
+  s_7b0dcaa05c2128::t_d51f27ae5e2da2 128-163
+internal/daemon/manager.go
+  s_7b0dcaa05c2128::t_d51f27ae5e2da2 249-252
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "b04ba5e7d5e939c1398772502d9689ad2b2cd3cd",
+  "prompts": {},
+  "sessions": {
+    "s_7b0dcaa05c2128": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f916c-3947-7023-9409-782a9434f33e",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
