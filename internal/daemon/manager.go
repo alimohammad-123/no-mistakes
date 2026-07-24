@@ -256,6 +256,13 @@ func (m *RunManager) prepareRecoveredHeadValidationRun(ctx context.Context, run 
 	if cfg.Commands.Test == "" {
 		return nil, fmt.Errorf("head-validation recovery requires a trusted configured Test command")
 	}
+	if event, err := m.db.GetRunRecoveryEvent(run.ID, db.RunRecoveryExactFinalHeadCapacity); err != nil {
+		return nil, fmt.Errorf("read exact final-head recovery provenance: %w", err)
+	} else if event != nil {
+		if err := validateExactFinalHeadRecoveryExternalState(ctx, run, repo, workDir, cfg, true); err != nil {
+			return nil, fmt.Errorf("revalidate exact final-head recovery delivery state: %w", err)
+		}
+	}
 	ag, err := newPipelineAgent(ctx, cfg, exec.LookPath)
 	if err != nil {
 		return nil, err

@@ -1156,7 +1156,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
 			if daemonShutdownCancellation(ctx, err) && e.configuredTestRequired() &&
-				(run.ValidationTargetSHA != nil || stepName == types.StepCI) {
+				(run.ValidationTargetSHA != nil || stepName == types.StepCI || e.hasExactFinalHeadRecovery(run.ID)) {
 				return false, fmt.Errorf("%w: %s", ErrValidationRunInterrupted, stepName)
 			}
 			durationMS := executionMS + roundDuration
@@ -1670,7 +1670,7 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if errors.Is(err, ErrParkedRunInterrupted) || errors.Is(err, ErrValidationRunInterrupted) {
 		return err
 	}
-	if e.configuredTestRequired() && run.ValidationTargetSHA != nil {
+	if e.configuredTestRequired() && (run.ValidationTargetSHA != nil || e.hasExactFinalHeadRecovery(run.ID)) {
 		for _, ctx := range ctxs {
 			if daemonShutdownCancellation(ctx, err) {
 				return fmt.Errorf("%w: %v", ErrValidationRunInterrupted, err)
@@ -1699,6 +1699,11 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	run.Error = &errMsg
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	return err
+}
+
+func (e *Executor) hasExactFinalHeadRecovery(runID string) bool {
+	event, err := e.db.GetRunRecoveryEvent(runID, db.RunRecoveryExactFinalHeadCapacity)
+	return err == nil && event != nil
 }
 
 // authoritativeContextCause returns a context cause only when the step error

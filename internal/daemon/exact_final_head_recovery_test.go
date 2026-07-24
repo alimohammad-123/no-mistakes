@@ -194,7 +194,7 @@ func installExactRecoveryManagerStubs(t *testing.T) *int {
 		cfg.Commands.Test = "configured-test"
 		return cfg, agent.NewNoop(), nil
 	}
-	validateExactFinalHeadRecoveryExternalState = func(context.Context, *db.Run, *db.Repo, string, *config.Config) error {
+	validateExactFinalHeadRecoveryExternalState = func(context.Context, *db.Run, *db.Repo, string, *config.Config, bool) error {
 		calls++
 		return nil
 	}
@@ -255,7 +255,7 @@ func TestHandleRecoverExactFinalHeadCapacityRefusesChangedExternalOrGateState(t 
 		{
 			name: "stale published head",
 			mutate: func(*exactRecoveryManagerFixture) {
-				validateExactFinalHeadRecoveryExternalState = func(context.Context, *db.Run, *db.Repo, string, *config.Config) error {
+				validateExactFinalHeadRecoveryExternalState = func(context.Context, *db.Run, *db.Repo, string, *config.Config, bool) error {
 					return errors.New("published branch head changed")
 				}
 			},
@@ -263,7 +263,7 @@ func TestHandleRecoverExactFinalHeadCapacityRefusesChangedExternalOrGateState(t 
 		{
 			name: "stale PR identity",
 			mutate: func(*exactRecoveryManagerFixture) {
-				validateExactFinalHeadRecoveryExternalState = func(context.Context, *db.Run, *db.Repo, string, *config.Config) error {
+				validateExactFinalHeadRecoveryExternalState = func(context.Context, *db.Run, *db.Repo, string, *config.Config, bool) error {
 					return errors.New("stored PR identity changed")
 				}
 			},

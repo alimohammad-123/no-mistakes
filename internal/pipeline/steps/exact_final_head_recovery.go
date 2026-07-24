@@ -17,11 +17,12 @@ import (
 // published branch and PR still have the identities frozen on the failed run.
 // Recovery may then resume the unpublished exact candidate without replacing
 // the PR or claiming that the candidate was already delivered.
-func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, cfg *config.Config) error {
+func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, cfg *config.Config, allowExactPublished bool) error {
 	if run == nil || repo == nil || cfg == nil || run.PRURL == nil || run.LastPushedSHA == nil {
 		return fmt.Errorf("exact final-head recovery external state is incomplete")
 	}
-	if strings.TrimSpace(*run.PRURL) == "" || strings.TrimSpace(*run.LastPushedSHA) == "" || *run.LastPushedSHA == run.HeadSHA {
+	if strings.TrimSpace(*run.PRURL) == "" || strings.TrimSpace(*run.LastPushedSHA) == "" ||
+		(!allowExactPublished && *run.LastPushedSHA == run.HeadSHA) {
 		return fmt.Errorf("exact final-head recovery has no distinct earlier published head and PR")
 	}
 	ref, err := run.FrozenSourceRef()
@@ -45,8 +46,10 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, run *db.Ru
 	if err != nil {
 		return fmt.Errorf("read exact final-head recovery published head: %w", err)
 	}
-	if publishedHead != *run.LastPushedSHA {
-		return fmt.Errorf("published branch head changed from the recorded earlier head")
+	publishedMatchesRecorded := publishedHead == *run.LastPushedSHA
+	publishedMatchesExact := allowExactPublished && publishedHead == run.HeadSHA
+	if !publishedMatchesRecorded && !publishedMatchesExact {
+		return fmt.Errorf("published branch head matches neither recorded delivery phase")
 	}
 
 	provider := scm.DetectProviderContext(ctx, repo.UpstreamURL)

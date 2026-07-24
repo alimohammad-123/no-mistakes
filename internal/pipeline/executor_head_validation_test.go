@@ -659,6 +659,228 @@ func TestExecutor_DaemonShutdownDoesNotMaskIndependentReplayFailure(t *testing.T
 	}
 }
 
+func TestExecutor_ExactRecoveryShutdownPreservesEveryDeliveryPhase(t *testing.T) {
+	tests := []struct {
+		name    string
+		advance func(*testing.T, *db.DB, *db.Run, map[types.StepName]*db.StepResult)
+	}{
+		{
+			name: "before target closure",
+			advance: func(t *testing.T, database *db.DB, run *db.Run, steps map[types.StepName]*db.StepResult) {
+				t.Helper()
+				if err := database.StartStep(steps[types.StepDocument].ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "after target closure",
+			advance: func(t *testing.T, database *db.DB, run *db.Run, steps map[types.StepName]*db.StepResult) {
+				t.Helper()
+				completeExactRecoveryStep(t, database, steps[types.StepDocument])
+				completeExactRecoveryStep(t, database, steps[types.StepLint])
+				if err := database.CompleteHeadValidation(run.ID, run.HeadSHA); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.StartStep(steps[types.StepPush].ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "after push",
+			advance: func(t *testing.T, database *db.DB, run *db.Run, steps map[types.StepName]*db.StepResult) {
+				t.Helper()
+				closeExactRecoveryProof(t, database, run, steps)
+				completeExactRecoveryStep(t, database, steps[types.StepPush])
+				if err := database.UpdateRunPushBinding(run.ID, db.PushBinding{
+					HeadSHA: run.HeadSHA, TargetKind: "upstream", TargetFingerprint: "fingerprint", Ref: "refs/heads/feature",
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.StartStep(steps[types.StepPR].ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "after PR update",
+			advance: func(t *testing.T, database *db.DB, run *db.Run, steps map[types.StepName]*db.StepResult) {
+				t.Helper()
+				closeExactRecoveryProof(t, database, run, steps)
+				completeExactRecoveryStep(t, database, steps[types.StepPush])
+				if err := database.UpdateRunPushBinding(run.ID, db.PushBinding{
+					HeadSHA: run.HeadSHA, TargetKind: "upstream", TargetFingerprint: "fingerprint", Ref: "refs/heads/feature",
+				}); err != nil {
+					t.Fatal(err)
+				}
+				completeExactRecoveryStep(t, database, steps[types.StepPR])
+				if err := database.StartStep(steps[types.StepCI].ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "after CI registration",
+			advance: func(t *testing.T, database *db.DB, run *db.Run, steps map[types.StepName]*db.StepResult) {
+				t.Helper()
+				closeExactRecoveryProof(t, database, run, steps)
+				completeExactRecoveryStep(t, database, steps[types.StepPush])
+				if err := database.UpdateRunPushBinding(run.ID, db.PushBinding{
+					HeadSHA: run.HeadSHA, TargetKind: "upstream", TargetFingerprint: "fingerprint", Ref: "refs/heads/feature",
+				}); err != nil {
+					t.Fatal(err)
+				}
+				completeExactRecoveryStep(t, database, steps[types.StepPR])
+				if err := database.StartStep(steps[types.StepCI].ID); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.SetRunCIReady(run.ID, true); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			run, stepResults := restoreExactRecoveryForExecutor(t, database, run)
+			tc.advance(t, database, run, stepResults)
+			run, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.Config{}
+			cfg.Commands.Test = "configured-test-command"
+			exec := NewExecutor(database, p, cfg, nil, exactRecoveryTestSteps(), nil)
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cancel(ErrDaemonShutdown)
+			err = exec.failRun(run, repo, ctx.Err(), ctx)
+			if !errors.Is(err, ErrValidationRunInterrupted) {
+				t.Fatalf("failRun() error = %v", err)
+			}
+			preserved, getErr := database.GetRun(run.ID)
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			if preserved.Status != types.RunRunning || preserved.Error != nil {
+				t.Fatalf("shutdown terminalized recovered run: %#v", preserved)
+			}
+		})
+	}
+}
+
+func TestExecutor_ExactRecoveryUserCancellationRemainsCancelled(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	run, _ = restoreExactRecoveryForExecutor(t, database, run)
+	cfg := &config.Config{}
+	cfg.Commands.Test = "configured-test-command"
+	exec := NewExecutor(database, p, cfg, nil, exactRecoveryTestSteps(), nil)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errors.New(types.RunCancelReasonAbortedByUser))
+	err := exec.failRun(run, repo, ctx.Err(), ctx)
+	if errors.Is(err, ErrValidationRunInterrupted) {
+		t.Fatalf("user cancellation became recoverable shutdown: %v", err)
+	}
+	cancelled, getErr := database.GetRun(run.ID)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if cancelled.Status != types.RunCancelled || cancelled.Error == nil || *cancelled.Error != types.RunCancelReasonAbortedByUser {
+		t.Fatalf("user cancellation classification = %#v", cancelled)
+	}
+}
+
+func restoreExactRecoveryForExecutor(t *testing.T, database *db.DB, run *db.Run) (*db.Run, map[types.StepName]*db.StepResult) {
+	t.Helper()
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	for index, head := range []string{"head-1", "head-2", "head-3"} {
+		if err := database.UpdateRunHeadSHA(run.ID, head); err != nil {
+			t.Fatal(err)
+		}
+		count, err := database.ScheduleHeadValidationReplay(run.ID, MaxHeadValidationReplays)
+		if err != nil || count != index+1 {
+			t.Fatalf("schedule target %d: count=%d err=%v", index+1, count, err)
+		}
+	}
+	if err := database.RecordSuccessfulTestHead(run.ID, "head-3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPRURL(run.ID, "https://github.com/test/project/pull/42"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPushBinding(run.ID, db.PushBinding{
+		HeadSHA: "published-head", TargetKind: "upstream", TargetFingerprint: "fingerprint", Ref: "refs/heads/feature",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	results := make(map[types.StepName]*db.StepResult, len(types.AllSteps()))
+	for _, name := range types.AllSteps() {
+		step, err := database.InsertStepResult(run.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		results[name] = step
+		switch {
+		case name.Order() <= types.StepTest.Order():
+			completeExactRecoveryStep(t, database, step)
+		case name == types.StepDocument:
+			if err := database.StartStep(step.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.FailStep(step.ID, db.ExactFinalHeadCapacityStepError(MaxHeadValidationReplays), 1); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := database.UpdateRunErrorStatus(run.ID, db.ExactFinalHeadCapacityRunError(MaxHeadValidationReplays), types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	failure, err := database.InspectExactFinalHeadCapacityFailure(run.ID, MaxHeadValidationReplays, types.AllSteps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := database.RestoreExactFinalHeadCapacityFailure(run.ID, failure.EvidenceToken, MaxHeadValidationReplays, types.AllSteps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range refreshed {
+		results[step.StepName] = step
+	}
+	return restored, results
+}
+
+func exactRecoveryTestSteps() []Step {
+	result := make([]Step, 0, len(types.AllSteps()))
+	for _, name := range types.AllSteps() {
+		result = append(result, newPassStep(name))
+	}
+	return result
+}
+
+func completeExactRecoveryStep(t *testing.T, database *db.DB, step *db.StepResult) {
+	t.Helper()
+	if err := database.CompleteStep(step.ID, 0, 1, string(step.StepName)+".log"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func closeExactRecoveryProof(t *testing.T, database *db.DB, run *db.Run, steps map[types.StepName]*db.StepResult) {
+	t.Helper()
+	completeExactRecoveryStep(t, database, steps[types.StepDocument])
+	completeExactRecoveryStep(t, database, steps[types.StepLint])
+	if err := database.CompleteHeadValidation(run.ID, run.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExecutor_ResumeLegacyRunningCIReplaysMissingProofInSameRun(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := initExecutorGitRepo(t, database, run)
