@@ -330,6 +330,11 @@ func (sctx *StepContext) ValidateDeliveryCandidate() error {
 }
 
 func (sctx *StepContext) checkDeliveryProof() error {
+	if sctx != nil && sctx.DB != nil && sctx.Run != nil {
+		if err := sctx.DB.CheckExactRecoveryRemoteRefAmbiguity(sctx.Run.ID); err != nil {
+			return err
+		}
+	}
 	if sctx.Config != nil && sctx.Config.Commands.Test != "" {
 		if err := sctx.DB.CheckHeadValidationDeliveryEligibility(
 			sctx.Run.ID, sctx.Run.HeadSHA, maxHeadValidationReplays,

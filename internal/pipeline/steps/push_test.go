@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -240,6 +241,31 @@ func TestPushStep_ExactRecoveryReusesDurableBindingWithoutRepublishing(t *testin
 		*after.PushGeneration != *before.PushGeneration || after.LastPushedSHA == nil ||
 		*after.LastPushedSHA != after.HeadSHA {
 		t.Fatalf("recovered Push binding changed: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestPushStep_ExactRecoveryPersistsRemoteAmbiguityWithoutProviderOperation(t *testing.T) {
+	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
+	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+	if operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID); err != nil || operation != nil {
+		t.Fatalf("provider-neutral recovery unexpectedly has operation %#v, %v", operation, err)
+	}
+	remoteErr := &git.RemoteRefObservationError{
+		Ref:         "refs/heads/feature",
+		Observation: git.RemoteRefMalformed,
+	}
+	if err := persistExactRecoveryRemoteRefError(sctx, nil, remoteErr); !errors.Is(err, remoteErr) {
+		t.Fatalf("persist ambiguity error = %v, want %v", err, remoteErr)
+	}
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity == nil || ambiguity.Classification != git.RemoteRefMalformed {
+		t.Fatalf("provider-neutral Push ambiguity = %#v", ambiguity)
+	}
+	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+		t.Fatalf("ambiguity persistence published %s, want unchanged %s", got, sctx.Run.BaseSHA)
 	}
 }
 

@@ -604,6 +604,22 @@ func TestPRStep_ExactRecoveryJournalRefusesAmbiguousRemoteContent(t *testing.T) 
 	}
 }
 
+func TestPRStep_ExactRecoveryRefusesProviderIndependentRemoteAmbiguity(t *testing.T) {
+	sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+	if err := sctx.DB.RecordExactRecoveryRemoteRefAmbiguity(sctx.Run.ID, db.ExactRecoveryRemoteRefIdentityMismatch); err != nil {
+		t.Fatal(err)
+	}
+	step := &PRStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+		return host, ""
+	}}
+	if _, err := step.Execute(sctx); err == nil {
+		t.Fatal("provider-independent remote ambiguity admitted PR mutation")
+	}
+	if host.updateCalls != 0 {
+		t.Fatalf("provider-independent remote ambiguity mutated PR %d times", host.updateCalls)
+	}
+}
+
 func TestPRStep_ExactRecoveryRefusesLifecycleIdentityAndHeadDrift(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -913,18 +929,15 @@ func TestExactRecoveryReconciliationRefMovesPreventPublication(t *testing.T) {
 	}
 }
 
-func TestExactRecoveryReconciliationPersistsStrictRemoteAmbiguity(t *testing.T) {
+func TestExactRecoveryReconciliationPersistsProviderIndependentRemoteAmbiguity(t *testing.T) {
 	oldLsRemote := exactRecoveryLsRemote
 	t.Cleanup(func() {
 		exactRecoveryLsRemote = oldLsRemote
 	})
 	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
 	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
-	if _, err := sctx.DB.PrepareExactRecoveryRefObservation(
-		sctx.Run.ID, string(scm.ProviderAzureDevOps), "refs/heads/feature",
-		sctx.Run.HeadSHA, sctx.Run.BaseSHA, time.Now().Add(time.Minute).Unix(),
-	); err != nil {
-		t.Fatal(err)
+	if operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID); err != nil || operation != nil {
+		t.Fatalf("provider-neutral recovery unexpectedly has operation %#v, %v", operation, err)
 	}
 	exactRecoveryLsRemote = func(context.Context, string, string, string) (git.RemoteRefObservation, error) {
 		return git.RemoteRefObservation{Invalid: git.RemoteRefDuplicate}, nil
@@ -934,13 +947,12 @@ func TestExactRecoveryReconciliationPersistsStrictRemoteAmbiguity(t *testing.T) 
 	); err == nil {
 		t.Fatal("duplicate remote-ref result was accepted")
 	}
-	observation, err := sctx.DB.GetExactRecoveryRefObservation(sctx.Run.ID)
+	ambiguity, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if observation.State != db.ExactRecoveryRefObservationAmbiguous ||
-		observation.LastObservation != git.RemoteRefDuplicate {
-		t.Fatalf("duplicate remote-ref result was not durably ambiguous: %#v", observation)
+	if ambiguity == nil || ambiguity.Classification != git.RemoteRefDuplicate {
+		t.Fatalf("duplicate remote-ref result was not durably ambiguous: %#v", ambiguity)
 	}
 	restarted, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
@@ -955,14 +967,12 @@ func TestExactRecoveryReconciliationPersistsStrictRemoteAmbiguity(t *testing.T) 
 	); err == nil {
 		t.Fatal("later exact OID erased durable remote-ref ambiguity")
 	}
-	after, err := sctx.DB.GetExactRecoveryRefObservation(sctx.Run.ID)
+	after, err := sctx.DB.GetExactRecoveryRemoteRefAmbiguity(sctx.Run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.State != db.ExactRecoveryRefObservationAmbiguous ||
-		after.LastObservation != git.RemoteRefDuplicate ||
-		after.Attempts != observation.Attempts {
-		t.Fatalf("later exact OID changed terminal ambiguity: before=%#v after=%#v", observation, after)
+	if after == nil || *after != *ambiguity {
+		t.Fatalf("later exact OID changed terminal ambiguity: before=%#v after=%#v", ambiguity, after)
 	}
 	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
 		t.Fatalf("ambiguous recovery published %s, want unchanged %s", got, sctx.Run.BaseSHA)

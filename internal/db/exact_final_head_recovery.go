@@ -436,6 +436,9 @@ func (d *DB) ValidateActiveExactFinalHeadCapacityRecovery(runID string, maxRepla
 	if event == nil {
 		return fmt.Errorf("validate active exact final-head capacity recovery: recovery provenance is missing")
 	}
+	if err := ensureNoExactRecoveryRemoteRefAmbiguity(d.sql, runID); err != nil {
+		return fmt.Errorf("validate active exact final-head capacity recovery: %w", err)
+	}
 	run, err := d.GetRun(runID)
 	if err != nil {
 		return err

@@ -246,22 +246,31 @@ func exactRecoveryPushRemoteHead(sctx *pipeline.StepContext, pushURL, ref string
 		return observation.OID, nil
 	}
 	observationErr := &git.RemoteRefObservationError{Ref: ref, Observation: observation.Invalid}
-	if operation == nil {
-		return "", observationErr
-	}
-	if err := sctx.DB.RecordExactRecoveryRefObservation(sctx.Run.ID, observation.Value()); err != nil {
-		return "", fmt.Errorf("%w; persist exact recovery remote ambiguity: %v", observationErr, err)
+	if err := persistExactRecoveryRemoteRefError(sctx, operation, observationErr); err != nil {
+		return "", err
 	}
 	return "", observationErr
 }
 
 func persistExactRecoveryRemoteRefError(sctx *pipeline.StepContext, operation *db.ExactRecoveryPushOperation, remoteErr error) error {
 	var observationErr *git.RemoteRefObservationError
-	if operation == nil || !errors.As(remoteErr, &observationErr) {
+	if !errors.As(remoteErr, &observationErr) {
 		return nil
 	}
-	if err := sctx.DB.RecordExactRecoveryRefObservation(sctx.Run.ID, observationErr.Observation); err != nil {
+	event, err := sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		return fmt.Errorf("%w; read exact recovery provenance: %v", remoteErr, err)
+	}
+	if event == nil {
+		return remoteErr
+	}
+	if err := sctx.DB.RecordExactRecoveryRemoteRefAmbiguity(sctx.Run.ID, observationErr.Observation); err != nil {
 		return fmt.Errorf("%w; persist exact recovery remote ambiguity: %v", remoteErr, err)
+	}
+	if operation != nil {
+		if err := sctx.DB.RecordExactRecoveryRefObservation(sctx.Run.ID, observationErr.Observation); err != nil {
+			return fmt.Errorf("%w; persist provider recovery remote ambiguity: %v", remoteErr, err)
+		}
 	}
 	return remoteErr
 }

@@ -87,6 +87,9 @@ func (d *DB) PrepareExactRecoveryPRUpdate(runID, stepResultID, targetURL, headSH
 	if event == nil || event.DeliveryProtocol != ExactRecoveryDeliveryProtocol || event.HeadSHA != headSHA || event.PRURL != targetURL {
 		return nil, fmt.Errorf("prepare exact recovery PR update: recovery identity is inconsistent")
 	}
+	if err := ensureNoExactRecoveryRemoteRefAmbiguity(tx, runID); err != nil {
+		return nil, fmt.Errorf("prepare exact recovery PR update: %w", err)
+	}
 	var run Run
 	if err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id = ?`, runID), &run); err != nil {
 		return nil, fmt.Errorf("prepare exact recovery PR update: read run: %w", err)
@@ -167,6 +170,9 @@ func (d *DB) ExactRecoveryPushAlreadyBound(runID, headSHA string) (bool, error) 
 	}
 	if event.DeliveryProtocol != ExactRecoveryDeliveryProtocol || strings.TrimSpace(event.AnchorRef) == "" {
 		return false, fmt.Errorf("exact recovery push binding provenance is incompatible")
+	}
+	if err := ensureNoExactRecoveryRemoteRefAmbiguity(d.sql, runID); err != nil {
+		return false, err
 	}
 	run, err := d.GetRun(runID)
 	if err != nil {
@@ -315,6 +321,18 @@ func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef
 		return false, err
 	} else if update != nil {
 		return false, fmt.Errorf("reconcile stale exact recovery Push custody: PR delivery already started")
+	}
+	if err := ensureNoExactRecoveryRemoteRefAmbiguity(tx, runID); err != nil {
+		return false, err
+	}
+	if validExactRecoveryRemoteRefClassification(remoteHead) {
+		if err := recordExactRecoveryRemoteRefAmbiguity(tx, event, &run, remoteHead); err != nil {
+			return false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("reconcile stale exact recovery Push custody: commit remote ambiguity: %w", err)
+		}
+		return false, fmt.Errorf("reconcile stale exact recovery Push custody: remote ref is terminally ambiguous")
 	}
 	observation, err := getExactRecoveryRefObservation(tx, runID)
 	if err != nil {

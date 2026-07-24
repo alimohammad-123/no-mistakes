@@ -357,6 +357,136 @@ func prepareExactRecoveryPushCrash(t *testing.T) (*exactFinalHeadRecoveryFixture
 	return f, restored, byName[types.StepPush].ID
 }
 
+func TestExactRecoveryRemoteRefAmbiguityIsProviderIndependentAndTerminal(t *testing.T) {
+	classifications := []string{
+		ExactRecoveryRemoteRefMissing,
+		ExactRecoveryRemoteRefDuplicate,
+		ExactRecoveryRemoteRefMalformed,
+		ExactRecoveryRemoteRefIdentityMismatch,
+		ExactRecoveryRemoteRefPeeled,
+	}
+	for _, classification := range classifications {
+		t.Run(classification, func(t *testing.T) {
+			f, restored, _ := prepareExactRecoveryPushCrash(t)
+			if operation, err := f.d.GetExactRecoveryPushOperation(restored.ID); err != nil || operation != nil {
+				t.Fatalf("provider-neutral recovery unexpectedly has operation %#v, %v", operation, err)
+			}
+			if err := f.d.RecordExactRecoveryRemoteRefAmbiguity(restored.ID, classification); err != nil {
+				t.Fatal(err)
+			}
+			ambiguity, err := f.d.GetExactRecoveryRemoteRefAmbiguity(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ambiguity == nil || ambiguity.Classification != classification ||
+				ambiguity.SourceRef != "refs/heads/feature" ||
+				ambiguity.StaleOID != f.pushed || ambiguity.TargetOID != restored.HeadSHA ||
+				ambiguity.ObservedLastPushedSHA != f.pushed ||
+				ambiguity.ObservedPushGeneration != 1 {
+				t.Fatalf("provider-neutral ambiguity = %#v", ambiguity)
+			}
+			if err := f.d.RecordExactRecoveryRemoteRefAmbiguity(restored.ID, ExactRecoveryRemoteRefMalformed); err == nil {
+				t.Fatal("competing ambiguity owner replaced terminal state")
+			}
+			after, err := f.d.GetExactRecoveryRemoteRefAmbiguity(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if *after != *ambiguity {
+				t.Fatalf("competing owner changed terminal ambiguity: before=%#v after=%#v", ambiguity, after)
+			}
+			if err := f.d.ValidateActiveExactFinalHeadCapacityRecovery(restored.ID, 3, types.AllSteps()); err == nil {
+				t.Fatal("terminal ambiguity passed active recovery admission")
+			}
+			if reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+				restored.ID, restored.HeadSHA, "refs/heads/feature", restored.HeadSHA,
+				now()+30, 3, types.AllSteps(),
+			); err == nil || reconciled {
+				t.Fatalf("later expected OID erased terminal ambiguity: reconciled=%v err=%v", reconciled, err)
+			}
+			run, err := f.d.GetRun(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !run.PushActive || run.LastPushedSHA == nil || *run.LastPushedSHA != f.pushed {
+				t.Fatalf("terminal ambiguity changed Push custody: %#v", run)
+			}
+		})
+	}
+}
+
+func TestExactRecoveryRemoteRefAmbiguityPersistenceFailureStops(t *testing.T) {
+	f, restored, _ := prepareExactRecoveryPushCrash(t)
+	if _, err := f.d.sql.Exec(
+		`CREATE TRIGGER fail_generic_recovery_ambiguity
+		 BEFORE INSERT ON run_recovery_remote_ref_ambiguities
+		 BEGIN
+		   SELECT RAISE(ABORT, 'injected generic ambiguity persistence failure');
+		 END`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.RecordExactRecoveryRemoteRefAmbiguity(restored.ID, ExactRecoveryRemoteRefMissing); err == nil {
+		t.Fatal("generic ambiguity persistence failure was accepted")
+	}
+	ambiguity, err := f.d.GetExactRecoveryRemoteRefAmbiguity(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguity != nil {
+		t.Fatalf("failed ambiguity persistence left partial state: %#v", ambiguity)
+	}
+	run, err := f.d.GetRun(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !run.PushActive || run.LastPushedSHA == nil || *run.LastPushedSHA != f.pushed {
+		t.Fatalf("failed ambiguity persistence changed Push custody: %#v", run)
+	}
+}
+
+func TestExactRecoveryRemoteRefAmbiguityPreventsPRMutationIntent(t *testing.T) {
+	f, restored, pushID := prepareExactRecoveryPushCrash(t)
+	if err := f.d.RecordExactRecoveryRemoteRefAmbiguity(restored.ID, ExactRecoveryRemoteRefDuplicate); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.SetRunPushActive(restored.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.UpdateRunPushBinding(restored.ID, PushBinding{
+		HeadSHA: restored.HeadSHA, TargetKind: "upstream",
+		TargetFingerprint: "target-fingerprint", Ref: "refs/heads/feature",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.CompleteStep(pushID, 0, 1, "push.log"); err != nil {
+		t.Fatal(err)
+	}
+	steps, err := f.d.GetStepsByRun(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prID string
+	for _, step := range steps {
+		if step.StepName == types.StepPR {
+			prID = step.ID
+			break
+		}
+	}
+	if err := f.d.StartStep(prID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.d.PrepareExactRecoveryPRUpdate(
+		restored.ID, prID, *restored.PRURL, restored.HeadSHA,
+		"prior title", "prior body", "intended title", "intended body",
+	); err == nil {
+		t.Fatal("terminal remote ambiguity admitted PR mutation intent")
+	}
+	if update, err := f.d.GetExactRecoveryPRUpdate(restored.ID); err != nil || update != nil {
+		t.Fatalf("terminal ambiguity persisted PR mutation intent %#v, %v", update, err)
+	}
+}
+
 func TestExactRecoveryRefObservationJournalRefusesRememberedAmbiguity(t *testing.T) {
 	tests := []struct {
 		name         string

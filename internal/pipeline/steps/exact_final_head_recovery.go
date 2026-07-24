@@ -48,6 +48,9 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, database *
 	if database == nil {
 		return fmt.Errorf("exact final-head recovery database is missing")
 	}
+	if err := database.CheckExactRecoveryRemoteRefAmbiguity(run.ID); err != nil {
+		return err
+	}
 	if strings.TrimSpace(*run.PRURL) == "" || strings.TrimSpace(*run.LastPushedSHA) == "" ||
 		(!allowExactPublished && *run.LastPushedSHA == run.HeadSHA) {
 		return fmt.Errorf("exact final-head recovery has no distinct earlier published head and PR")
@@ -74,6 +77,17 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, database *
 		return fmt.Errorf("read exact final-head recovery published head: %w", err)
 	}
 	if publishedObservation.Invalid != "" {
+		if event, eventErr := database.GetRunRecoveryEvent(run.ID, db.RunRecoveryExactFinalHeadCapacity); eventErr != nil {
+			return eventErr
+		} else if event != nil {
+			if persistErr := database.RecordExactRecoveryRemoteRefAmbiguity(run.ID, publishedObservation.Invalid); persistErr != nil {
+				return fmt.Errorf(
+					"read exact final-head recovery published head: %w; persist remote ambiguity: %v",
+					&git.RemoteRefObservationError{Ref: ref, Observation: publishedObservation.Invalid},
+					persistErr,
+				)
+			}
+		}
 		return fmt.Errorf(
 			"read exact final-head recovery published head: %w",
 			&git.RemoteRefObservationError{Ref: ref, Observation: publishedObservation.Invalid},

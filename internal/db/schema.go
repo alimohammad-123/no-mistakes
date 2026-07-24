@@ -125,6 +125,20 @@ CREATE TABLE IF NOT EXISTS run_recovery_ref_observations (
     updated_at           INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS run_recovery_remote_ref_ambiguities (
+    run_id                    TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    recovery_event_id          TEXT NOT NULL REFERENCES run_recovery_events(id) ON DELETE CASCADE,
+    source_ref                 TEXT NOT NULL,
+    stale_oid                  TEXT NOT NULL,
+    target_oid                 TEXT NOT NULL,
+    target_kind                TEXT NOT NULL,
+    target_fingerprint         TEXT NOT NULL,
+    observed_last_pushed_sha   TEXT NOT NULL,
+    observed_push_generation   INTEGER NOT NULL,
+    classification             TEXT NOT NULL,
+    observed_at                INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS run_recovery_push_operations (
     run_id               TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
     operation_id         TEXT NOT NULL UNIQUE,
