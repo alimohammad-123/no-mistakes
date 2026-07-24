@@ -14,6 +14,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+var exactRecoveryReconcilePoint = func(string) {}
+
 // ValidateExactFinalHeadRecoveryExternalState proves that the previously
 // published branch and PR still have the identities frozen on the failed run.
 // Recovery may then resume the unpublished exact candidate without replacing
@@ -33,7 +35,7 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, database *
 	if err != nil {
 		return err
 	}
-	sctx := &pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: workDir, Config: cfg}
+	sctx := &pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: workDir, Config: cfg, DB: database}
 	pushURL := resolvePushURL(sctx)
 	if strings.TrimSpace(pushURL) == "" {
 		return fmt.Errorf("resolve exact final-head recovery push target: URL is empty")
@@ -49,6 +51,9 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, database *
 	publishedHead, err := git.LsRemote(ctx, workDir, pushURL, ref)
 	if err != nil {
 		return fmt.Errorf("read exact final-head recovery published head: %w", err)
+	}
+	if _, err := sctx.BindSourceRef(); err != nil {
+		return err
 	}
 	publishedMatchesRecorded := publishedHead == *run.LastPushedSHA
 	pushRunning := false
@@ -123,6 +128,9 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, database *
 			return fmt.Errorf("exact recovery PR update phase is invalid")
 		}
 	}
+	if _, err := sctx.BindSourceRef(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -134,7 +142,7 @@ func ReconcileStaleExactFinalHeadPushCustody(ctx context.Context, database *db.D
 	if err != nil {
 		return false, err
 	}
-	sctx := &pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: workDir}
+	sctx := &pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: workDir, DB: database}
 	pushURL := resolvePushURL(sctx)
 	if strings.TrimSpace(pushURL) == "" {
 		return false, fmt.Errorf("reconcile stale exact recovery Push custody: canonical push URL is empty")
@@ -152,12 +160,24 @@ func ReconcileStaleExactFinalHeadPushCustody(ctx context.Context, database *db.D
 	if err != nil {
 		return false, fmt.Errorf("reconcile stale exact recovery Push custody: read canonical remote: %w", err)
 	}
-	reconciled, err := database.ReconcileStaleExactRecoveryPushCustody(run.ID, remoteHead, maxReplays, expected)
+	exactRecoveryReconcilePoint("remote-probed")
+	if _, err := sctx.BindSourceRef(); err != nil {
+		return false, err
+	}
+	exactRecoveryReconcilePoint("source-verified")
+	if _, err := sctx.BindSourceRef(); err != nil {
+		return false, err
+	}
+	reconciled, err := database.ReconcileStaleExactRecoveryPushCustody(run.ID, remoteHead, ref, run.HeadSHA, maxReplays, expected)
 	if err != nil {
 		return false, err
 	}
 	if !reconciled {
 		return false, fmt.Errorf("reconcile stale exact recovery Push custody: custody was not active")
+	}
+	exactRecoveryReconcilePoint("database-reconciled")
+	if _, err := sctx.BindSourceRef(); err != nil {
+		return false, err
 	}
 	return true, nil
 }

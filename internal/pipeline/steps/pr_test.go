@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -171,6 +173,10 @@ func TestPRStep_ExactRecoveryJournalRefusesAmbiguousRemoteContent(t *testing.T) 
 }
 
 func exactRecoveryPRStepContext(t *testing.T, remote scm.PRContent) (*pipeline.StepContext, *exactRecoveryPRHost) {
+	return exactRecoveryDeliveryStepContext(t, remote, false)
+}
+
+func exactRecoveryDeliveryStepContext(t *testing.T, remote scm.PRContent, stopAtPush bool) (*pipeline.StepContext, *exactRecoveryPRHost) {
 	t.Helper()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	upstream := t.TempDir()
@@ -192,7 +198,7 @@ func exactRecoveryPRStepContext(t *testing.T, remote scm.PRContent) (*pipeline.S
 		t.Fatal(err)
 	}
 	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
-		HeadSHA: baseSHA, TargetKind: "upstream", TargetFingerprint: "fingerprint", Ref: "refs/heads/feature",
+		HeadSHA: baseSHA, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(upstream), Ref: "refs/heads/feature",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -238,8 +244,24 @@ func exactRecoveryPRStepContext(t *testing.T, remote scm.PRContent) (*pipeline.S
 	if err := sctx.DB.StartStep(results[types.StepPush].ID); err != nil {
 		t.Fatal(err)
 	}
+	host := &exactRecoveryPRHost{
+		pr:      &scm.PR{Number: "23", URL: prURL},
+		content: remote,
+	}
+	if stopAtPush {
+		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		run, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.Run = run
+		sctx.StepResultID = results[types.StepPush].ID
+		return sctx, host
+	}
 	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
-		HeadSHA: headSHA, TargetKind: "upstream", TargetFingerprint: "fingerprint", Ref: "refs/heads/feature",
+		HeadSHA: headSHA, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(upstream), Ref: "refs/heads/feature",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -265,11 +287,67 @@ func exactRecoveryPRStepContext(t *testing.T, remote scm.PRContent) (*pipeline.S
 	if update == nil {
 		t.Fatal("PR update journal missing")
 	}
-	host := &exactRecoveryPRHost{
-		pr:      &scm.PR{Number: "23", URL: prURL},
-		content: remote,
-	}
 	return sctx, host
+}
+
+func supersedingExactRecoveryCommit(t *testing.T, sctx *pipeline.StepContext) string {
+	t.Helper()
+	gitCmd(t, sctx.WorkDir, "checkout", "--detach", sctx.Run.HeadSHA)
+	if err := os.WriteFile(filepath.Join(sctx.WorkDir, "superseding-source.txt"), []byte("new source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, sctx.WorkDir, "add", "superseding-source.txt")
+	gitCmd(t, sctx.WorkDir, "commit", "-m", "superseding source")
+	superseding := gitCmd(t, sctx.WorkDir, "rev-parse", "HEAD")
+	gitCmd(t, sctx.WorkDir, "checkout", "--detach", sctx.Run.HeadSHA)
+	return superseding
+}
+
+func TestPRStep_ExactRecoveryRefMoveBeforeUpdatePreventsMutation(t *testing.T) {
+	sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+	superseding := supersedingExactRecoveryCommit(t, sctx)
+	step := &PRStep{
+		hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+			return host, ""
+		},
+		beforeRemoteMutation: func() {
+			gitCmd(t, sctx.WorkDir, "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
+		},
+	}
+	if _, err := step.Execute(sctx); !errors.Is(err, pipeline.ErrSourceRefSuperseded) {
+		t.Fatalf("Execute() error = %v, want superseded source refusal", err)
+	}
+	if host.updateCalls != 0 {
+		t.Fatalf("superseded recovery mutated PR %d times", host.updateCalls)
+	}
+}
+
+func TestExactRecoveryReconciliationRefMovesPreventPublication(t *testing.T) {
+	oldPoint := exactRecoveryReconcilePoint
+	t.Cleanup(func() {
+		exactRecoveryReconcilePoint = oldPoint
+	})
+	for _, targetPoint := range []string{"remote-probed", "source-verified", "database-reconciled"} {
+		t.Run(targetPoint, func(t *testing.T) {
+			sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
+			gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+			superseding := supersedingExactRecoveryCommit(t, sctx)
+			exactRecoveryReconcilePoint = func(point string) {
+				if point == targetPoint {
+					gitCmd(t, sctx.WorkDir, "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
+				}
+			}
+			if _, err := ReconcileStaleExactFinalHeadPushCustody(
+				context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir, 3, types.AllSteps(),
+			); !errors.Is(err, pipeline.ErrSourceRefSuperseded) {
+				t.Fatalf("reconcile error = %v, want superseded source refusal", err)
+			}
+			if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+				t.Fatalf("reconciliation published %s, want unchanged %s", got, sctx.Run.BaseSHA)
+			}
+			exactRecoveryReconcilePoint = oldPoint
+		})
+	}
 }
 
 func TestPRStep_UpdatesExistingPR(t *testing.T) {

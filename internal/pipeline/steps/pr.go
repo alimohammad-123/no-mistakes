@@ -18,7 +18,8 @@ import (
 
 // PRStep creates or updates a pull request via the provider CLI or API.
 type PRStep struct {
-	hostFactory func(*pipeline.StepContext, scm.Provider) (scm.Host, string)
+	hostFactory          func(*pipeline.StepContext, scm.Provider) (scm.Host, string)
+	beforeRemoteMutation func()
 }
 
 type prContent struct {
@@ -130,6 +131,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err != nil {
 				return nil, fmt.Errorf("read exact recovery PR content before update: %w", err)
 			}
+			if err := sctx.ValidateDeliveryCandidate(); err != nil {
+				return nil, err
+			}
 			recoveryUpdate, err = sctx.DB.PrepareExactRecoveryPRUpdate(
 				sctx.Run.ID, sctx.StepResultID, expectedPRURL, sctx.Run.HeadSHA,
 				prior.Title, prior.Body, content.Title, content.Body,
@@ -140,6 +144,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			return s.executeExactRecoveryPRUpdate(sctx, host, existing, recoveryUpdate)
 		}
 		sctx.Log(fmt.Sprintf("pull request already exists: %s, updating...", describePR(existing)))
+		if err := s.validateRemoteMutationOwnership(sctx); err != nil {
+			return nil, err
+		}
 		updated, err := host.UpdatePR(ctx, existing, scm.PRContent(content))
 		if err != nil {
 			sctx.Log(fmt.Sprintf("warning: failed to update PR: %v", err))
@@ -159,6 +166,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	sctx.Log("creating pull request...")
+	if err := s.validateRemoteMutationOwnership(sctx); err != nil {
+		return nil, err
+	}
 	created, err := host.CreatePR(ctx, branch, baseBranch, scm.PRContent(content))
 	if err != nil {
 		return nil, err
@@ -190,11 +200,17 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 	currentHash := db.ExactRecoveryPRContentHash(current.Title, current.Body)
 	switch {
 	case currentHash == update.IntendedContentHash:
+		if err := s.validateRemoteMutationOwnership(sctx); err != nil {
+			return nil, err
+		}
 		if err := sctx.DB.MarkExactRecoveryPRUpdateApplied(sctx.Run.ID, current.Title, current.Body); err != nil {
 			return nil, err
 		}
 	case currentHash == update.PriorContentHash && update.State == db.ExactRecoveryPRUpdatePrepared:
 		sctx.Log(fmt.Sprintf("pull request already exists: %s, applying guarded update...", describePR(existing)))
+		if err := s.validateRemoteMutationOwnership(sctx); err != nil {
+			return nil, err
+		}
 		updated, err := host.UpdatePR(sctx.Ctx, existing, scm.PRContent{Title: update.IntendedTitle, Body: update.IntendedBody})
 		if err != nil {
 			return nil, fmt.Errorf("apply exact recovery PR update: %w", err)
@@ -212,6 +228,9 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 		if db.ExactRecoveryPRContentHash(verified.Title, verified.Body) != update.IntendedContentHash {
 			return nil, fmt.Errorf("verify exact recovery PR update: remote content differs from durable intent")
 		}
+		if err := sctx.ValidateDeliveryCandidate(); err != nil {
+			return nil, err
+		}
 		if err := sctx.DB.MarkExactRecoveryPRUpdateApplied(sctx.Run.ID, verified.Title, verified.Body); err != nil {
 			return nil, err
 		}
@@ -219,6 +238,13 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 		return nil, fmt.Errorf("exact recovery PR content is stale, partial, or superseded")
 	}
 	return &pipeline.StepOutcome{PRURL: update.TargetURL}, nil
+}
+
+func (s *PRStep) validateRemoteMutationOwnership(sctx *pipeline.StepContext) error {
+	if s.beforeRemoteMutation != nil {
+		s.beforeRemoteMutation()
+	}
+	return sctx.ValidateDeliveryCandidate()
 }
 
 func describePR(pr *scm.PR) string {

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,6 +26,7 @@ var (
 	validateExactFinalHeadRecoveryExternalState = steps.ValidateExactFinalHeadRecoveryExternalState
 	reconcileStaleExactFinalHeadPushCustody     = steps.ReconcileStaleExactFinalHeadPushCustody
 	addExactFinalHeadRecoveryWorktree           = git.WorktreeAdd
+	exactRecoveryAdmissionPoint                 = func() {}
 )
 
 func (m *RunManager) reconcileRecoveredPushCustody(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, execSteps []pipeline.Step) (*db.Run, error) {
@@ -43,7 +45,7 @@ func (m *RunManager) reconcileRecoveredPushCustody(ctx context.Context, run *db.
 		ctx, m.db, run, repo, workDir, pipeline.MaxHeadValidationReplays, stepNames(execSteps),
 	)
 	if err != nil {
-		return nil, err
+		return nil, m.markRecoveredSourceSuperseded(run, err)
 	}
 	if !reconciled {
 		return nil, fmt.Errorf("reconcile stale exact recovery Push custody: custody was not reconciled")
@@ -56,6 +58,28 @@ func (m *RunManager) reconcileRecoveredPushCustody(ctx context.Context, run *db.
 		return nil, fmt.Errorf("reconcile stale exact recovery Push custody: durable custody remains active")
 	}
 	return refreshed, nil
+}
+
+func (m *RunManager) validateRecoveredSourceOwnership(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
+	sctx := &pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: workDir, DB: m.db}
+	if _, err := sctx.BindSourceRef(); err != nil {
+		return m.markRecoveredSourceSuperseded(run, err)
+	}
+	return nil
+}
+
+func (m *RunManager) markRecoveredSourceSuperseded(run *db.Run, err error) error {
+	if !errors.Is(err, pipeline.ErrSourceRefSuperseded) || run == nil {
+		return err
+	}
+	if dbErr := m.db.CancelExactRecoveryAsSuperseded(run.ID); dbErr != nil {
+		return fmt.Errorf("%w: persist superseded recovery: %v", err, dbErr)
+	}
+	run.Status = types.RunCancelled
+	reason := types.RunCancelReasonSuperseded
+	run.Error = &reason
+	run.PushActive = false
+	return err
 }
 
 func defaultPrepareExactFinalHeadRecoveryRuntime(ctx context.Context, manager *RunManager, run *db.Run, repo *db.Repo, workDir string) (*config.Config, agent.Agent, error) {
@@ -222,6 +246,9 @@ func (m *RunManager) handleRecoverExactFinalHeadCapacityLocked(ctx context.Conte
 	if err := validateExactFinalHeadRecoveryExternalState(ctx, m.db, run, repo, workDir, cfg, false); err != nil {
 		return cleanupCreated(fmt.Errorf("external delivery state changed before claim: %w", err))
 	}
+	if err := m.validateRecoveredSourceOwnership(ctx, run, repo, workDir); err != nil {
+		return cleanupCreated(fmt.Errorf("source ownership changed before claim: %w", err))
+	}
 	restored, err := m.db.RestoreExactFinalHeadCapacityFailure(run.ID, failure.EvidenceToken, pipeline.MaxHeadValidationReplays, stepNames(m.steps()))
 	if err != nil {
 		return cleanupCreated(err)
@@ -251,7 +278,7 @@ func (m *RunManager) handleRecoverExactFinalHeadCapacityLocked(ctx context.Conte
 	execSteps := m.steps()
 	plan := recoveredRunPlan{
 		run: restored, repo: repo, workDir: workDir, gateDir: gateDir,
-		cfg: cfg, agent: ag, steps: execSteps, headValidation: true,
+		cfg: cfg, agent: ag, steps: execSteps, headValidation: true, exactRecovery: true,
 	}
 	closeAgent = false
 	m.resumeRecoveredRun(plan)

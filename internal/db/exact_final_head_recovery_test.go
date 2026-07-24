@@ -386,7 +386,9 @@ func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.
 					t.Fatal(err)
 				}
 			}
-			reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(restored.ID, tc.remoteHead, 3, types.AllSteps())
+			reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+				restored.ID, tc.remoteHead, "refs/heads/feature", restored.HeadSHA, 3, types.AllSteps(),
+			)
 			if tc.wantError {
 				if err == nil || reconciled {
 					t.Fatalf("inconsistent crash state reconciled: reconciled=%v err=%v", reconciled, err)
@@ -406,11 +408,58 @@ func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.
 				t.Fatalf("exact binding was not preserved: %#v", got)
 			}
 			if !tc.wantError {
-				if again, err := f.d.ReconcileStaleExactRecoveryPushCustody(restored.ID, tc.remoteHead, 3, types.AllSteps()); err != nil || again {
+				if again, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+					restored.ID, tc.remoteHead, "refs/heads/feature", restored.HeadSHA, 3, types.AllSteps(),
+				); err != nil || again {
 					t.Fatalf("repeated reconciliation = %v, %v", again, err)
 				}
 			}
 		})
+	}
+}
+
+func TestReconcileStaleExactRecoveryPushCustodyRejectsChangedSourceClaim(t *testing.T) {
+	f, restored, _ := prepareExactRecoveryPushCrash(t)
+	reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+		restored.ID, f.pushed, "refs/heads/feature", "superseding-head", 3, types.AllSteps(),
+	)
+	if err == nil || reconciled {
+		t.Fatalf("changed source claim reconciled: reconciled=%v err=%v", reconciled, err)
+	}
+	got, err := f.d.GetRun(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.PushActive || got.LastPushedSHA == nil || *got.LastPushedSHA != f.pushed {
+		t.Fatalf("changed source claim mutated recovery: %#v", got)
+	}
+}
+
+func TestCancelExactRecoveryAsSupersededTerminalizesActivePhase(t *testing.T) {
+	f, restored, pushID := prepareExactRecoveryPushCrash(t)
+	if err := f.d.CancelExactRecoveryAsSuperseded(restored.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.CancelExactRecoveryAsSuperseded(restored.ID); err != nil {
+		t.Fatalf("idempotent supersession: %v", err)
+	}
+	got, err := f.d.GetRun(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunCancelled || got.Error == nil ||
+		*got.Error != types.RunCancelReasonSuperseded || got.PushActive {
+		t.Fatalf("superseded run = %#v", got)
+	}
+	steps, err := f.d.GetStepsByRun(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range steps {
+		if step.ID == pushID && (step.Status != types.StepStatusFailed || step.Error == nil ||
+			*step.Error != types.RunCancelReasonSuperseded) {
+			t.Fatalf("superseded Push step = %#v", step)
+		}
 	}
 }
 

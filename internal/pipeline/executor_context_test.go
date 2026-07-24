@@ -161,6 +161,27 @@ func TestExecutor_ContextCancelCauseBetweenSteps(t *testing.T) {
 	}
 }
 
+func TestExecutor_SourceRefSupersessionIsCancelled(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := &adaptiveCallStep{
+		name: types.StepPush,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return nil, fmt.Errorf("delivery ownership: %w", ErrSourceRefSuperseded)
+		},
+	}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); !errors.Is(err, ErrSourceRefSuperseded) {
+		t.Fatalf("Execute() error = %v, want source supersession", err)
+	}
+	updated, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != types.RunCancelled || updated.Error == nil || *updated.Error != types.RunCancelReasonSuperseded {
+		t.Fatalf("superseded run = %#v", updated)
+	}
+}
+
 func TestExecutor_IndependentFailureWinsCancellationRace(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -236,6 +238,21 @@ func TestPushStep_ExactRecoveryReusesDurableBindingWithoutRepublishing(t *testin
 		*after.PushGeneration != *before.PushGeneration || after.LastPushedSHA == nil ||
 		*after.LastPushedSHA != after.HeadSHA {
 		t.Fatalf("recovered Push binding changed: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestPushStep_ExactRecoveryRefMoveBeforePushPreventsPublication(t *testing.T) {
+	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"}, true)
+	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+	superseding := supersedingExactRecoveryCommit(t, sctx)
+	step := &PushStep{beforeRemoteMutation: func() {
+		gitCmd(t, sctx.WorkDir, "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
+	}}
+	if _, err := step.Execute(sctx); !errors.Is(err, pipeline.ErrSourceRefSuperseded) {
+		t.Fatalf("Execute() error = %v, want superseded source refusal", err)
+	}
+	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+		t.Fatalf("superseded recovery published %s, want unchanged %s", got, sctx.Run.BaseSHA)
 	}
 }
 

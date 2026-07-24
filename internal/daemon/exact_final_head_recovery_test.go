@@ -325,6 +325,42 @@ func TestReconcileRecoveredPushCustodyRefusesLiveExecutorOwner(t *testing.T) {
 	}
 }
 
+func TestExactFinalHeadRecoveryRefMoveAtAdmissionMarksSuperseded(t *testing.T) {
+	f := newExactRecoveryManagerFixture(t)
+	installExactRecoveryManagerStubs(t)
+	oldPoint := exactRecoveryAdmissionPoint
+	var superseding string
+	exactRecoveryAdmissionPoint = func() {
+		gitCmd(t, f.gate, "config", "user.name", "Superseding Push")
+		gitCmd(t, f.gate, "config", "user.email", "superseding@example.com")
+		tree := gitOutput(t, f.gate, "rev-parse", f.run.HeadSHA+"^{tree}")
+		superseding = gitOutput(t, f.gate, "commit-tree", tree, "-p", f.run.HeadSHA, "-m", "superseding source")
+		gitCmd(t, f.gate, "update-ref", "refs/heads/feature", superseding, f.run.HeadSHA)
+	}
+	t.Cleanup(func() {
+		exactRecoveryAdmissionPoint = oldPoint
+	})
+	runID, err := f.manager.HandleRecoverExactFinalHeadCapacity(context.Background(), f.repo.ID, f.run.ID)
+	if err != nil || runID != f.run.ID {
+		t.Fatalf("recover exact final-head capacity = %q, %v", runID, err)
+	}
+	select {
+	case <-f.started:
+		t.Fatal("superseded recovery admitted its executor")
+	default:
+	}
+	got, err := f.d.GetRun(f.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunCancelled || got.Error == nil || *got.Error != types.RunCancelReasonSuperseded {
+		t.Fatalf("superseded recovery = %#v", got)
+	}
+	if ref := gitOutput(t, f.gate, "rev-parse", "refs/heads/feature"); ref != superseding {
+		t.Fatalf("source ref = %s, want superseding %s", ref, superseding)
+	}
+}
+
 func waitRunStatus(t *testing.T, d *db.DB, runID string, want types.RunStatus) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

@@ -1176,6 +1176,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			if cause := authoritativeContextCause(ctx, err); cause != nil {
 				return false, fmt.Errorf("step %s failed: %w", stepName, cause)
 			}
+			if errors.Is(err, ErrSourceRefSuperseded) {
+				return false, fmt.Errorf("step %s failed: %w", stepName, ErrSourceRefSuperseded)
+			}
 			return false, fmt.Errorf("step %s failed: %s", stepName, redactedErr)
 		}
 
@@ -1688,9 +1691,13 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	}
 	runStatus := types.RunFailed
 	if errors.Is(cancellationCause, context.Canceled) ||
+		errors.Is(err, ErrSourceRefSuperseded) ||
 		errMsg == types.RunCancelReasonAbortedByUser ||
 		errMsg == types.RunCancelReasonSuperseded {
 		runStatus = types.RunCancelled
+	}
+	if errors.Is(err, ErrSourceRefSuperseded) {
+		errMsg = types.RunCancelReasonSuperseded
 	}
 	if dbErr := e.db.UpdateRunErrorStatus(run.ID, errMsg, runStatus); dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)

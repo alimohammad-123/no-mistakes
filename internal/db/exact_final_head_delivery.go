@@ -197,9 +197,11 @@ func (d *DB) ExactRecoveryPushAlreadyBound(runID, headSHA string) (bool, error) 
 	return true, nil
 }
 
-func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead string, maxReplays int, expected []types.StepName) (bool, error) {
-	if strings.TrimSpace(runID) == "" || strings.TrimSpace(remoteHead) == "" || maxReplays <= 0 || len(expected) == 0 {
-		return false, fmt.Errorf("reconcile stale exact recovery Push custody: identity, remote head, replay bound, and topology are required")
+func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef, sourceHead string, maxReplays int, expected []types.StepName) (bool, error) {
+	if strings.TrimSpace(runID) == "" || strings.TrimSpace(remoteHead) == "" ||
+		strings.TrimSpace(sourceRef) == "" || strings.TrimSpace(sourceHead) == "" ||
+		maxReplays <= 0 || len(expected) == 0 {
+		return false, fmt.Errorf("reconcile stale exact recovery Push custody: identities, remote head, replay bound, and topology are required")
 	}
 	tx, err := d.sql.Begin()
 	if err != nil {
@@ -219,6 +221,9 @@ func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead string, ma
 		event.PushTargetKind == "" || event.PushTargetFingerprint == "" ||
 		event.PushGeneration <= 0 || event.LastPushedAt <= 0 || event.DocumentStepID == "" {
 		return false, fmt.Errorf("reconcile stale exact recovery Push custody: recovery provenance is missing or incompatible")
+	}
+	if sourceRef != event.SourceRef || sourceHead != event.HeadSHA {
+		return false, fmt.Errorf("reconcile stale exact recovery Push custody: observed source ownership changed")
 	}
 	var run Run
 	if err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id = ?`, runID), &run); err != nil {
@@ -336,4 +341,58 @@ func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead string, ma
 		return false, fmt.Errorf("reconcile stale exact recovery Push custody: commit release: %w", err)
 	}
 	return true, nil
+}
+
+func (d *DB) CancelExactRecoveryAsSuperseded(runID string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("cancel superseded exact recovery: begin: %w", err)
+	}
+	defer tx.Rollback()
+	event, err := getRunRecoveryEvent(tx, runID, RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		return err
+	}
+	if event == nil {
+		return fmt.Errorf("cancel superseded exact recovery: recovery provenance is missing")
+	}
+	var status types.RunStatus
+	var runError *string
+	if err := tx.QueryRow(`SELECT status, error FROM runs WHERE id = ?`, runID).Scan(&status, &runError); err != nil {
+		return fmt.Errorf("cancel superseded exact recovery: read run: %w", err)
+	}
+	if status == types.RunCancelled && runError != nil && *runError == types.RunCancelReasonSuperseded {
+		return nil
+	}
+	if status != types.RunRunning {
+		return fmt.Errorf("cancel superseded exact recovery: run is not active")
+	}
+	ts := now()
+	if _, err := tx.Exec(
+		`UPDATE step_results SET status = ?, error = ?, completed_at = ?, last_activity_at = ?, last_activity = ?
+		 WHERE run_id = ? AND status IN (?, ?)`,
+		types.StepStatusFailed, types.RunCancelReasonSuperseded, ts, ts,
+		"step failed: "+types.RunCancelReasonSuperseded, runID,
+		types.StepStatusRunning, types.StepStatusFixing,
+	); err != nil {
+		return fmt.Errorf("cancel superseded exact recovery: terminalize active step: %w", err)
+	}
+	result, err := tx.Exec(
+		`UPDATE runs SET status = ?, error = ?, push_active = 0, updated_at = ?
+		 WHERE id = ? AND status = ? AND EXISTS (
+			SELECT 1 FROM run_recovery_events WHERE run_id = runs.id AND kind = ?
+		 )`,
+		types.RunCancelled, types.RunCancelReasonSuperseded, ts,
+		runID, types.RunRunning, RunRecoveryExactFinalHeadCapacity,
+	)
+	if err != nil {
+		return fmt.Errorf("cancel superseded exact recovery: terminalize run: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("cancel superseded exact recovery: run changed before terminalization")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("cancel superseded exact recovery: commit: %w", err)
+	}
+	return nil
 }

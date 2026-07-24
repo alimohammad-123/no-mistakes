@@ -17,6 +17,7 @@ import (
 // PushStep force-pushes the worktree state to the configured push remote.
 type PushStep struct {
 	afterEvidenceClassification func(bool)
+	beforeRemoteMutation        func()
 }
 
 func (s *PushStep) Name() types.StepName { return types.StepPush }
@@ -45,6 +46,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		}
 		if remoteHead != sctx.Run.HeadSHA {
 			return nil, fmt.Errorf("verify recovered exact push binding: remote head %s does not equal candidate %s", remoteHead, sctx.Run.HeadSHA)
+		}
+		if err := sctx.ValidateDeliveryCandidate(); err != nil {
+			return nil, err
 		}
 		sctx.Log("exact candidate already has its durable push binding")
 		return &pipeline.StepOutcome{}, nil
@@ -131,6 +135,12 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
 	}
+	if s.beforeRemoteMutation != nil {
+		s.beforeRemoteMutation()
+	}
+	if err := sctx.ValidateDeliveryCandidate(); err != nil {
+		return nil, err
+	}
 	switch {
 	case decision.newBranch:
 		// New branch: regular push (no force needed).
@@ -152,6 +162,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 			return nil, fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
 		}
 		return nil, fmt.Errorf("verify successful push to %s: remote head %s does not equal pushed head %s", pushTarget, verifiedRemote, headBeingPushed)
+	}
+	if err := sctx.ValidateDeliveryCandidate(); err != nil {
+		return nil, err
 	}
 	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
 		HeadSHA:           headBeingPushed,

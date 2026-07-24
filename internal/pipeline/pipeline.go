@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+var ErrSourceRefSuperseded = errors.New(types.RunCancelReasonSuperseded)
 
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
@@ -84,7 +87,23 @@ func (sctx *StepContext) BindSourceRef() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	var recovery *db.RunRecoveryEvent
+	if sctx.DB != nil {
+		recovery, err = sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
+		if err != nil {
+			return "", err
+		}
+	}
+	if recovery != nil && (recovery.SourceRef != ref || recovery.HeadSHA != sctx.Run.HeadSHA) {
+		return "", fmt.Errorf("exact recovery source ownership identity changed")
+	}
 	if err := sourceprovenance.BindCandidateIfUnchanged(sctx.Ctx, sctx.WorkDir, ref, sctx.Run.HeadSHA, sctx.Run.HeadSHA); err != nil {
+		if recovery != nil {
+			resolved, resolveErr := git.ResolveRef(sctx.Ctx, sctx.WorkDir, ref)
+			if resolveErr == nil && resolved != recovery.HeadSHA {
+				return "", fmt.Errorf("%w: source ref %s resolves to %s, want %s", ErrSourceRefSuperseded, ref, resolved, recovery.HeadSHA)
+			}
+		}
 		return "", err
 	}
 	return ref, nil
