@@ -1,0 +1,83 @@
+internal/daemon/exact_final_head_recovery_test.go
+  s_7b0dcaa05c2128::t_cce2f9c31152d2 197,258,266
+internal/daemon/exact_final_head_recovery_e2e.go
+  s_7b0dcaa05c2128::t_cce2f9c31152d2 17
+internal/scm/github/github_test.go
+  s_7b0dcaa05c2128::t_d92e6ede69eee4 179-194
+internal/bitbucket/client.go
+  s_7b0dcaa05c2128::t_191947e299a99f 322
+  s_7b0dcaa05c2128::t_6e1b04d4bd6616 32-33,318-321,338-339
+internal/pipeline/steps/push.go
+  s_7b0dcaa05c2128::t_83a753bc7e16b1 32-52
+internal/pipeline/steps/push_test.go
+  s_7b0dcaa05c2128::t_c824587471a883 11-12,205-239
+  s_7b0dcaa05c2128::t_10f69d33b40bfb 240-241
+internal/scm/azuredevops/azuredevops.go
+  s_7b0dcaa05c2128::t_36fc56d78e5ffc 223-230
+internal/daemon/manager.go
+  s_7b0dcaa05c2128::t_cce2f9c31152d2 262
+internal/pipeline/steps/exact_final_head_recovery.go
+  s_7b0dcaa05c2128::t_61eddc42c62462 14
+  s_7b0dcaa05c2128::t_cce2f9c31152d2 21,25-27,54-68,99-125
+internal/db/exact_final_head_recovery.go
+  s_7b0dcaa05c2128::t_c8005cff35ea8b 468-469,478-480,497-498,503-524,532
+  s_7b0dcaa05c2128::t_e473338c82e5cd 525-531
+  s_7b0dcaa05c2128::t_3b178e98fa46df 50,79-80,89,367-369,375
+internal/scm/host.go
+  s_7b0dcaa05c2128::t_36fc56d78e5ffc 100-103
+internal/scm/github/github.go
+  s_7b0dcaa05c2128::t_36fc56d78e5ffc 279-299
+internal/db/exact_final_head_recovery_test.go
+  s_7b0dcaa05c2128::t_031a5eabd47582 303,311-313,317-319,325-389
+  s_7b0dcaa05c2128::t_708fb00675ad74 314-316
+  s_7b0dcaa05c2128::t_ab8e4bc08e6ce4 390-391
+docs/src/content/docs/concepts/daemon.md
+  s_7b0dcaa05c2128::t_032dd20ec6db48 130
+internal/scm/gitlab/gitlab.go
+  s_7b0dcaa05c2128::t_36fc56d78e5ffc 145-146,236-241
+  s_7b0dcaa05c2128::t_e286ebd5eb86e7 242-243
+docs/src/content/docs/reference/cli.md
+  s_7b0dcaa05c2128::t_032dd20ec6db48 158
+internal/db/schema.go
+  s_7b0dcaa05c2128::t_3b178e98fa46df 95,99-112,266
+internal/db/exact_final_head_delivery.go
+  s_7b0dcaa05c2128::t_56febda94f46db 177-183
+  s_7b0dcaa05c2128::t_028920795a08b0 34-36
+  s_7b0dcaa05c2128::t_604e969ce0c3a2 172-174,187
+  s_7b0dcaa05c2128::t_e7d72a834b6e90 190-196
+  s_7b0dcaa05c2128::t_3b178e98fa46df 1-19,31-33,37-171,175-176,184-186,188-189,197-198
+  s_7b0dcaa05c2128::t_191947e299a99f 20-30
+internal/db/db_test.go
+  s_7b0dcaa05c2128::t_2b1d503f48e326 44-46,65-67
+internal/scm/azuredevops/parse.go
+  s_7b0dcaa05c2128::t_36fc56d78e5ffc 13-14
+internal/bitbucket/host.go
+  s_7b0dcaa05c2128::t_36fc56d78e5ffc 71-85
+internal/pipeline/steps/pr.go
+  s_7b0dcaa05c2128::t_a3dc828797e453 106-141,157-160,176-221
+  s_7b0dcaa05c2128::t_d61a3d2a6cc27f 20-22,71-75,222
+  s_7b0dcaa05c2128::t_9ebe03769ac8ca 223
+internal/daemon/exact_final_head_recovery.go
+  s_7b0dcaa05c2128::t_cce2f9c31152d2 174,190
+internal/pipeline/steps/pr_test.go
+  s_7b0dcaa05c2128::t_35758d194713c0 160-172,273
+  s_7b0dcaa05c2128::t_e94eab1575833b 18,84-159,173-175,181-183,185-272
+  s_7b0dcaa05c2128::t_c824587471a883 176-180,184
+  s_7b0dcaa05c2128::t_af952a0084945b 274
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "a449224832da4128d994e8c67d114df0c191f12c",
+  "prompts": {},
+  "sessions": {
+    "s_7b0dcaa05c2128": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f916c-3947-7023-9409-782a9434f33e",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
