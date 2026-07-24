@@ -1,0 +1,37 @@
+internal/git/git.go
+  s_7b0dcaa05c2128::t_971a950a8f8450 577-578,580-583,595,598-622,624-631
+  s_7b0dcaa05c2128::t_a5b1da658c4ebc 584-591,594,596-597,623
+internal/db/exact_recovery_push_operation.go
+  s_7b0dcaa05c2128::t_d6a9d21e652e7d 349-350
+  s_7b0dcaa05c2128::t_b1259859684675 4,289-318,345-348,547-550,607
+internal/git/git_branch_worktree_test.go
+  s_7b0dcaa05c2128::t_01750e565bd9b9 377-383
+  s_7b0dcaa05c2128::t_df54a5b31dd6db 307
+  s_7b0dcaa05c2128::t_4727b384b3ce23 316,319-376
+docs/src/content/docs/reference/cli.md
+  s_7b0dcaa05c2128::t_401aa59f065296 158
+docs/src/content/docs/concepts/daemon.md
+  s_7b0dcaa05c2128::t_401aa59f065296 130
+internal/pipeline/steps/exact_final_head_recovery.go
+  s_7b0dcaa05c2128::t_04fec4b04c6edf 20-24,63-120,207-226,414-421
+internal/pipeline/steps/pr_test.go
+  s_7b0dcaa05c2128::t_5b42e4cbf1c0ed 255-275,531,657-703,946-976,981-983
+internal/pipeline/steps/push.go
+  s_7b0dcaa05c2128::t_f1dbc9de7f0765 224-230,238-245,247,249-257,278,409,411-425,427-454,456-498,500-503,505
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "840d66d2363ddc51167826ddd02edb4c605e285d",
+  "prompts": {},
+  "sessions": {
+    "s_7b0dcaa05c2128": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f916c-3947-7023-9409-782a9434f33e",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
