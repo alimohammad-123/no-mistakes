@@ -101,6 +101,24 @@ type PRContentReader interface {
 	GetPRContent(ctx context.Context, pr *PR) (PRContent, error)
 }
 
+type PRSnapshot struct {
+	Repository string
+	Number     string
+	URL        string
+	State      PRState
+	Merged     bool
+	HeadSHA    string
+	HeadRef    string
+	BaseRef    string
+	Title      string
+	Body       string
+}
+
+type PRSnapshotReader interface {
+	GetPRSnapshot(ctx context.Context, pr *PR) (PRSnapshot, error)
+	ExpectedRepository() string
+}
+
 // PRState is the normalized lifecycle state of a PR.
 type PRState string
 

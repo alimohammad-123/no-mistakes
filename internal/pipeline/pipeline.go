@@ -375,6 +375,10 @@ func (sctx *StepContext) WithDeliverySourceOwnership(fn func() error) error {
 		return fn()
 	})
 	if err != nil {
+		if cause := context.Cause(sctx.Ctx); cause != nil &&
+			(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, cause)) {
+			return cause
+		}
 		resolved, resolveErr := git.ResolveRef(sctx.Ctx, sctx.WorkDir, ref)
 		if resolveErr == nil && resolved != event.HeadSHA {
 			return fmt.Errorf("%w: source ref %s resolves to %s, want %s", ErrSourceRefSuperseded, ref, resolved, event.HeadSHA)

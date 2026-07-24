@@ -85,9 +85,20 @@ func TestPRStep_AllowsExactBoundaryDeliveryWithStableIdentity(t *testing.T) {
 }
 
 type exactRecoveryPRHost struct {
-	pr          *scm.PR
-	content     scm.PRContent
-	updateCalls int
+	pr            *scm.PR
+	content       scm.PRContent
+	updateCalls   int
+	snapshotCalls int
+	repository    string
+	expectedRepo  string
+	state         scm.PRState
+	merged        bool
+	headSHA       string
+	headRef       string
+	baseRef       string
+	snapshotHook  func(int)
+	updateHook    func()
+	updateErr     error
 }
 
 func (h *exactRecoveryPRHost) Provider() scm.Provider { return scm.ProviderGitHub }
@@ -103,14 +114,39 @@ func (h *exactRecoveryPRHost) CreatePR(context.Context, string, string, scm.PRCo
 }
 func (h *exactRecoveryPRHost) UpdatePR(_ context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
 	h.updateCalls++
+	if h.updateErr != nil {
+		return nil, h.updateErr
+	}
 	h.content = content
+	if h.updateHook != nil {
+		h.updateHook()
+	}
 	return pr, nil
 }
 func (h *exactRecoveryPRHost) GetPRContent(context.Context, *scm.PR) (scm.PRContent, error) {
 	return h.content, nil
 }
 func (h *exactRecoveryPRHost) GetPRState(context.Context, *scm.PR) (scm.PRState, error) {
-	return scm.PRStateOpen, nil
+	return h.state, nil
+}
+func (h *exactRecoveryPRHost) ExpectedRepository() string { return h.expectedRepo }
+func (h *exactRecoveryPRHost) GetPRSnapshot(context.Context, *scm.PR) (scm.PRSnapshot, error) {
+	h.snapshotCalls++
+	if h.snapshotHook != nil {
+		h.snapshotHook(h.snapshotCalls)
+	}
+	return scm.PRSnapshot{
+		Repository: h.repository,
+		Number:     h.pr.Number,
+		URL:        h.pr.URL,
+		State:      h.state,
+		Merged:     h.merged,
+		HeadSHA:    h.headSHA,
+		HeadRef:    h.headRef,
+		BaseRef:    h.baseRef,
+		Title:      h.content.Title,
+		Body:       h.content.Body,
+	}, nil
 }
 func (h *exactRecoveryPRHost) GetChecks(context.Context, *scm.PR) ([]scm.Check, error) {
 	return nil, nil
@@ -171,6 +207,115 @@ func TestPRStep_ExactRecoveryJournalRefusesAmbiguousRemoteContent(t *testing.T) 
 	if host.updateCalls != 0 {
 		t.Fatalf("ambiguous recovery mutated PR %d times", host.updateCalls)
 	}
+}
+
+func TestPRStep_ExactRecoveryRefusesLifecycleIdentityAndHeadDrift(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*exactRecoveryPRHost)
+	}{
+		{name: "closed", mutate: func(h *exactRecoveryPRHost) { h.state = scm.PRStateClosed }},
+		{name: "merged", mutate: func(h *exactRecoveryPRHost) {
+			h.state = scm.PRStateMerged
+			h.merged = true
+		}},
+		{name: "head drift", mutate: func(h *exactRecoveryPRHost) { h.headSHA = strings.Repeat("a", 40) }},
+		{name: "source branch drift", mutate: func(h *exactRecoveryPRHost) { h.headRef = "other" }},
+		{name: "base drift", mutate: func(h *exactRecoveryPRHost) { h.baseRef = "release" }},
+		{name: "repository drift", mutate: func(h *exactRecoveryPRHost) { h.repository = "other/repo" }},
+		{name: "identity drift", mutate: func(h *exactRecoveryPRHost) { h.pr.URL = "https://github.com/test/repo/pull/99" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+			tc.mutate(host)
+			step := &PRStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+				return host, ""
+			}}
+			if _, err := step.Execute(sctx); err == nil {
+				t.Fatal("stale PR lifecycle or identity was accepted")
+			}
+			if host.updateCalls != 0 {
+				t.Fatalf("stale PR was mutated %d times", host.updateCalls)
+			}
+		})
+	}
+}
+
+func TestPRStep_ExactRecoveryVerifiesAuthoritativeStateAfterMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*exactRecoveryPRHost)
+	}{
+		{name: "closed", mutate: func(h *exactRecoveryPRHost) { h.state = scm.PRStateClosed }},
+		{name: "merged", mutate: func(h *exactRecoveryPRHost) {
+			h.state = scm.PRStateMerged
+			h.merged = true
+		}},
+		{name: "head drift", mutate: func(h *exactRecoveryPRHost) { h.headSHA = strings.Repeat("b", 40) }},
+		{name: "base drift", mutate: func(h *exactRecoveryPRHost) { h.baseRef = "release" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+			host.updateHook = func() { tc.mutate(host) }
+			step := &PRStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+				return host, ""
+			}}
+			if _, err := step.Execute(sctx); err == nil {
+				t.Fatal("ambiguous PR after-state was accepted")
+			}
+			if host.updateCalls != 1 || host.snapshotCalls != 2 {
+				t.Fatalf("update calls = %d, snapshot calls = %d", host.updateCalls, host.snapshotCalls)
+			}
+			update, err := sctx.DB.GetExactRecoveryPRUpdate(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if update == nil || update.State != db.ExactRecoveryPRUpdatePrepared || update.AppliedAt != nil {
+				t.Fatalf("ambiguous PR mutation was marked applied: %#v", update)
+			}
+		})
+	}
+}
+
+func TestPRStep_ExactRecoveryOwnershipExcludesReceiveContention(t *testing.T) {
+	sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+	superseding := supersedingExactRecoveryCommit(t, sctx)
+	var competingErr error
+	step := &PRStep{
+		hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+			return host, ""
+		},
+		ownershipClaimed: func() {
+			cmd := exec.Command("git", "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
+			cmd.Dir = sctx.WorkDir
+			_, competingErr = cmd.CombinedOutput()
+		},
+	}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if competingErr == nil {
+		t.Fatal("receive-side source update crossed PR ownership claim")
+	}
+	if got := gitCmd(t, sctx.WorkDir, "rev-parse", "refs/heads/feature"); got != sctx.Run.HeadSHA {
+		t.Fatalf("source ref moved during PR update to %s", got)
+	}
+	gitCmd(t, sctx.WorkDir, "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
+}
+
+func TestPRStep_ExactRecoveryOwnershipReleasesAfterMutationFailure(t *testing.T) {
+	sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+	superseding := supersedingExactRecoveryCommit(t, sctx)
+	host.updateErr = errors.New("remote update failed")
+	step := &PRStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
+		return host, ""
+	}}
+	if _, err := step.Execute(sctx); err == nil {
+		t.Fatal("failed PR mutation returned nil")
+	}
+	gitCmd(t, sctx.WorkDir, "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
 }
 
 func exactRecoveryPRStepContext(t *testing.T, remote scm.PRContent) (*pipeline.StepContext, *exactRecoveryPRHost) {
@@ -253,8 +398,14 @@ func exactRecoveryDeliveryStepContext(t *testing.T, remote scm.PRContent, stopAt
 		t.Fatal(err)
 	}
 	host := &exactRecoveryPRHost{
-		pr:      &scm.PR{Number: "23", URL: prURL},
-		content: remote,
+		pr:           &scm.PR{Number: "23", URL: prURL},
+		content:      remote,
+		repository:   "test/repo",
+		expectedRepo: "test/repo",
+		state:        scm.PRStateOpen,
+		headSHA:      headSHA,
+		headRef:      "feature",
+		baseRef:      "main",
 	}
 	if stopAtPush {
 		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {

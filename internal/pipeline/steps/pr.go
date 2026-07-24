@@ -190,9 +190,9 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 		update.IntendedContentHash != db.ExactRecoveryPRContentHash(update.IntendedTitle, update.IntendedBody) {
 		return nil, fmt.Errorf("exact recovery PR update identity is inconsistent")
 	}
-	reader, ok := host.(scm.PRContentReader)
+	snapshotReader, ok := host.(scm.PRSnapshotReader)
 	if !ok {
-		return nil, fmt.Errorf("provider %s cannot verify exact recovery PR content", host.Provider())
+		return nil, fmt.Errorf("provider %s cannot verify exact recovery PR identity and lifecycle", host.Provider())
 	}
 	if s.beforeRemoteMutation != nil {
 		s.beforeRemoteMutation()
@@ -201,9 +201,12 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 		if s.ownershipClaimed != nil {
 			s.ownershipClaimed()
 		}
-		current, err := reader.GetPRContent(sctx.Ctx, existing)
+		current, err := snapshotReader.GetPRSnapshot(sctx.Ctx, existing)
 		if err != nil {
-			return fmt.Errorf("read exact recovery PR content: %w", err)
+			return fmt.Errorf("read exact recovery PR state: %w", err)
+		}
+		if err := validateExactRecoveryPRSnapshot(sctx, existing, update, snapshotReader.ExpectedRepository(), current); err != nil {
+			return err
 		}
 		currentHash := db.ExactRecoveryPRContentHash(current.Title, current.Body)
 		switch {
@@ -218,12 +221,16 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 			if updated == nil {
 				updated = existing
 			}
-			if strings.TrimSpace(updated.URL) != update.TargetURL {
+			if strings.TrimSpace(updated.URL) != update.TargetURL ||
+				(strings.TrimSpace(existing.Number) != "" && strings.TrimSpace(updated.Number) != strings.TrimSpace(existing.Number)) {
 				return fmt.Errorf("exact recovery PR identity changed after update")
 			}
-			verified, err := reader.GetPRContent(sctx.Ctx, updated)
+			verified, err := snapshotReader.GetPRSnapshot(sctx.Ctx, existing)
 			if err != nil {
 				return fmt.Errorf("verify exact recovery PR update: %w", err)
+			}
+			if err := validateExactRecoveryPRSnapshot(sctx, existing, update, snapshotReader.ExpectedRepository(), verified); err != nil {
+				return err
 			}
 			if db.ExactRecoveryPRContentHash(verified.Title, verified.Body) != update.IntendedContentHash {
 				return fmt.Errorf("verify exact recovery PR update: remote content differs from durable intent")
@@ -237,6 +244,33 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 		return nil, err
 	}
 	return &pipeline.StepOutcome{PRURL: update.TargetURL}, nil
+}
+
+func validateExactRecoveryPRSnapshot(sctx *pipeline.StepContext, pr *scm.PR, update *db.ExactRecoveryPRUpdate, expectedRepository string, snapshot scm.PRSnapshot) error {
+	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
+	expectedRepository = strings.TrimSpace(expectedRepository)
+	if expectedRepository == "" || strings.TrimSpace(snapshot.Repository) != expectedRepository {
+		return fmt.Errorf("exact recovery PR repository identity changed")
+	}
+	if strings.TrimSpace(snapshot.URL) != update.TargetURL || strings.TrimSpace(snapshot.URL) != strings.TrimSpace(pr.URL) {
+		return fmt.Errorf("exact recovery PR identity changed")
+	}
+	expectedNumber := strings.TrimSpace(pr.Number)
+	if expectedNumber == "" {
+		expectedNumber, _ = scm.ExtractPRNumber(update.TargetURL)
+	}
+	if expectedNumber == "" || strings.TrimSpace(snapshot.Number) != expectedNumber {
+		return fmt.Errorf("exact recovery PR number changed")
+	}
+	if snapshot.State != scm.PRStateOpen || snapshot.Merged {
+		return fmt.Errorf("exact recovery PR is no longer open and unmerged")
+	}
+	if strings.TrimSpace(snapshot.HeadSHA) != update.HeadSHA ||
+		strings.TrimSpace(snapshot.HeadRef) != branch ||
+		strings.TrimSpace(snapshot.BaseRef) != sctx.BaseBranch() {
+		return fmt.Errorf("exact recovery PR head or base changed")
+	}
+	return nil
 }
 
 func (s *PRStep) validateRemoteMutationOwnership(sctx *pipeline.StepContext) error {

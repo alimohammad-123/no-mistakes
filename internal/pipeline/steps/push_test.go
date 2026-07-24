@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -253,6 +255,57 @@ func TestPushStep_ExactRecoveryRefMoveBeforePushPreventsPublication(t *testing.T
 	}
 	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
 		t.Fatalf("superseded recovery published %s, want unchanged %s", got, sctx.Run.BaseSHA)
+	}
+	event, err := sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event == nil || gitCmd(t, sctx.WorkDir, "rev-parse", event.AnchorRef) != sctx.Run.HeadSHA {
+		t.Fatalf("superseded recovery lost exact head anchor: %#v", event)
+	}
+}
+
+func TestPushStep_ExactRecoveryOwnershipExcludesReceiveContention(t *testing.T) {
+	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"}, true)
+	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+	superseding := supersedingExactRecoveryCommit(t, sctx)
+	var competingErr error
+	step := &PushStep{ownershipClaimed: func() {
+		cmd := exec.Command("git", "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
+		cmd.Dir = sctx.WorkDir
+		_, competingErr = cmd.CombinedOutput()
+	}}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if competingErr == nil {
+		t.Fatal("receive-side source update crossed Push ownership claim")
+	}
+	if got := gitCmd(t, sctx.WorkDir, "rev-parse", "refs/heads/feature"); got != sctx.Run.HeadSHA {
+		t.Fatalf("source ref moved during Push to %s", got)
+	}
+	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.HeadSHA {
+		t.Fatalf("Push did not publish exact head: %s", got)
+	}
+	gitCmd(t, sctx.WorkDir, "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
+}
+
+func TestPushStep_ExactRecoveryOwnershipReleasesAfterCancellation(t *testing.T) {
+	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"}, true)
+	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+	superseding := supersedingExactRecoveryCommit(t, sctx)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	sctx.Ctx = ctx
+	cause := errors.New("cancel exact recovery Push")
+	step := &PushStep{ownershipClaimed: func() {
+		cancel(cause)
+	}}
+	if _, err := step.Execute(sctx); !errors.Is(err, cause) {
+		t.Fatalf("Push error = %v, want cancellation cause", err)
+	}
+	gitCmd(t, sctx.WorkDir, "update-ref", "refs/heads/feature", superseding, sctx.Run.HeadSHA)
+	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+		t.Fatalf("cancelled Push published %s", got)
 	}
 }
 

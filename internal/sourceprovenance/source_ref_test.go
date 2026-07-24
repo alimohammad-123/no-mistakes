@@ -220,6 +220,91 @@ func TestExactRecoveryOwnershipReleasesAfterCancellation(t *testing.T) {
 	gitTest(t, dir, "update-ref", ref, head, head)
 }
 
+func TestExactRecoveryOwnershipReleasesAfterProcessCrash(t *testing.T) {
+	dir := t.TempDir()
+	gitTest(t, dir, "init")
+	gitTest(t, dir, "config", "user.name", "test")
+	gitTest(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", ".")
+	gitTest(t, dir, "commit", "-m", "one")
+	first := gitTest(t, dir, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "commit", "-am", "two")
+	second := gitTest(t, dir, "rev-parse", "HEAD")
+	gitTest(t, dir, "checkout", "--detach", first)
+	ref := "refs/heads/feature"
+	gitTest(t, dir, "update-ref", ref, first)
+	marker := filepath.Join(t.TempDir(), "claimed")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExactRecoveryOwnershipCrashHelper$")
+	cmd.Env = append(os.Environ(),
+		"NM_EXACT_RECOVERY_CRASH_HELPER=1",
+		"NM_EXACT_RECOVERY_CRASH_DIR="+dir,
+		"NM_EXACT_RECOVERY_CRASH_REF="+ref,
+		"NM_EXACT_RECOVERY_CRASH_HEAD="+first,
+		"NM_EXACT_RECOVERY_CRASH_MARKER="+marker,
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			t.Fatal("crash helper did not acquire ownership")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	competing := exec.Command("git", "update-ref", ref, second, first)
+	competing.Dir = dir
+	if out, err := competing.CombinedOutput(); err == nil {
+		t.Fatalf("source moved while crash helper held ownership: %s", out)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		update := exec.Command("git", "update-ref", ref, second, first)
+		update.Dir = dir
+		if _, err := update.CombinedOutput(); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("prepared ref lock survived owner process crash")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestExactRecoveryOwnershipCrashHelper(t *testing.T) {
+	if os.Getenv("NM_EXACT_RECOVERY_CRASH_HELPER") != "1" {
+		return
+	}
+	err := WithExactRecoveryOwnership(
+		context.Background(),
+		os.Getenv("NM_EXACT_RECOVERY_CRASH_DIR"),
+		os.Getenv("NM_EXACT_RECOVERY_CRASH_REF"),
+		os.Getenv("NM_EXACT_RECOVERY_CRASH_HEAD"),
+		func() error {
+			if err := os.WriteFile(os.Getenv("NM_EXACT_RECOVERY_CRASH_MARKER"), []byte("claimed"), 0o644); err != nil {
+				return err
+			}
+			select {}
+		},
+	)
+	t.Fatalf("crash helper ownership ended: %v", err)
+}
+
 func TestExactRecoveryAnchorRetainsUnreachableCandidateUntilEquivalentRefExists(t *testing.T) {
 	dir := t.TempDir()
 	gitTest(t, dir, "init")
