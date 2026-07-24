@@ -760,13 +760,66 @@ func azdoSequenceCmdFactory(responses map[string][]azdoTestResponse) CmdFactory 
 			response = sequence[index]
 		}
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestAzdoHelperProcess", "--", key)
-		cmd.Env = append(os.Environ(),
-			"AZDO_TEST_HELPER=1",
-			"AZDO_TEST_STDOUT="+response.stdout,
-			"AZDO_TEST_STDERR="+response.stderr,
-			fmt.Sprintf("AZDO_TEST_EXIT_CODE=%d", response.code),
-		)
+		cmd.Env = azdoSequenceHelperEnv(response)
 		return cmd
+	}
+}
+
+func azdoSequenceHelperEnv(response azdoTestResponse) []string {
+	raceOptions := make([]string, 0, len(strings.Fields(os.Getenv("GORACE")))+1)
+	for _, option := range strings.Fields(os.Getenv("GORACE")) {
+		if !strings.HasPrefix(option, "atexit_sleep_ms=") {
+			raceOptions = append(raceOptions, option)
+		}
+	}
+	raceOptions = append(raceOptions, "atexit_sleep_ms=0")
+
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "GORACE=") {
+			env = append(env, entry)
+		}
+	}
+	return append(env,
+		"GORACE="+strings.Join(raceOptions, " "),
+		"AZDO_TEST_HELPER=1",
+		"AZDO_TEST_STDOUT="+response.stdout,
+		"AZDO_TEST_STDERR="+response.stderr,
+		fmt.Sprintf("AZDO_TEST_EXIT_CODE=%d", response.code),
+	)
+}
+
+func TestAzdoSequenceHelperEnvDisablesRaceExitSleep(t *testing.T) {
+	tests := []struct {
+		name string
+		have string
+		want string
+	}{
+		{name: "unset", want: "atexit_sleep_ms=0"},
+		{
+			name: "preserves other options",
+			have: "halt_on_error=1 strip_path_prefix=/tmp",
+			want: "halt_on_error=1 strip_path_prefix=/tmp atexit_sleep_ms=0",
+		},
+		{
+			name: "replaces existing options",
+			have: "atexit_sleep_ms=1000 halt_on_error=1 atexit_sleep_ms=7",
+			want: "halt_on_error=1 atexit_sleep_ms=0",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GORACE", tc.have)
+			var got []string
+			for _, entry := range azdoSequenceHelperEnv(azdoTestResponse{}) {
+				if strings.HasPrefix(entry, "GORACE=") {
+					got = append(got, strings.TrimPrefix(entry, "GORACE="))
+				}
+			}
+			if len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("GORACE entries = %q, want [%q]", got, tc.want)
+			}
+		})
 	}
 }
 
