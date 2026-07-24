@@ -86,6 +86,28 @@ func TestFindPRReturnsBrowsableURL(t *testing.T) {
 	}
 }
 
+func TestGetPRSnapshotReadsAuthoritativeRecoveryState(t *testing.T) {
+	t.Parallel()
+	h := newTestHost(map[string]azdoTestResponse{
+		"az repos pr show --id 42 --organization " + testOrg + " --output json": {
+			stdout: `{"pullRequestId":42,"title":"fix: exact recovery","description":"body","status":"active","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main","lastMergeSourceCommit":{"commitId":"abc123"},"repository":{"name":"myrepo","webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo","project":{"name":"myproject"}}}` + "\n",
+		},
+	})
+	snapshot, err := h.GetPRSnapshot(context.Background(), &scm.PR{Number: "42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.Capabilities().RecoverySnapshot || h.ExpectedRepository() != "myproject/myrepo" ||
+		snapshot.Repository != "myproject/myrepo" || snapshot.Number != "42" ||
+		snapshot.URL != "https://dev.azure.com/myorg/myproject/_git/myrepo/pullrequest/42" ||
+		snapshot.State != scm.PRStateOpen || snapshot.Merged ||
+		snapshot.HeadSHA != "abc123" || snapshot.HeadRef != "feature" ||
+		snapshot.BaseRef != "main" || snapshot.Title != "fix: exact recovery" ||
+		snapshot.Body != "body" {
+		t.Fatalf("PR snapshot = %#v", snapshot)
+	}
+}
+
 func TestFindPRNoMatch(t *testing.T) {
 	t.Parallel()
 

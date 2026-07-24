@@ -94,27 +94,16 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, database *
 	if existing == nil || strings.TrimSpace(existing.URL) != strings.TrimSpace(*run.PRURL) {
 		return fmt.Errorf("stored PR identity is missing or changed")
 	}
-	state, err := host.GetPRState(ctx, existing)
+	snapshot, err := validateExactRecoveryPRAdmission(ctx, sctx, host, existing, *run.PRURL, publishedHead)
 	if err != nil {
-		return fmt.Errorf("read exact final-head recovery PR state: %w", err)
-	}
-	if state != scm.PRStateOpen {
-		return fmt.Errorf("stored PR is no longer open: %s", state)
+		return err
 	}
 	update, err := database.GetExactRecoveryPRUpdate(run.ID)
 	if err != nil {
 		return err
 	}
 	if update != nil {
-		reader, ok := host.(scm.PRContentReader)
-		if !ok {
-			return fmt.Errorf("provider %s cannot verify exact recovery PR content", provider)
-		}
-		content, err := reader.GetPRContent(ctx, existing)
-		if err != nil {
-			return fmt.Errorf("read exact recovery PR content: %w", err)
-		}
-		contentHash := db.ExactRecoveryPRContentHash(content.Title, content.Body)
+		contentHash := db.ExactRecoveryPRContentHash(snapshot.Title, snapshot.Body)
 		switch update.State {
 		case db.ExactRecoveryPRUpdatePrepared:
 			if contentHash != update.PriorContentHash && contentHash != update.IntendedContentHash {
@@ -132,6 +121,26 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, database *
 		return err
 	}
 	return nil
+}
+
+func validateExactRecoveryPRAdmission(ctx context.Context, sctx *pipeline.StepContext, host scm.Host, existing *scm.PR, expectedURL, expectedHead string) (scm.PRSnapshot, error) {
+	if host == nil || existing == nil {
+		return scm.PRSnapshot{}, fmt.Errorf("exact recovery PR host or identity is missing")
+	}
+	snapshotReader, ok := host.(scm.PRSnapshotReader)
+	if !host.Capabilities().RecoverySnapshot || !ok {
+		return scm.PRSnapshot{}, fmt.Errorf("provider %s lacks authoritative exact recovery PR snapshots", host.Provider())
+	}
+	snapshot, err := snapshotReader.GetPRSnapshot(ctx, existing)
+	if err != nil {
+		return scm.PRSnapshot{}, fmt.Errorf("read exact final-head recovery PR snapshot: %w", err)
+	}
+	if err := validateExactRecoveryPRSnapshot(
+		sctx, existing, expectedURL, expectedHead, snapshotReader.ExpectedRepository(), snapshot,
+	); err != nil {
+		return scm.PRSnapshot{}, err
+	}
+	return snapshot, nil
 }
 
 func ReconcileStaleExactFinalHeadPushCustody(ctx context.Context, database *db.DB, run *db.Run, repo *db.Repo, workDir string, maxReplays int, expected []types.StepName) (bool, error) {

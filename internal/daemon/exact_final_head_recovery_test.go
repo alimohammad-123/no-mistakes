@@ -270,6 +270,14 @@ func TestHandleRecoverExactFinalHeadCapacityRefusesChangedExternalOrGateState(t 
 			},
 		},
 		{
+			name: "unsupported PR snapshot capability",
+			mutate: func(*exactRecoveryManagerFixture) {
+				validateExactFinalHeadRecoveryExternalState = func(context.Context, *db.DB, *db.Run, *db.Repo, string, *config.Config, bool) error {
+					return errors.New("provider lacks authoritative exact recovery PR snapshots")
+				}
+			},
+		},
+		{
 			name: "mismatched source ref",
 			mutate: func(f *exactRecoveryManagerFixture) {
 				gitCmd(t, f.gate, "update-ref", "refs/heads/feature", f.run.BaseSHA, f.run.HeadSHA)

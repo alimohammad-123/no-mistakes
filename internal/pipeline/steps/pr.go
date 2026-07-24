@@ -190,10 +190,6 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 		update.IntendedContentHash != db.ExactRecoveryPRContentHash(update.IntendedTitle, update.IntendedBody) {
 		return nil, fmt.Errorf("exact recovery PR update identity is inconsistent")
 	}
-	snapshotReader, ok := host.(scm.PRSnapshotReader)
-	if !ok {
-		return nil, fmt.Errorf("provider %s cannot verify exact recovery PR identity and lifecycle", host.Provider())
-	}
 	if s.beforeRemoteMutation != nil {
 		s.beforeRemoteMutation()
 	}
@@ -201,11 +197,10 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 		if s.ownershipClaimed != nil {
 			s.ownershipClaimed()
 		}
-		current, err := snapshotReader.GetPRSnapshot(sctx.Ctx, existing)
+		current, err := validateExactRecoveryPRAdmission(
+			sctx.Ctx, sctx, host, existing, update.TargetURL, update.HeadSHA,
+		)
 		if err != nil {
-			return fmt.Errorf("read exact recovery PR state: %w", err)
-		}
-		if err := validateExactRecoveryPRSnapshot(sctx, existing, update, snapshotReader.ExpectedRepository(), current); err != nil {
 			return err
 		}
 		currentHash := db.ExactRecoveryPRContentHash(current.Title, current.Body)
@@ -225,11 +220,10 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 				(strings.TrimSpace(existing.Number) != "" && strings.TrimSpace(updated.Number) != strings.TrimSpace(existing.Number)) {
 				return fmt.Errorf("exact recovery PR identity changed after update")
 			}
-			verified, err := snapshotReader.GetPRSnapshot(sctx.Ctx, existing)
+			verified, err := validateExactRecoveryPRAdmission(
+				sctx.Ctx, sctx, host, existing, update.TargetURL, update.HeadSHA,
+			)
 			if err != nil {
-				return fmt.Errorf("verify exact recovery PR update: %w", err)
-			}
-			if err := validateExactRecoveryPRSnapshot(sctx, existing, update, snapshotReader.ExpectedRepository(), verified); err != nil {
 				return err
 			}
 			if db.ExactRecoveryPRContentHash(verified.Title, verified.Body) != update.IntendedContentHash {
@@ -246,18 +240,20 @@ func (s *PRStep) executeExactRecoveryPRUpdate(sctx *pipeline.StepContext, host s
 	return &pipeline.StepOutcome{PRURL: update.TargetURL}, nil
 }
 
-func validateExactRecoveryPRSnapshot(sctx *pipeline.StepContext, pr *scm.PR, update *db.ExactRecoveryPRUpdate, expectedRepository string, snapshot scm.PRSnapshot) error {
+func validateExactRecoveryPRSnapshot(sctx *pipeline.StepContext, pr *scm.PR, expectedURL, expectedHead, expectedRepository string, snapshot scm.PRSnapshot) error {
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
 	expectedRepository = strings.TrimSpace(expectedRepository)
-	if expectedRepository == "" || strings.TrimSpace(snapshot.Repository) != expectedRepository {
+	if expectedRepository == "" || strings.TrimSpace(snapshot.Repository) == "" ||
+		strings.TrimSpace(snapshot.Repository) != expectedRepository {
 		return fmt.Errorf("exact recovery PR repository identity changed")
 	}
-	if strings.TrimSpace(snapshot.URL) != update.TargetURL || strings.TrimSpace(snapshot.URL) != strings.TrimSpace(pr.URL) {
+	if strings.TrimSpace(snapshot.URL) == "" || strings.TrimSpace(snapshot.URL) != strings.TrimSpace(expectedURL) ||
+		strings.TrimSpace(snapshot.URL) != strings.TrimSpace(pr.URL) {
 		return fmt.Errorf("exact recovery PR identity changed")
 	}
 	expectedNumber := strings.TrimSpace(pr.Number)
 	if expectedNumber == "" {
-		expectedNumber, _ = scm.ExtractPRNumber(update.TargetURL)
+		expectedNumber, _ = scm.ExtractPRNumber(expectedURL)
 	}
 	if expectedNumber == "" || strings.TrimSpace(snapshot.Number) != expectedNumber {
 		return fmt.Errorf("exact recovery PR number changed")
@@ -265,10 +261,13 @@ func validateExactRecoveryPRSnapshot(sctx *pipeline.StepContext, pr *scm.PR, upd
 	if snapshot.State != scm.PRStateOpen || snapshot.Merged {
 		return fmt.Errorf("exact recovery PR is no longer open and unmerged")
 	}
-	if strings.TrimSpace(snapshot.HeadSHA) != update.HeadSHA ||
+	if strings.TrimSpace(snapshot.HeadSHA) == "" || strings.TrimSpace(snapshot.HeadSHA) != strings.TrimSpace(expectedHead) ||
 		strings.TrimSpace(snapshot.HeadRef) != branch ||
 		strings.TrimSpace(snapshot.BaseRef) != sctx.BaseBranch() {
 		return fmt.Errorf("exact recovery PR head or base changed")
+	}
+	if strings.TrimSpace(snapshot.Title) == "" || strings.TrimSpace(snapshot.Body) == "" {
+		return fmt.Errorf("exact recovery PR snapshot is incomplete")
 	}
 	return nil
 }

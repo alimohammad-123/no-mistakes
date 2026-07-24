@@ -115,7 +115,7 @@ func (h *Host) pipelineJobsArgs(pipelineID int) []string {
 func (h *Host) Provider() scm.Provider { return scm.ProviderGitLab }
 
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, RecoverySnapshot: true}
 }
 
 func (h *Host) Available(ctx context.Context) error {
@@ -148,6 +148,10 @@ type mrPayload struct {
 	HasConflicts        bool   `json:"has_conflicts"`
 	DetailedMergeStatus string `json:"detailed_merge_status"`
 	MergeStatus         string `json:"merge_status"`
+	SourceBranch        string `json:"source_branch"`
+	TargetBranch        string `json:"target_branch"`
+	SHA                 string `json:"sha"`
+	MergedAt            string `json:"merged_at"`
 }
 
 func (p mrPayload) toPR() *scm.PR {
@@ -239,6 +243,42 @@ func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, err
 		return scm.PRContent{}, err
 	}
 	return scm.PRContent{Title: mr.Title, Body: mr.Description}, nil
+}
+
+func (h *Host) ExpectedRepository() string {
+	return strings.TrimSpace(h.projectPath)
+}
+
+func (h *Host) GetPRSnapshot(ctx context.Context, pr *scm.PR) (scm.PRSnapshot, error) {
+	mr, err := h.viewMR(ctx, pr.Number)
+	if err != nil {
+		return scm.PRSnapshot{}, err
+	}
+	url := strings.TrimSpace(mr.WebURL)
+	if url == "" {
+		url = strings.TrimSpace(mr.URL)
+	}
+	repository := ProjectPath(url)
+	if marker := strings.Index(repository, "/-/merge_requests/"); marker >= 0 {
+		repository = repository[:marker]
+	}
+	state := normalizePRState(mr.State)
+	number := ""
+	if mr.IID > 0 {
+		number = fmt.Sprintf("%d", mr.IID)
+	}
+	return scm.PRSnapshot{
+		Repository: repository,
+		Number:     number,
+		URL:        url,
+		State:      state,
+		Merged:     state == scm.PRStateMerged || strings.TrimSpace(mr.MergedAt) != "",
+		HeadSHA:    strings.TrimSpace(mr.SHA),
+		HeadRef:    strings.TrimSpace(mr.SourceBranch),
+		BaseRef:    strings.TrimSpace(mr.TargetBranch),
+		Title:      mr.Title,
+		Body:       mr.Description,
+	}, nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {

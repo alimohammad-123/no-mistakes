@@ -75,7 +75,7 @@ func (h *Host) Provider() scm.Provider { return scm.ProviderAzureDevOps }
 // yet wired up - the az CLI has no first-class build-log command, so callers
 // gate on FailedCheckLogs and skip it.
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: false}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: false, RecoverySnapshot: true}
 }
 
 // orgArgs scopes a command to the organization. The show/update/policy-list
@@ -226,6 +226,43 @@ func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, err
 		return scm.PRContent{}, err
 	}
 	return scm.PRContent{Title: got.Title, Body: got.Description}, nil
+}
+
+func (h *Host) ExpectedRepository() string {
+	return recoveryRepositoryIdentity(h.project, h.repo)
+}
+
+func (h *Host) GetPRSnapshot(ctx context.Context, pr *scm.PR) (scm.PRSnapshot, error) {
+	got, err := h.showPR(ctx, pr)
+	if err != nil {
+		return scm.PRSnapshot{}, err
+	}
+	state := normalizePRState(got.Status)
+	number := ""
+	if got.PullRequestID > 0 {
+		number = strconv.Itoa(got.PullRequestID)
+	}
+	return scm.PRSnapshot{
+		Repository: recoveryRepositoryIdentity(got.Repository.Project.Name, got.Repository.Name),
+		Number:     number,
+		URL:        h.toPR(got).URL,
+		State:      state,
+		Merged:     state == scm.PRStateMerged,
+		HeadSHA:    strings.TrimSpace(got.LastMergeSourceCommit.CommitID),
+		HeadRef:    strings.TrimPrefix(strings.TrimSpace(got.SourceRefName), "refs/heads/"),
+		BaseRef:    strings.TrimPrefix(strings.TrimSpace(got.TargetRefName), "refs/heads/"),
+		Title:      got.Title,
+		Body:       got.Description,
+	}, nil
+}
+
+func recoveryRepositoryIdentity(project, repo string) string {
+	project = strings.TrimSpace(project)
+	repo = strings.TrimSpace(repo)
+	if project == "" || repo == "" {
+		return ""
+	}
+	return project + "/" + repo
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {

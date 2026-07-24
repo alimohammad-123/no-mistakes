@@ -85,25 +85,27 @@ func TestPRStep_AllowsExactBoundaryDeliveryWithStableIdentity(t *testing.T) {
 }
 
 type exactRecoveryPRHost struct {
-	pr            *scm.PR
-	content       scm.PRContent
-	updateCalls   int
-	snapshotCalls int
-	repository    string
-	expectedRepo  string
-	state         scm.PRState
-	merged        bool
-	headSHA       string
-	headRef       string
-	baseRef       string
-	snapshotHook  func(int)
-	updateHook    func()
-	updateErr     error
+	pr               *scm.PR
+	content          scm.PRContent
+	updateCalls      int
+	snapshotCalls    int
+	repository       string
+	expectedRepo     string
+	state            scm.PRState
+	merged           bool
+	headSHA          string
+	headRef          string
+	baseRef          string
+	snapshotHook     func(int)
+	updateHook       func()
+	updateErr        error
+	recoverySnapshot bool
+	snapshotErr      error
 }
 
 func (h *exactRecoveryPRHost) Provider() scm.Provider { return scm.ProviderGitHub }
 func (h *exactRecoveryPRHost) Capabilities() scm.Capabilities {
-	return scm.Capabilities{}
+	return scm.Capabilities{RecoverySnapshot: h.recoverySnapshot}
 }
 func (h *exactRecoveryPRHost) Available(context.Context) error { return nil }
 func (h *exactRecoveryPRHost) FindPR(context.Context, string, string) (*scm.PR, error) {
@@ -132,6 +134,9 @@ func (h *exactRecoveryPRHost) GetPRState(context.Context, *scm.PR) (scm.PRState,
 func (h *exactRecoveryPRHost) ExpectedRepository() string { return h.expectedRepo }
 func (h *exactRecoveryPRHost) GetPRSnapshot(context.Context, *scm.PR) (scm.PRSnapshot, error) {
 	h.snapshotCalls++
+	if h.snapshotErr != nil {
+		return scm.PRSnapshot{}, h.snapshotErr
+	}
 	if h.snapshotHook != nil {
 		h.snapshotHook(h.snapshotCalls)
 	}
@@ -191,6 +196,53 @@ func TestPRStep_ExactRecoveryJournalAvoidsDuplicateMutation(t *testing.T) {
 			}
 			if update == nil || update.State != db.ExactRecoveryPRUpdateApplied || update.AppliedAt == nil {
 				t.Fatalf("PR update provenance = %#v", update)
+			}
+		})
+	}
+}
+
+func TestExactRecoveryPRAdmissionRejectsUnsupportedOrStaleStateBeforeDelivery(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*exactRecoveryPRHost)
+	}{
+		{name: "unavailable snapshot", mutate: func(h *exactRecoveryPRHost) { h.snapshotErr = errors.New("provider unavailable") }},
+		{name: "unsupported capability", mutate: func(h *exactRecoveryPRHost) { h.recoverySnapshot = false }},
+		{name: "incomplete title", mutate: func(h *exactRecoveryPRHost) { h.content.Title = "" }},
+		{name: "incomplete body", mutate: func(h *exactRecoveryPRHost) { h.content.Body = "" }},
+		{name: "closed", mutate: func(h *exactRecoveryPRHost) { h.state = scm.PRStateClosed }},
+		{name: "merged", mutate: func(h *exactRecoveryPRHost) {
+			h.state = scm.PRStateMerged
+			h.merged = true
+		}},
+		{name: "wrong head", mutate: func(h *exactRecoveryPRHost) { h.headSHA = strings.Repeat("c", 40) }},
+		{name: "wrong branch", mutate: func(h *exactRecoveryPRHost) { h.headRef = "other" }},
+		{name: "wrong base", mutate: func(h *exactRecoveryPRHost) { h.baseRef = "release" }},
+		{name: "wrong repository", mutate: func(h *exactRecoveryPRHost) { h.repository = "other/repo" }},
+		{name: "unknown identity", mutate: func(h *exactRecoveryPRHost) {
+			h.pr.Number = ""
+			h.pr.URL = ""
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sctx, host := exactRecoveryDeliveryStepContext(
+				t, scm.PRContent{Title: "prior title", Body: "prior body"}, true,
+			)
+			gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+			host.headSHA = sctx.Run.BaseSHA
+			expectedURL := host.pr.URL
+			tc.mutate(host)
+			if _, err := validateExactRecoveryPRAdmission(
+				context.Background(), sctx, host, host.pr, expectedURL, sctx.Run.BaseSHA,
+			); err == nil {
+				t.Fatal("unsafe recovery PR admission was accepted")
+			}
+			if host.updateCalls != 0 {
+				t.Fatalf("admission mutated PR %d times", host.updateCalls)
+			}
+			if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+				t.Fatalf("admission published %s, want unchanged %s", got, sctx.Run.BaseSHA)
 			}
 		})
 	}
@@ -398,14 +450,15 @@ func exactRecoveryDeliveryStepContext(t *testing.T, remote scm.PRContent, stopAt
 		t.Fatal(err)
 	}
 	host := &exactRecoveryPRHost{
-		pr:           &scm.PR{Number: "23", URL: prURL},
-		content:      remote,
-		repository:   "test/repo",
-		expectedRepo: "test/repo",
-		state:        scm.PRStateOpen,
-		headSHA:      headSHA,
-		headRef:      "feature",
-		baseRef:      "main",
+		pr:               &scm.PR{Number: "23", URL: prURL},
+		content:          remote,
+		repository:       "test/repo",
+		expectedRepo:     "test/repo",
+		recoverySnapshot: true,
+		state:            scm.PRStateOpen,
+		headSHA:          headSHA,
+		headRef:          "feature",
+		baseRef:          "main",
 	}
 	if stopAtPush {
 		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {

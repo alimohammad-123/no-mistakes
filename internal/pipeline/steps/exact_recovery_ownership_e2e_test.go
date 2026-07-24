@@ -13,6 +13,26 @@ import (
 )
 
 func TestExactRecoveryDeliveryOwnershipInterleavingsE2E(t *testing.T) {
+	t.Run("unsupported snapshot admission", func(t *testing.T) {
+		sctx, host := exactRecoveryDeliveryStepContext(
+			t, scm.PRContent{Title: "prior title", Body: "prior body"}, true,
+		)
+		gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+		host.headSHA = sctx.Run.BaseSHA
+		host.recoverySnapshot = false
+		if _, err := validateExactRecoveryPRAdmission(
+			sctx.Ctx, sctx, host, host.pr, host.pr.URL, sctx.Run.BaseSHA,
+		); err == nil {
+			t.Fatal("unsupported provider was admitted")
+		}
+		if host.updateCalls != 0 {
+			t.Fatalf("unsupported admission mutated PR %d times", host.updateCalls)
+		}
+		if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+			t.Fatalf("unsupported admission published %s", got)
+		}
+	})
+
 	t.Run("superseded before claim", func(t *testing.T) {
 		sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"}, true)
 		gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)

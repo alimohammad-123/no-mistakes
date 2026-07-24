@@ -173,8 +173,9 @@ func (c Check) Pending() bool { return c.Bucket == CheckBucketPending }
 // Capabilities declares which optional Host methods return meaningful data.
 // Callers must consult Capabilities before invoking optional methods.
 type Capabilities struct {
-	MergeableState  bool
-	FailedCheckLogs bool
+	MergeableState   bool
+	FailedCheckLogs  bool
+	RecoverySnapshot bool
 }
 
 // ErrUnsupported is returned by optional Host methods that the provider

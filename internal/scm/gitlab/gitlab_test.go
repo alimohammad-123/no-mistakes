@@ -49,6 +49,28 @@ func TestProjectPath(t *testing.T) {
 	}
 }
 
+func TestGetPRSnapshotReadsAuthoritativeRecoveryState(t *testing.T) {
+	t.Parallel()
+	host := New(gitlabTestCmdFactory(map[string]gitlabTestResponse{
+		"glab mr view 42 --output json": {
+			stdout: `{"iid":42,"web_url":"https://gitlab.example.com/group/sub/project/-/merge_requests/42","title":"fix: exact recovery","description":"body","state":"opened","source_branch":"feature","target_branch":"main","sha":"abc123","merged_at":null}` + "\n",
+		},
+	}), nil, "gitlab.example.com", "group/sub/project")
+	snapshot, err := host.GetPRSnapshot(context.Background(), &scm.PR{Number: "42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !host.Capabilities().RecoverySnapshot || host.ExpectedRepository() != "group/sub/project" ||
+		snapshot.Repository != "group/sub/project" || snapshot.Number != "42" ||
+		snapshot.URL != "https://gitlab.example.com/group/sub/project/-/merge_requests/42" ||
+		snapshot.State != scm.PRStateOpen || snapshot.Merged ||
+		snapshot.HeadSHA != "abc123" || snapshot.HeadRef != "feature" ||
+		snapshot.BaseRef != "main" || snapshot.Title != "fix: exact recovery" ||
+		snapshot.Body != "body" {
+		t.Fatalf("MR snapshot = %#v", snapshot)
+	}
+}
+
 func TestGetMergeableStateTreatsBlockedStatusesAsResolved(t *testing.T) {
 	t.Parallel()
 
