@@ -1,0 +1,48 @@
+internal/scm/github/github_test.go
+  s_7b0dcaa05c2128::t_9e8b50462cdde2 202
+internal/scm/azuredevops/azuredevops.go
+  s_7b0dcaa05c2128::t_b4b2f7a5453bd5 301,304-306,315-318
+  s_7b0dcaa05c2128::t_911ce38f46f24e 8,16,50-55,72,240,245-249,261-262,269-295,299-300,302-303,307-314,319-347
+  s_7b0dcaa05c2128::t_bf5757237ea202 67-71
+  s_7b0dcaa05c2128::t_c37354a48c33ac 56,296-298
+  s_7b0dcaa05c2128::t_1877cb477ada1e 348
+internal/scm/gitlab/gitlab.go
+  s_7b0dcaa05c2128::t_9e8b50462cdde2 252
+internal/scm/azuredevops/parse.go
+  s_7b0dcaa05c2128::t_bf5757237ea202 12-20
+  s_7b0dcaa05c2128::t_911ce38f46f24e 29-31
+  s_7b0dcaa05c2128::t_0fbc46a7877148 32-33
+internal/scm/host.go
+  s_7b0dcaa05c2128::t_9e8b50462cdde2 117-121,123
+internal/scm/github/github.go
+  s_7b0dcaa05c2128::t_9e8b50462cdde2 304
+internal/scm/gitlab/gitlab_test.go
+  s_7b0dcaa05c2128::t_9e8b50462cdde2 59
+internal/scm/azuredevops/azuredevops_test.go
+  s_7b0dcaa05c2128::t_39ffffd14872a3 5
+  s_7b0dcaa05c2128::t_42a5f55287252f 10,93-96,99-102,105-107,115,122-194,196-216,650-668,675,677-678
+  s_7b0dcaa05c2128::t_b4b2f7a5453bd5 195
+  s_7b0dcaa05c2128::t_1f5599d8cd974a 669-674
+  s_7b0dcaa05c2128::t_c9a6ad82a0f538 676
+  s_7b0dcaa05c2128::t_3e2dcc82c8373e 679
+internal/pipeline/steps/exact_final_head_recovery.go
+  s_7b0dcaa05c2128::t_20bc82c4be4aa7 7,20-21,137-141,153-173
+internal/pipeline/steps/pr_test.go
+  s_7b0dcaa05c2128::t_0b965345be85df 15,105,137,139,254-276,349-354
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "96eb2cac39d76d40e76a6f8dc620ad5dc10848a5",
+  "prompts": {},
+  "sessions": {
+    "s_7b0dcaa05c2128": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f916c-3947-7023-9409-782a9434f33e",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
