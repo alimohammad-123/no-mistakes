@@ -794,6 +794,153 @@ func TestReconcileStaleExactRecoveryPushCustodyRotatesFreshAttemptDeadline(t *te
 	}
 }
 
+func TestReconcileStaleExactRecoveryPushCustodyRotatesExpiredPreparedAttempt(t *testing.T) {
+	f, restored, _ := prepareExactRecoveryPushCrash(t)
+	if _, err := f.d.PrepareExactRecoveryRefObservation(
+		restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+		f.pushed, now()+30,
+	); err != nil {
+		t.Fatal(err)
+	}
+	first, err := f.d.GetExactRecoveryPushOperation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expireExactRecoveryPushAttempt(t, f.d, restored.ID, 1)
+	nextDeadline := now() + 90
+	reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+		restored.ID, f.pushed, "refs/heads/feature", restored.HeadSHA,
+		nextDeadline, 3, types.AllSteps(),
+	)
+	if err != nil || !reconciled {
+		t.Fatalf("prepared crash reconciliation = %v, %v", reconciled, err)
+	}
+	attempts, err := f.d.ListExactRecoveryPushAttempts(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 2 ||
+		attempts[0].OperationID != first.OperationID ||
+		attempts[0].Phase != ExactRecoveryPushPrepared ||
+		attempts[0].InvokedAt != nil ||
+		attempts[0].Disposition == nil ||
+		*attempts[0].Disposition != ExactRecoveryPushNotApplied ||
+		attempts[0].ClosedAt == nil {
+		t.Fatalf("prepared attempt history = %#v", attempts)
+	}
+	if attempts[1].OperationID == first.OperationID ||
+		attempts[1].Phase != ExactRecoveryPushPrepared ||
+		attempts[1].DeadlineAt != nextDeadline ||
+		attempts[1].Disposition != nil {
+		t.Fatalf("fresh prepared attempt = %#v", attempts[1])
+	}
+	run, err := f.d.GetRun(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PushActive || run.LastPushedSHA == nil || *run.LastPushedSHA != f.pushed {
+		t.Fatalf("prepared recovery changed publication or retained stale custody: %#v", run)
+	}
+	if err := f.d.SetRunPushActive(restored.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.MarkExactRecoveryPushInvoked(restored.ID, first.OperationID, f.pushed); err == nil {
+		t.Fatal("expired prepared owner crossed the rotation CAS")
+	}
+	current, err := f.d.GetExactRecoveryPushOperation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Attempt != 2 || current.Phase != ExactRecoveryPushPrepared {
+		t.Fatalf("prepared rotation created extra attempts: %#v", current)
+	}
+}
+
+func TestReconcileStaleExactRecoveryPushCustodyRefusesUncertainPreparedInvocation(t *testing.T) {
+	f, restored, _ := prepareExactRecoveryPushCrash(t)
+	if _, err := f.d.PrepareExactRecoveryRefObservation(
+		restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+		f.pushed, now()+30,
+	); err != nil {
+		t.Fatal(err)
+	}
+	expireExactRecoveryPushAttempt(t, f.d, restored.ID, 1)
+	if _, err := f.d.sql.Exec(
+		`UPDATE run_recovery_push_attempts
+		 SET invoked_at = ?
+		 WHERE run_id = ? AND attempt = 1`,
+		now(), restored.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+		restored.ID, f.pushed, "refs/heads/feature", restored.HeadSHA,
+		now()+90, 3, types.AllSteps(),
+	)
+	if err == nil || reconciled {
+		t.Fatalf("uncertain prepared invocation reconciled: reconciled=%v err=%v", reconciled, err)
+	}
+	attempts, err := f.d.ListExactRecoveryPushAttempts(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].Disposition != nil || attempts[0].ClosedAt != nil {
+		t.Fatalf("uncertain prepared attempt mutated: %#v", attempts)
+	}
+	run, err := f.d.GetRun(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !run.PushActive || run.LastPushedSHA == nil || *run.LastPushedSHA != f.pushed {
+		t.Fatalf("uncertain prepared attempt lost custody: %#v", run)
+	}
+}
+
+func TestReconcileStaleExactRecoveryPushCustodyDoesNotRotateExpiredPreparedAttemptOnRemoteAmbiguity(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteHead string
+	}{
+		{name: "expected target", remoteHead: "head-3"},
+		{name: "third oid", remoteHead: "other-head"},
+		{name: "malformed oid", remoteHead: "not an oid"},
+		{name: "missing oid"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, restored, _ := prepareExactRecoveryPushCrash(t)
+			if _, err := f.d.PrepareExactRecoveryRefObservation(
+				restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+				f.pushed, now()+30,
+			); err != nil {
+				t.Fatal(err)
+			}
+			expireExactRecoveryPushAttempt(t, f.d, restored.ID, 1)
+			reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
+				restored.ID, tc.remoteHead, "refs/heads/feature", restored.HeadSHA,
+				now()+90, 3, types.AllSteps(),
+			)
+			if err == nil || reconciled {
+				t.Fatalf("ambiguous remote reconciled: reconciled=%v err=%v", reconciled, err)
+			}
+			attempts, err := f.d.ListExactRecoveryPushAttempts(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(attempts) != 1 || attempts[0].Disposition != nil || attempts[0].ClosedAt != nil {
+				t.Fatalf("ambiguous remote rotated prepared attempt: %#v", attempts)
+			}
+			run, err := f.d.GetRun(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !run.PushActive || run.LastPushedSHA == nil || *run.LastPushedSHA != f.pushed {
+				t.Fatalf("ambiguous remote changed publication custody: %#v", run)
+			}
+		})
+	}
+}
+
 func TestReconcileStaleExactRecoveryPushCustodyBoundsAttemptRotation(t *testing.T) {
 	f, restored, _ := prepareExactRecoveryPushCrash(t)
 	if _, err := f.d.PrepareExactRecoveryRefObservation(
@@ -810,7 +957,9 @@ func TestReconcileStaleExactRecoveryPushCustodyBoundsAttemptRotation(t *testing.
 		if operation.Attempt != attempt {
 			t.Fatalf("operation attempt = %d, want %d", operation.Attempt, attempt)
 		}
-		if err := f.d.MarkExactRecoveryPushInvoked(restored.ID, operation.OperationID, f.pushed); err != nil {
+		if attempt%2 == 1 {
+			expireExactRecoveryPushAttempt(t, f.d, restored.ID, attempt)
+		} else if err := f.d.MarkExactRecoveryPushInvoked(restored.ID, operation.OperationID, f.pushed); err != nil {
 			t.Fatal(err)
 		}
 		reconciled, err := f.d.ReconcileStaleExactRecoveryPushCustody(
@@ -843,6 +992,28 @@ func TestReconcileStaleExactRecoveryPushCustodyBoundsAttemptRotation(t *testing.
 	}
 	if len(attempts) != 3 || attempts[2].Disposition != nil {
 		t.Fatalf("attempt budget history = %#v", attempts)
+	}
+}
+
+func expireExactRecoveryPushAttempt(t *testing.T, database *DB, runID string, attempt int) {
+	t.Helper()
+	preparedAt := now() - 60
+	deadlineAt := now() - 30
+	if _, err := database.sql.Exec(
+		`UPDATE run_recovery_ref_observations
+		 SET deadline_at = ?
+		 WHERE run_id = ?`,
+		deadlineAt, runID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.sql.Exec(
+		`UPDATE run_recovery_push_attempts
+		 SET prepared_at = ?, deadline_at = ?
+		 WHERE run_id = ? AND attempt = ?`,
+		preparedAt, deadlineAt, runID, attempt,
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 

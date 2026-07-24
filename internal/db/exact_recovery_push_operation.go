@@ -175,7 +175,7 @@ func validateExactRecoveryPushOperationEvents(operation *ExactRecoveryPushOperat
 				prior.Phase == ExactRecoveryPushBound {
 				return fmt.Errorf("exact recovery Push operation phase transition is invalid")
 			}
-		} else if prior.Phase != ExactRecoveryPushInvoked ||
+		} else if (prior.Phase != ExactRecoveryPushPrepared && prior.Phase != ExactRecoveryPushInvoked) ||
 			event.Attempt != prior.Attempt+1 || event.Phase != ExactRecoveryPushPrepared {
 			return fmt.Errorf("exact recovery Push operation attempt transition is invalid")
 		}
@@ -224,10 +224,14 @@ func validateExactRecoveryPushAttempts(operation *ExactRecoveryPushOperation, at
 			return fmt.Errorf("exact recovery Push attempt observation history is incomplete")
 		}
 		if number < operation.Attempt {
-			if attempt.Phase != ExactRecoveryPushInvoked || attempt.InvokedAt == nil ||
+			if (attempt.Phase != ExactRecoveryPushPrepared && attempt.Phase != ExactRecoveryPushInvoked) ||
 				attempt.Disposition == nil || *attempt.Disposition != ExactRecoveryPushNotApplied ||
 				attempt.ClosedAt == nil {
 				return fmt.Errorf("exact recovery Push prior attempt is not terminal")
+			}
+			if (attempt.Phase == ExactRecoveryPushPrepared && attempt.InvokedAt != nil) ||
+				(attempt.Phase == ExactRecoveryPushInvoked && attempt.InvokedAt == nil) {
+				return fmt.Errorf("exact recovery Push prior attempt invocation is inconsistent")
 			}
 			continue
 		}
@@ -427,25 +431,36 @@ func appendExactRecoveryPushOperationEvent(tx *sql.Tx, operation *ExactRecoveryP
 }
 
 func rotateExactRecoveryPushOperation(tx *sql.Tx, operation *ExactRecoveryPushOperation, observation *ExactRecoveryRefObservation, deadlineAt int64, maxAttempts int) error {
-	if operation == nil || operation.Phase != ExactRecoveryPushInvoked {
-		return fmt.Errorf("rotate exact recovery Push operation: invocation is missing")
+	if operation == nil ||
+		(operation.Phase != ExactRecoveryPushPrepared && operation.Phase != ExactRecoveryPushInvoked) {
+		return fmt.Errorf("rotate exact recovery Push operation: phase is not retryable")
 	}
 	ts := now()
 	if observation == nil || observation.State != ExactRecoveryRefObservationStale ||
 		observation.LastObservation != operation.StaleOID || deadlineAt <= ts {
 		return fmt.Errorf("rotate exact recovery Push operation: exact no-change proof or fresh deadline is missing")
 	}
+	if operation.Phase == ExactRecoveryPushPrepared &&
+		(observation.DeadlineAt > ts || operation.InvokedAt != nil) {
+		return fmt.Errorf("rotate exact recovery Push operation: prepared attempt is not expired and uninvoked")
+	}
+	if operation.Phase == ExactRecoveryPushInvoked && operation.InvokedAt == nil {
+		return fmt.Errorf("rotate exact recovery Push operation: invocation provenance is missing")
+	}
 	if operation.Attempt >= maxAttempts {
 		return fmt.Errorf("rotate exact recovery Push operation: attempt budget exhausted")
 	}
+	priorPhase := operation.Phase
 	disposition := ExactRecoveryPushNotApplied
 	result, err := tx.Exec(
 		`UPDATE run_recovery_push_attempts
 		 SET disposition = ?, closed_at = ?
 		 WHERE run_id = ? AND attempt = ? AND operation_id = ? AND phase = ?
-		   AND disposition IS NULL AND invoked_at IS NOT NULL AND closed_at IS NULL`,
+		   AND disposition IS NULL AND closed_at IS NULL
+		   AND ((? = ? AND invoked_at IS NULL) OR (? = ? AND invoked_at IS NOT NULL))`,
 		disposition, ts, operation.RunID, operation.Attempt, operation.OperationID,
-		ExactRecoveryPushInvoked,
+		priorPhase, priorPhase, ExactRecoveryPushPrepared,
+		priorPhase, ExactRecoveryPushInvoked,
 	)
 	if err != nil {
 		return fmt.Errorf("rotate exact recovery Push operation: close attempt: %w", err)
@@ -459,9 +474,12 @@ func rotateExactRecoveryPushOperation(tx *sql.Tx, operation *ExactRecoveryPushOp
 		 SET operation_id = ?, attempt = attempt + 1, phase = ?,
 		     created_at = ?, invoked_at = NULL, bound_at = NULL, updated_at = ?
 		 WHERE run_id = ? AND operation_id = ? AND attempt = ? AND phase = ?
-		   AND invoked_at IS NOT NULL AND bound_at IS NULL`,
+		   AND bound_at IS NULL
+		   AND ((? = ? AND invoked_at IS NULL) OR (? = ? AND invoked_at IS NOT NULL))`,
 		nextID, ExactRecoveryPushPrepared, ts, ts, operation.RunID,
-		operation.OperationID, operation.Attempt, ExactRecoveryPushInvoked,
+		operation.OperationID, operation.Attempt, priorPhase,
+		priorPhase, ExactRecoveryPushPrepared,
+		priorPhase, ExactRecoveryPushInvoked,
 	)
 	if err != nil {
 		return fmt.Errorf("rotate exact recovery Push operation: %w", err)

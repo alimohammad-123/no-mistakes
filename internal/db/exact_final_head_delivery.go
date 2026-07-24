@@ -345,6 +345,11 @@ func (d *DB) ReconcileStaleExactRecoveryPushCustody(runID, remoteHead, sourceRef
 		if operation != nil {
 			switch operation.Phase {
 			case ExactRecoveryPushPrepared:
+				if observation.DeadlineAt <= now() {
+					if err := rotateExactRecoveryPushOperation(tx, operation, observation, nextDeadlineAt, maxReplays); err != nil {
+						return false, err
+					}
+				}
 			case ExactRecoveryPushInvoked:
 				if err := rotateExactRecoveryPushOperation(tx, operation, observation, nextDeadlineAt, maxReplays); err != nil {
 					return false, err
