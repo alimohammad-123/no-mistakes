@@ -111,6 +111,30 @@ CREATE TABLE IF NOT EXISTS run_recovery_pr_updates (
     applied_at           INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS run_recovery_ref_observations (
+    run_id               TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    provider             TEXT NOT NULL,
+    source_ref           TEXT NOT NULL,
+    stale_oid            TEXT NOT NULL,
+    expected_oid         TEXT NOT NULL,
+    deadline_at          INTEGER NOT NULL,
+    attempts             INTEGER NOT NULL,
+    state                TEXT NOT NULL,
+    last_observation     TEXT NOT NULL,
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_recovery_ref_observation_events (
+    run_id               TEXT NOT NULL REFERENCES run_recovery_ref_observations(run_id) ON DELETE CASCADE,
+    attempt              INTEGER NOT NULL,
+    observation          TEXT NOT NULL,
+    prior_state          TEXT NOT NULL,
+    state                TEXT NOT NULL,
+    observed_at          INTEGER NOT NULL,
+    PRIMARY KEY (run_id, attempt)
+);
+
 CREATE TABLE IF NOT EXISTS step_results (
     id               TEXT PRIMARY KEY,
     run_id           TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

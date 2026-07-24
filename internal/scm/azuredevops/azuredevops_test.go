@@ -123,17 +123,19 @@ func TestGetPRSnapshotRejectsAmbiguousRecoveryRefs(t *testing.T) {
 	t.Parallel()
 	const expectedHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	tests := []struct {
-		name string
-		refs string
+		name            string
+		refs            string
+		wantObservation string
 	}{
-		{name: "missing", refs: `[]`},
-		{name: "duplicate", refs: `[{"name":"refs/heads/feature","objectId":"` + expectedHead + `"},{"name":"refs/heads/feature/child","objectId":"` + expectedHead + `"}]`},
-		{name: "wrong name", refs: `[{"name":"refs/heads/feature/child","objectId":"` + expectedHead + `"}]`},
-		{name: "malformed object", refs: `[{"name":"refs/heads/feature","objectId":"not-a-sha"}]`},
-		{name: "force moved", refs: `[{"name":"refs/heads/feature","objectId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]`},
+		{name: "missing", refs: `[]`, wantObservation: "missing"},
+		{name: "duplicate", refs: `[{"name":"refs/heads/feature","objectId":"` + expectedHead + `"},{"name":"refs/heads/feature/child","objectId":"` + expectedHead + `"}]`, wantObservation: "multiple"},
+		{name: "wrong name", refs: `[{"name":"refs/heads/feature/child","objectId":"` + expectedHead + `"}]`, wantObservation: "name-mismatch"},
+		{name: "malformed object", refs: `[{"name":"refs/heads/feature","objectId":"not-a-sha"}]`, wantObservation: "malformed"},
+		{name: "force moved", refs: `[{"name":"refs/heads/feature","objectId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]`, wantObservation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			recorded := ""
 			h := newTestHost(map[string]azdoTestResponse{
 				"az repos pr show --id 42 --organization " + testOrg + " --output json": {
 					stdout: `{"pullRequestId":42,"title":"title","description":"body","status":"active","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main","repository":{"name":"myrepo","webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo","project":{"name":"myproject"}}}` + "\n",
@@ -143,9 +145,18 @@ func TestGetPRSnapshotRejectsAmbiguousRecoveryRefs(t *testing.T) {
 				},
 			})
 			if _, err := h.GetPRSnapshot(
-				context.Background(), &scm.PR{Number: "42"}, scm.PRSnapshotRequest{ExpectedHead: expectedHead},
+				context.Background(), &scm.PR{Number: "42"}, scm.PRSnapshotRequest{
+					ExpectedHead: expectedHead,
+					RecordObservation: func(_ context.Context, observed string) error {
+						recorded = observed
+						return errors.New("durable ambiguity")
+					},
+				},
 			); err == nil {
 				t.Fatal("ambiguous Azure recovery ref was accepted")
+			}
+			if recorded != tc.wantObservation {
+				t.Fatalf("recorded observation = %q, want %q", recorded, tc.wantObservation)
 			}
 		})
 	}
@@ -163,6 +174,7 @@ func TestGetPRSnapshotBoundsLiveRefReconciliation(t *testing.T) {
 		stdout: `{"pullRequestId":42,"title":"title","description":"body","status":"active","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main","repository":{"name":"myrepo","webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo","project":{"name":"myproject"}}}` + "\n",
 	}
 	t.Run("delayed advancement", func(t *testing.T) {
+		var observations []string
 		h := New(azdoSequenceCmdFactory(map[string][]azdoTestResponse{
 			showKey: {show},
 			refKey: {
@@ -173,13 +185,53 @@ func TestGetPRSnapshotBoundsLiveRefReconciliation(t *testing.T) {
 		h.recoveryRefPollInterval = time.Millisecond
 		snapshot, err := h.GetPRSnapshot(
 			context.Background(), &scm.PR{Number: "42"},
-			scm.PRSnapshotRequest{ExpectedHead: expectedHead, ReconcileUntil: time.Now().Add(100 * time.Millisecond)},
+			scm.PRSnapshotRequest{
+				ExpectedHead: expectedHead, AllowedStaleHead: staleHead,
+				ReconcileUntil: time.Now().Add(100 * time.Millisecond),
+				RecordObservation: func(_ context.Context, observed string) error {
+					observations = append(observations, observed)
+					return nil
+				},
+			},
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if snapshot.HeadSHA != expectedHead {
 			t.Fatalf("snapshot head = %s, want %s", snapshot.HeadSHA, expectedHead)
+		}
+		if strings.Join(observations, ",") != staleHead+","+expectedHead {
+			t.Fatalf("observations = %v", observations)
+		}
+	})
+	t.Run("third OID cannot be forgotten", func(t *testing.T) {
+		const thirdHead = "cccccccccccccccccccccccccccccccccccccccc"
+		var observations []string
+		h := New(azdoSequenceCmdFactory(map[string][]azdoTestResponse{
+			showKey: {show},
+			refKey: {
+				{stdout: `[{"name":"refs/heads/feature","objectId":"` + staleHead + `"}]` + "\n"},
+				{stdout: `[{"name":"refs/heads/feature","objectId":"` + thirdHead + `"}]` + "\n"},
+				{stdout: `[{"name":"refs/heads/feature","objectId":"` + expectedHead + `"}]` + "\n"},
+			},
+		}), func() bool { return true }, testOrg, testProject, testRepo)
+		h.recoveryRefPollInterval = time.Millisecond
+		_, err := h.GetPRSnapshot(
+			context.Background(), &scm.PR{Number: "42"},
+			scm.PRSnapshotRequest{
+				ExpectedHead: expectedHead, AllowedStaleHead: staleHead,
+				ReconcileUntil: time.Now().Add(100 * time.Millisecond),
+				RecordObservation: func(_ context.Context, observed string) error {
+					observations = append(observations, observed)
+					if observed == thirdHead {
+						return errors.New("durable ambiguity")
+					}
+					return nil
+				},
+			},
+		)
+		if err == nil || strings.Join(observations, ",") != staleHead+","+thirdHead {
+			t.Fatalf("third-OID result = %v, observations = %v", err, observations)
 		}
 	})
 	t.Run("timeout", func(t *testing.T) {
@@ -190,7 +242,10 @@ func TestGetPRSnapshotBoundsLiveRefReconciliation(t *testing.T) {
 		h.recoveryRefPollInterval = time.Millisecond
 		_, err := h.GetPRSnapshot(
 			context.Background(), &scm.PR{Number: "42"},
-			scm.PRSnapshotRequest{ExpectedHead: expectedHead, ReconcileUntil: time.Now().Add(5 * time.Millisecond)},
+			scm.PRSnapshotRequest{
+				ExpectedHead: expectedHead, AllowedStaleHead: staleHead,
+				ReconcileUntil: time.Now().Add(5 * time.Millisecond),
+			},
 		)
 		if err == nil || !strings.Contains(err.Error(), "visibility timed out") {
 			t.Fatalf("timeout error = %v", err)
@@ -206,7 +261,10 @@ func TestGetPRSnapshotBoundsLiveRefReconciliation(t *testing.T) {
 		h.recoveryRefObserved = func(string) { cancel() }
 		_, err := h.GetPRSnapshot(
 			ctx, &scm.PR{Number: "42"},
-			scm.PRSnapshotRequest{ExpectedHead: expectedHead, ReconcileUntil: time.Now().Add(time.Hour)},
+			scm.PRSnapshotRequest{
+				ExpectedHead: expectedHead, AllowedStaleHead: staleHead,
+				ReconcileUntil: time.Now().Add(time.Hour),
+			},
 		)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("cancellation error = %v, want context canceled", err)

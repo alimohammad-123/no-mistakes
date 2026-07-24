@@ -163,6 +163,39 @@ func exactRecoveryPRSnapshotRequest(sctx *pipeline.StepContext, expectedHead str
 		strings.TrimSpace(*persisted.LastPushedSHA) != request.ExpectedHead {
 		return request, nil
 	}
+	provider := scm.DetectProviderContext(sctx.Ctx, sctx.Repo.UpstreamURL)
+	if provider == scm.ProviderUnknown && sctx.Run.PRURL != nil {
+		provider = scm.DetectProviderContext(sctx.Ctx, *sctx.Run.PRURL)
+	}
+	event, err := sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		return scm.PRSnapshotRequest{}, fmt.Errorf("read exact recovery provenance for ref visibility: %w", err)
+	}
+	if provider == scm.ProviderAzureDevOps && event != nil {
+		observation, err := sctx.DB.GetExactRecoveryRefObservation(sctx.Run.ID)
+		if err != nil {
+			return scm.PRSnapshotRequest{}, err
+		}
+		if observation != nil && (observation.Provider != string(scm.ProviderAzureDevOps) ||
+			observation.SourceRef != event.SourceRef || observation.StaleOID != event.LastPushedSHA ||
+			observation.ExpectedOID != event.HeadSHA || observation.DeadlineAt <= 0) {
+			return scm.PRSnapshotRequest{}, fmt.Errorf("exact recovery Azure ref observation journal is missing or inconsistent")
+		}
+		if observation != nil && observation.State == db.ExactRecoveryRefObservationAmbiguous {
+			return scm.PRSnapshotRequest{}, fmt.Errorf("exact recovery Azure ref observation journal is ambiguous")
+		}
+		if request.ExpectedHead == event.HeadSHA {
+			if observation == nil {
+				return scm.PRSnapshotRequest{}, fmt.Errorf("exact recovery Azure ref observation journal is missing or inconsistent")
+			}
+			request.AllowedStaleHead = observation.StaleOID
+			request.ReconcileUntil = time.Unix(observation.DeadlineAt, 0)
+			request.RecordObservation = func(_ context.Context, observed string) error {
+				return sctx.DB.RecordExactRecoveryRefObservation(sctx.Run.ID, observed)
+			}
+			return request, nil
+		}
+	}
 	pushedAt := time.Unix(*persisted.LastPushedAt, 0)
 	if pushedAt.After(time.Now().Add(time.Second)) {
 		return scm.PRSnapshotRequest{}, fmt.Errorf("exact recovery push visibility bound is in the future")

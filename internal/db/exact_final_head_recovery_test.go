@@ -356,6 +356,110 @@ func prepareExactRecoveryPushCrash(t *testing.T) (*exactFinalHeadRecoveryFixture
 	return f, restored, byName[types.StepPush].ID
 }
 
+func TestExactRecoveryRefObservationJournalRefusesRememberedAmbiguity(t *testing.T) {
+	tests := []struct {
+		name         string
+		observations []string
+		wantState    string
+		wantErrorAt  int
+	}{
+		{
+			name:         "old to expected",
+			observations: []string{"published-head", "head-3"},
+			wantState:    ExactRecoveryRefObservationExpected,
+			wantErrorAt:  -1,
+		},
+		{
+			name:         "old to third",
+			observations: []string{"published-head", "third-head"},
+			wantState:    ExactRecoveryRefObservationAmbiguous,
+			wantErrorAt:  1,
+		},
+		{
+			name:         "old to third to expected",
+			observations: []string{"published-head", "third-head", "head-3"},
+			wantState:    ExactRecoveryRefObservationAmbiguous,
+			wantErrorAt:  1,
+		},
+		{
+			name:         "rollback after expected",
+			observations: []string{"published-head", "head-3", "published-head"},
+			wantState:    ExactRecoveryRefObservationAmbiguous,
+			wantErrorAt:  2,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, restored, _ := prepareExactRecoveryPushCrash(t)
+			journal, err := f.d.PrepareExactRecoveryRefObservation(
+				restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+				tc.observations[0], now()+30,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for index, observed := range tc.observations[1:] {
+				err := f.d.RecordExactRecoveryRefObservation(restored.ID, observed)
+				observationIndex := index + 1
+				if observationIndex == tc.wantErrorAt {
+					if err == nil {
+						t.Fatalf("observation %q was accepted", observed)
+					}
+					break
+				}
+				if err != nil {
+					t.Fatalf("observation %q: %v", observed, err)
+				}
+			}
+			journal, err = f.d.GetExactRecoveryRefObservation(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if journal == nil || journal.State != tc.wantState {
+				t.Fatalf("journal = %#v, want state %s", journal, tc.wantState)
+			}
+			events, err := f.d.ListExactRecoveryRefObservationEvents(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != journal.Attempts || events[len(events)-1].State != tc.wantState ||
+				events[len(events)-1].Observation != journal.LastObservation {
+				t.Fatalf("journal events = %#v for journal %#v", events, journal)
+			}
+			if tc.wantState == ExactRecoveryRefObservationAmbiguous {
+				if err := f.d.RecordExactRecoveryRefObservation(restored.ID, restored.HeadSHA); err == nil {
+					t.Fatal("restart forgot durable ambiguity")
+				}
+			}
+		})
+	}
+}
+
+func TestExactRecoveryRefObservationJournalPersistsTimeout(t *testing.T) {
+	f, restored, _ := prepareExactRecoveryPushCrash(t)
+	if _, err := f.d.PrepareExactRecoveryRefObservation(
+		restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+		"published-head", now()+30,
+	); err != nil {
+		t.Fatal(err)
+	}
+	mustExecRecoveryTest(t, f.d,
+		`UPDATE run_recovery_ref_observations SET deadline_at = ? WHERE run_id = ?`,
+		now()-1, restored.ID,
+	)
+	if err := f.d.RecordExactRecoveryRefObservation(restored.ID, "published-head"); err == nil {
+		t.Fatal("expired stale observation was accepted")
+	}
+	journal, err := f.d.GetExactRecoveryRefObservation(restored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if journal == nil || journal.State != ExactRecoveryRefObservationAmbiguous ||
+		journal.LastObservation != "timeout" {
+		t.Fatalf("timeout journal = %#v", journal)
+	}
+}
+
 func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -375,6 +479,12 @@ func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			f, restored, pushID := prepareExactRecoveryPushCrash(t)
+			if _, err := f.d.PrepareExactRecoveryRefObservation(
+				restored.ID, "azuredevops", "refs/heads/feature", restored.HeadSHA,
+				"published-head", now()+30,
+			); err != nil {
+				t.Fatal(err)
+			}
 			if tc.advanceBinding {
 				if err := f.d.UpdateRunPushBinding(restored.ID, PushBinding{
 					HeadSHA: restored.HeadSHA, TargetKind: "upstream", TargetFingerprint: "target-fingerprint", Ref: "refs/heads/feature",
@@ -407,6 +517,13 @@ func TestReconcileStaleExactRecoveryPushCustodyAcrossCrashBoundaries(t *testing.
 			if tc.wantBound && (got.LastPushedSHA == nil || *got.LastPushedSHA != restored.HeadSHA ||
 				got.PushGeneration == nil || *got.PushGeneration != 2) {
 				t.Fatalf("exact binding was not preserved: %#v", got)
+			}
+			journal, err := f.d.GetExactRecoveryRefObservation(restored.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if journal == nil || journal.State != ExactRecoveryRefObservationStale {
+				t.Fatalf("reconciled journal = %#v, want preserved Azure observation", journal)
 			}
 			if !tc.wantError {
 				if again, err := f.d.ReconcileStaleExactRecoveryPushCustody(

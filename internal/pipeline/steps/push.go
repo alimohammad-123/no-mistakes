@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -19,6 +21,7 @@ type PushStep struct {
 	afterEvidenceClassification func(bool)
 	beforeRemoteMutation        func()
 	ownershipClaimed            func()
+	recoveryRefObserved         func(*pipeline.StepContext, string) (string, error)
 }
 
 func (s *PushStep) Name() types.StepName { return types.StepPush }
@@ -130,6 +133,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	// of silently dropping it. A bare --force-with-lease offers no protection
 	// when pushing to a URL (no remote-tracking refs), so the anchor is explicit.
 	lastSeen := lastFetchedBranchTip(ctx, sctx.WorkDir, branch, usingFork)
+	if err := s.prepareExactRecoveryAzureRefObservation(sctx, ref, headBeingPushed); err != nil {
+		return nil, err
+	}
 	gitRun := func(args ...string) (string, error) { return git.Run(ctx, sctx.WorkDir, args...) }
 	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)
 	if err != nil {
@@ -141,6 +147,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err := sctx.WithDeliverySourceOwnership(func() error {
 		if s.ownershipClaimed != nil {
 			s.ownershipClaimed()
+		}
+		if err := s.prepareExactRecoveryAzureRefObservation(sctx, ref, headBeingPushed); err != nil {
+			return err
 		}
 		switch {
 		case decision.newBranch:
@@ -182,6 +191,85 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 
 	sctx.Log("pushed successfully")
 	return &pipeline.StepOutcome{}, nil
+}
+
+func (s *PushStep) prepareExactRecoveryAzureRefObservation(sctx *pipeline.StepContext, ref, expectedHead string) error {
+	event, err := sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil || event == nil {
+		return err
+	}
+	if scm.DetectProviderContext(sctx.Ctx, sctx.Repo.UpstreamURL) != scm.ProviderAzureDevOps {
+		return nil
+	}
+	observe := s.recoveryRefObserved
+	if observe == nil {
+		observe = observeExactRecoveryAzureSourceRef
+	}
+	observed, err := observe(sctx, event.LastPushedSHA)
+	if err != nil {
+		return fmt.Errorf("read Azure recovery source ref before Push: %w", err)
+	}
+	if strings.TrimSpace(observed) == "" {
+		observed = "missing"
+	}
+	_, err = sctx.DB.PrepareExactRecoveryRefObservation(
+		sctx.Run.ID, string(scm.ProviderAzureDevOps), ref, expectedHead, observed,
+		time.Now().Add(exactRecoveryRefReconcileWindow).Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("prepare Azure recovery source ref observation: %w", err)
+	}
+	return nil
+}
+
+func observeExactRecoveryAzureSourceRef(sctx *pipeline.StepContext, expected string) (string, error) {
+	event, err := sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil || event == nil {
+		return "", err
+	}
+	host, reason := buildHost(sctx, scm.ProviderAzureDevOps)
+	if host == nil {
+		return "", fmt.Errorf("build Azure recovery host: %s", reason)
+	}
+	if err := host.Available(sctx.Ctx); err != nil {
+		return "", fmt.Errorf("check Azure recovery host: %w", err)
+	}
+	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
+	existing, err := host.FindPR(sctx.Ctx, branch, sctx.BaseBranch())
+	if err != nil {
+		return "", fmt.Errorf("rediscover Azure recovery PR: %w", err)
+	}
+	if existing == nil || sctx.Run.PRURL == nil ||
+		strings.TrimSpace(existing.URL) != strings.TrimSpace(*sctx.Run.PRURL) {
+		return "", fmt.Errorf("stored Azure recovery PR identity is missing or changed")
+	}
+	reader, ok := host.(scm.PRSnapshotReader)
+	if !host.Capabilities().RecoverySnapshot || !ok {
+		return "", fmt.Errorf("Azure provider lacks authoritative exact recovery PR snapshots")
+	}
+	request := scm.PRSnapshotRequest{ExpectedHead: expected}
+	observation, err := sctx.DB.GetExactRecoveryRefObservation(sctx.Run.ID)
+	if err != nil {
+		return "", err
+	}
+	if observation != nil {
+		request.RecordObservation = func(_ context.Context, observed string) error {
+			return sctx.DB.RecordExactRecoveryRefObservation(sctx.Run.ID, observed)
+		}
+	}
+	snapshot, err := reader.GetPRSnapshot(sctx.Ctx, existing, request)
+	if err != nil {
+		return "", err
+	}
+	if err := validateExactRecoveryPRSnapshot(
+		sctx, existing, *sctx.Run.PRURL, expected, reader.ExpectedRepository(), snapshot,
+	); err != nil {
+		return "", err
+	}
+	if snapshot.HeadSHA != event.LastPushedSHA {
+		return "", fmt.Errorf("Azure recovery source ref changed before Push")
+	}
+	return snapshot.HeadSHA, nil
 }
 
 func (s *PushStep) stageInRepoEvidence(sctx *pipeline.StepContext) error {

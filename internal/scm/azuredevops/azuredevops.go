@@ -282,17 +282,36 @@ func (h *Host) resolveRecoverySourceHead(ctx context.Context, sourceRef string, 
 			return "", err
 		}
 		if len(refs) != 1 {
+			observation := "multiple"
+			if len(refs) == 0 {
+				observation = "missing"
+			}
+			if err := recordRecoveryRefObservation(ctx, request, observation); err != nil {
+				return "", err
+			}
 			return "", fmt.Errorf("azure recovery source ref lookup returned %d matches", len(refs))
 		}
 		if strings.TrimSpace(refs[0].Name) != sourceRef {
+			if err := recordRecoveryRefObservation(ctx, request, "name-mismatch"); err != nil {
+				return "", err
+			}
 			return "", fmt.Errorf("azure recovery source ref lookup returned %q, want %q", refs[0].Name, sourceRef)
 		}
 		current := strings.TrimSpace(refs[0].ObjectID)
 		if !validAzureObjectID(current) {
+			if err := recordRecoveryRefObservation(ctx, request, "malformed"); err != nil {
+				return "", err
+			}
 			return "", fmt.Errorf("azure recovery source ref object ID is malformed")
+		}
+		if err := recordRecoveryRefObservation(ctx, request, current); err != nil {
+			return "", err
 		}
 		if current == expectedHead {
 			return current, nil
+		}
+		if current != strings.TrimSpace(request.AllowedStaleHead) {
+			return "", fmt.Errorf("azure recovery source ref is unexpected: %s", current)
 		}
 		if h.recoveryRefObserved != nil {
 			h.recoveryRefObserved(current)
@@ -302,6 +321,9 @@ func (h *Host) resolveRecoverySourceHead(ctx context.Context, sourceRef string, 
 			return "", fmt.Errorf("azure recovery source ref is %s, want %s", current, expectedHead)
 		}
 		if remaining <= 0 {
+			if err := recordRecoveryRefObservation(ctx, request, "timeout"); err != nil {
+				return "", err
+			}
 			return "", fmt.Errorf("azure recovery source ref visibility timed out at %s, want %s", current, expectedHead)
 		}
 		delay := h.recoveryRefPollInterval
@@ -321,6 +343,16 @@ func (h *Host) resolveRecoverySourceHead(ctx context.Context, sourceRef string, 
 		case <-timer.C:
 		}
 	}
+}
+
+func recordRecoveryRefObservation(ctx context.Context, request scm.PRSnapshotRequest, observed string) error {
+	if request.RecordObservation == nil {
+		return nil
+	}
+	if err := request.RecordObservation(ctx, observed); err != nil {
+		return fmt.Errorf("persist Azure recovery source ref observation %q: %w", observed, err)
+	}
+	return nil
 }
 
 func (h *Host) listRefs(ctx context.Context, filter string) ([]azRef, error) {

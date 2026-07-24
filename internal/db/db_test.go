@@ -44,6 +44,12 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if err := d.sql.QueryRow("SELECT count(*) FROM run_recovery_pr_updates").Scan(&count); err != nil {
 		t.Fatalf("run_recovery_pr_updates table missing: %v", err)
 	}
+	if err := d.sql.QueryRow("SELECT count(*) FROM run_recovery_ref_observations").Scan(&count); err != nil {
+		t.Fatalf("run_recovery_ref_observations table missing: %v", err)
+	}
+	if err := d.sql.QueryRow("SELECT count(*) FROM run_recovery_ref_observation_events").Scan(&count); err != nil {
+		t.Fatalf("run_recovery_ref_observation_events table missing: %v", err)
+	}
 	if err := d.sql.QueryRow("SELECT count(*) FROM bootstrap_test_retirements").Scan(&count); err != nil {
 		t.Fatalf("bootstrap_test_retirements table missing: %v", err)
 	}

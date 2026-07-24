@@ -512,6 +512,24 @@ func (d *DB) ValidateActiveExactFinalHeadCapacityRecovery(runID string, maxRepla
 			return fmt.Errorf("validate active exact final-head capacity recovery: exact published-head provenance is incomplete")
 		}
 	}
+	refObservation, err := d.GetExactRecoveryRefObservation(runID)
+	if err != nil {
+		return err
+	}
+	if refObservation != nil {
+		if refObservation.Provider == "" || refObservation.SourceRef != event.SourceRef ||
+			refObservation.StaleOID != event.LastPushedSHA || refObservation.ExpectedOID != event.HeadSHA ||
+			refObservation.DeadlineAt <= 0 {
+			return fmt.Errorf("validate active exact final-head capacity recovery: ref observation identity changed")
+		}
+		switch refObservation.State {
+		case ExactRecoveryRefObservationStale, ExactRecoveryRefObservationExpected:
+		case ExactRecoveryRefObservationAmbiguous:
+			return fmt.Errorf("validate active exact final-head capacity recovery: ref observation is ambiguous")
+		default:
+			return fmt.Errorf("validate active exact final-head capacity recovery: ref observation state is invalid")
+		}
+	}
 	prUpdate, err := d.GetExactRecoveryPRUpdate(runID)
 	if err != nil {
 		return err
