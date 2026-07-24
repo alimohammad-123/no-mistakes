@@ -56,7 +56,7 @@ func TestGetPRSnapshotReadsAuthoritativeRecoveryState(t *testing.T) {
 			stdout: `{"iid":42,"web_url":"https://gitlab.example.com/group/sub/project/-/merge_requests/42","title":"fix: exact recovery","description":"body","state":"opened","source_branch":"feature","target_branch":"main","sha":"abc123","merged_at":null}` + "\n",
 		},
 	}), nil, "gitlab.example.com", "group/sub/project")
-	snapshot, err := host.GetPRSnapshot(context.Background(), &scm.PR{Number: "42"})
+	snapshot, err := host.GetPRSnapshot(context.Background(), &scm.PR{Number: "42"}, scm.PRSnapshotRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}

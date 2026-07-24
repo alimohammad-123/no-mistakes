@@ -249,7 +249,7 @@ func (h *Host) ExpectedRepository() string {
 	return strings.TrimSpace(h.projectPath)
 }
 
-func (h *Host) GetPRSnapshot(ctx context.Context, pr *scm.PR) (scm.PRSnapshot, error) {
+func (h *Host) GetPRSnapshot(ctx context.Context, pr *scm.PR, _ scm.PRSnapshotRequest) (scm.PRSnapshot, error) {
 	mr, err := h.viewMR(ctx, pr.Number)
 	if err != nil {
 		return scm.PRSnapshot{}, err

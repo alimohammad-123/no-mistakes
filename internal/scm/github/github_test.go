@@ -199,7 +199,7 @@ func TestGetPRSnapshotReadsAuthoritativeDeliveryState(t *testing.T) {
 			stdout: `{"number":42,"url":"https://github.com/test/repo/pull/42","state":"OPEN","mergedAt":null,"headRefOid":"abc123","headRefName":"feature","baseRefName":"main","title":"fix: exact recovery","body":"body"}`,
 		},
 	}), nil, "", "test/repo")
-	snapshot, err := host.GetPRSnapshot(context.Background(), &scm.PR{Number: "42"})
+	snapshot, err := host.GetPRSnapshot(context.Background(), &scm.PR{Number: "42"}, scm.PRSnapshotRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}

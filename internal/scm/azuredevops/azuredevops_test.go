@@ -2,10 +2,12 @@ package azuredevops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -88,12 +90,21 @@ func TestFindPRReturnsBrowsableURL(t *testing.T) {
 
 func TestGetPRSnapshotReadsAuthoritativeRecoveryState(t *testing.T) {
 	t.Parallel()
+	const (
+		staleMergeHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		liveHead       = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
 	h := newTestHost(map[string]azdoTestResponse{
 		"az repos pr show --id 42 --organization " + testOrg + " --output json": {
-			stdout: `{"pullRequestId":42,"title":"fix: exact recovery","description":"body","status":"active","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main","lastMergeSourceCommit":{"commitId":"abc123"},"repository":{"name":"myrepo","webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo","project":{"name":"myproject"}}}` + "\n",
+			stdout: `{"pullRequestId":42,"title":"fix: exact recovery","description":"body","status":"active","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main","lastMergeSourceCommit":{"commitId":"` + staleMergeHead + `"},"repository":{"name":"myrepo","webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo","project":{"name":"myproject"}}}` + "\n",
+		},
+		"az repos ref list --filter heads/feature --organization " + testOrg + " --project " + testProject + " --repository " + testRepo + " --output json": {
+			stdout: `[{"name":"refs/heads/feature","objectId":"` + liveHead + `"}]` + "\n",
 		},
 	})
-	snapshot, err := h.GetPRSnapshot(context.Background(), &scm.PR{Number: "42"})
+	snapshot, err := h.GetPRSnapshot(
+		context.Background(), &scm.PR{Number: "42"}, scm.PRSnapshotRequest{ExpectedHead: liveHead},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,11 +112,106 @@ func TestGetPRSnapshotReadsAuthoritativeRecoveryState(t *testing.T) {
 		snapshot.Repository != "myproject/myrepo" || snapshot.Number != "42" ||
 		snapshot.URL != "https://dev.azure.com/myorg/myproject/_git/myrepo/pullrequest/42" ||
 		snapshot.State != scm.PRStateOpen || snapshot.Merged ||
-		snapshot.HeadSHA != "abc123" || snapshot.HeadRef != "feature" ||
+		snapshot.HeadSHA != liveHead || snapshot.HeadRef != "feature" ||
 		snapshot.BaseRef != "main" || snapshot.Title != "fix: exact recovery" ||
 		snapshot.Body != "body" {
 		t.Fatalf("PR snapshot = %#v", snapshot)
 	}
+}
+
+func TestGetPRSnapshotRejectsAmbiguousRecoveryRefs(t *testing.T) {
+	t.Parallel()
+	const expectedHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	tests := []struct {
+		name string
+		refs string
+	}{
+		{name: "missing", refs: `[]`},
+		{name: "duplicate", refs: `[{"name":"refs/heads/feature","objectId":"` + expectedHead + `"},{"name":"refs/heads/feature/child","objectId":"` + expectedHead + `"}]`},
+		{name: "wrong name", refs: `[{"name":"refs/heads/feature/child","objectId":"` + expectedHead + `"}]`},
+		{name: "malformed object", refs: `[{"name":"refs/heads/feature","objectId":"not-a-sha"}]`},
+		{name: "force moved", refs: `[{"name":"refs/heads/feature","objectId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHost(map[string]azdoTestResponse{
+				"az repos pr show --id 42 --organization " + testOrg + " --output json": {
+					stdout: `{"pullRequestId":42,"title":"title","description":"body","status":"active","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main","repository":{"name":"myrepo","webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo","project":{"name":"myproject"}}}` + "\n",
+				},
+				"az repos ref list --filter heads/feature --organization " + testOrg + " --project " + testProject + " --repository " + testRepo + " --output json": {
+					stdout: tc.refs + "\n",
+				},
+			})
+			if _, err := h.GetPRSnapshot(
+				context.Background(), &scm.PR{Number: "42"}, scm.PRSnapshotRequest{ExpectedHead: expectedHead},
+			); err == nil {
+				t.Fatal("ambiguous Azure recovery ref was accepted")
+			}
+		})
+	}
+}
+
+func TestGetPRSnapshotBoundsLiveRefReconciliation(t *testing.T) {
+	t.Parallel()
+	const (
+		staleHead    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		expectedHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	showKey := "az repos pr show --id 42 --organization " + testOrg + " --output json"
+	refKey := "az repos ref list --filter heads/feature --organization " + testOrg + " --project " + testProject + " --repository " + testRepo + " --output json"
+	show := azdoTestResponse{
+		stdout: `{"pullRequestId":42,"title":"title","description":"body","status":"active","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main","repository":{"name":"myrepo","webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo","project":{"name":"myproject"}}}` + "\n",
+	}
+	t.Run("delayed advancement", func(t *testing.T) {
+		h := New(azdoSequenceCmdFactory(map[string][]azdoTestResponse{
+			showKey: {show},
+			refKey: {
+				{stdout: `[{"name":"refs/heads/feature","objectId":"` + staleHead + `"}]` + "\n"},
+				{stdout: `[{"name":"refs/heads/feature","objectId":"` + expectedHead + `"}]` + "\n"},
+			},
+		}), func() bool { return true }, testOrg, testProject, testRepo)
+		h.recoveryRefPollInterval = time.Millisecond
+		snapshot, err := h.GetPRSnapshot(
+			context.Background(), &scm.PR{Number: "42"},
+			scm.PRSnapshotRequest{ExpectedHead: expectedHead, ReconcileUntil: time.Now().Add(100 * time.Millisecond)},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.HeadSHA != expectedHead {
+			t.Fatalf("snapshot head = %s, want %s", snapshot.HeadSHA, expectedHead)
+		}
+	})
+	t.Run("timeout", func(t *testing.T) {
+		h := New(azdoSequenceCmdFactory(map[string][]azdoTestResponse{
+			showKey: {show},
+			refKey:  {{stdout: `[{"name":"refs/heads/feature","objectId":"` + staleHead + `"}]` + "\n"}},
+		}), func() bool { return true }, testOrg, testProject, testRepo)
+		h.recoveryRefPollInterval = time.Millisecond
+		_, err := h.GetPRSnapshot(
+			context.Background(), &scm.PR{Number: "42"},
+			scm.PRSnapshotRequest{ExpectedHead: expectedHead, ReconcileUntil: time.Now().Add(5 * time.Millisecond)},
+		)
+		if err == nil || !strings.Contains(err.Error(), "visibility timed out") {
+			t.Fatalf("timeout error = %v", err)
+		}
+	})
+	t.Run("cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		h := New(azdoSequenceCmdFactory(map[string][]azdoTestResponse{
+			showKey: {show},
+			refKey:  {{stdout: `[{"name":"refs/heads/feature","objectId":"` + staleHead + `"}]` + "\n"}},
+		}), func() bool { return true }, testOrg, testProject, testRepo)
+		h.recoveryRefPollInterval = time.Hour
+		h.recoveryRefObserved = func(string) { cancel() }
+		_, err := h.GetPRSnapshot(
+			ctx, &scm.PR{Number: "42"},
+			scm.PRSnapshotRequest{ExpectedHead: expectedHead, ReconcileUntil: time.Now().Add(time.Hour)},
+		)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation error = %v, want context canceled", err)
+		}
+	})
 }
 
 func TestFindPRNoMatch(t *testing.T) {
@@ -529,6 +635,36 @@ func azdoTestCmdFactory(responses map[string]azdoTestResponse) CmdFactory {
 		response, ok := responses[key]
 		if !ok {
 			response = azdoTestResponse{stderr: "unexpected command: " + key, code: 1}
+		}
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestAzdoHelperProcess", "--", key)
+		cmd.Env = append(os.Environ(),
+			"AZDO_TEST_HELPER=1",
+			"AZDO_TEST_STDOUT="+response.stdout,
+			"AZDO_TEST_STDERR="+response.stderr,
+			fmt.Sprintf("AZDO_TEST_EXIT_CODE=%d", response.code),
+		)
+		return cmd
+	}
+}
+
+func azdoSequenceCmdFactory(responses map[string][]azdoTestResponse) CmdFactory {
+	var mu sync.Mutex
+	positions := make(map[string]int)
+	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		key := strings.TrimSpace(name + " " + strings.Join(args, " "))
+		mu.Lock()
+		sequence := responses[key]
+		index := positions[key]
+		if index < len(sequence)-1 {
+			positions[key] = index + 1
+		}
+		mu.Unlock()
+		response := azdoTestResponse{stderr: "unexpected command: " + key, code: 1}
+		if len(sequence) > 0 {
+			if index >= len(sequence) {
+				index = len(sequence) - 1
+			}
+			response = sequence[index]
 		}
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestAzdoHelperProcess", "--", key)
 		cmd.Env = append(os.Environ(),

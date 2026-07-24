@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -101,6 +102,7 @@ type exactRecoveryPRHost struct {
 	updateErr        error
 	recoverySnapshot bool
 	snapshotErr      error
+	snapshotRequests []scm.PRSnapshotRequest
 }
 
 func (h *exactRecoveryPRHost) Provider() scm.Provider { return scm.ProviderGitHub }
@@ -132,8 +134,9 @@ func (h *exactRecoveryPRHost) GetPRState(context.Context, *scm.PR) (scm.PRState,
 	return h.state, nil
 }
 func (h *exactRecoveryPRHost) ExpectedRepository() string { return h.expectedRepo }
-func (h *exactRecoveryPRHost) GetPRSnapshot(context.Context, *scm.PR) (scm.PRSnapshot, error) {
+func (h *exactRecoveryPRHost) GetPRSnapshot(_ context.Context, _ *scm.PR, request scm.PRSnapshotRequest) (scm.PRSnapshot, error) {
 	h.snapshotCalls++
+	h.snapshotRequests = append(h.snapshotRequests, request)
 	if h.snapshotErr != nil {
 		return scm.PRSnapshot{}, h.snapshotErr
 	}
@@ -248,6 +251,29 @@ func TestExactRecoveryPRAdmissionRejectsUnsupportedOrStaleStateBeforeDelivery(t 
 	}
 }
 
+func TestExactRecoveryPRSnapshotVisibilityBoundPersistsAcrossRestart(t *testing.T) {
+	sctx, _ := exactRecoveryPRStepContext(t, scm.PRContent{Title: "prior title", Body: "prior body"})
+	first, err := exactRecoveryPRSnapshotRequest(sctx, sctx.Run.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := *sctx
+	restarted.Run = persisted
+	second, err := exactRecoveryPRSnapshotRequest(&restarted, sctx.Run.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDeadline := time.Unix(*persisted.LastPushedAt, 0).Add(exactRecoveryRefReconcileWindow)
+	if first.ExpectedHead != sctx.Run.HeadSHA || !first.ReconcileUntil.Equal(wantDeadline) ||
+		first != second {
+		t.Fatalf("snapshot requests before/after restart = %#v / %#v, want deadline %s", first, second, wantDeadline)
+	}
+}
+
 func TestPRStep_ExactRecoveryJournalRefusesAmbiguousRemoteContent(t *testing.T) {
 	sctx, host := exactRecoveryPRStepContext(t, scm.PRContent{Title: "partial", Body: "superseded"})
 	step := &PRStep{hostFactory: func(*pipeline.StepContext, scm.Provider) (scm.Host, string) {
@@ -319,6 +345,12 @@ func TestPRStep_ExactRecoveryVerifiesAuthoritativeStateAfterMutation(t *testing.
 			}
 			if host.updateCalls != 1 || host.snapshotCalls != 2 {
 				t.Fatalf("update calls = %d, snapshot calls = %d", host.updateCalls, host.snapshotCalls)
+			}
+			if len(host.snapshotRequests) != 2 ||
+				host.snapshotRequests[0].ExpectedHead != sctx.Run.HeadSHA ||
+				host.snapshotRequests[1] != host.snapshotRequests[0] ||
+				host.snapshotRequests[0].ReconcileUntil.IsZero() {
+				t.Fatalf("before/after snapshot requests = %#v", host.snapshotRequests)
 			}
 			update, err := sctx.DB.GetExactRecoveryPRUpdate(sctx.Run.ID)
 			if err != nil {

@@ -114,8 +114,13 @@ type PRSnapshot struct {
 	Body       string
 }
 
+type PRSnapshotRequest struct {
+	ExpectedHead   string
+	ReconcileUntil time.Time
+}
+
 type PRSnapshotReader interface {
-	GetPRSnapshot(ctx context.Context, pr *PR) (PRSnapshot, error)
+	GetPRSnapshot(ctx context.Context, pr *PR, request PRSnapshotRequest) (PRSnapshot, error)
 	ExpectedRepository() string
 }
 

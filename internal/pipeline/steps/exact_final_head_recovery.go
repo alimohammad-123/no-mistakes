@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -15,6 +16,8 @@ import (
 )
 
 var exactRecoveryReconcilePoint = func(string) {}
+
+const exactRecoveryRefReconcileWindow = 5 * time.Second
 
 // ValidateExactFinalHeadRecoveryExternalState proves that the previously
 // published branch and PR still have the identities frozen on the failed run.
@@ -131,7 +134,11 @@ func validateExactRecoveryPRAdmission(ctx context.Context, sctx *pipeline.StepCo
 	if !host.Capabilities().RecoverySnapshot || !ok {
 		return scm.PRSnapshot{}, fmt.Errorf("provider %s lacks authoritative exact recovery PR snapshots", host.Provider())
 	}
-	snapshot, err := snapshotReader.GetPRSnapshot(ctx, existing)
+	request, err := exactRecoveryPRSnapshotRequest(sctx, expectedHead)
+	if err != nil {
+		return scm.PRSnapshot{}, err
+	}
+	snapshot, err := snapshotReader.GetPRSnapshot(ctx, existing, request)
 	if err != nil {
 		return scm.PRSnapshot{}, fmt.Errorf("read exact final-head recovery PR snapshot: %w", err)
 	}
@@ -141,6 +148,27 @@ func validateExactRecoveryPRAdmission(ctx context.Context, sctx *pipeline.StepCo
 		return scm.PRSnapshot{}, err
 	}
 	return snapshot, nil
+}
+
+func exactRecoveryPRSnapshotRequest(sctx *pipeline.StepContext, expectedHead string) (scm.PRSnapshotRequest, error) {
+	request := scm.PRSnapshotRequest{ExpectedHead: strings.TrimSpace(expectedHead)}
+	if sctx == nil || sctx.Run == nil || sctx.DB == nil {
+		return request, nil
+	}
+	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		return scm.PRSnapshotRequest{}, fmt.Errorf("read exact recovery push visibility bound: %w", err)
+	}
+	if persisted == nil || persisted.LastPushedSHA == nil || persisted.LastPushedAt == nil ||
+		strings.TrimSpace(*persisted.LastPushedSHA) != request.ExpectedHead {
+		return request, nil
+	}
+	pushedAt := time.Unix(*persisted.LastPushedAt, 0)
+	if pushedAt.After(time.Now().Add(time.Second)) {
+		return scm.PRSnapshotRequest{}, fmt.Errorf("exact recovery push visibility bound is in the future")
+	}
+	request.ReconcileUntil = pushedAt.Add(exactRecoveryRefReconcileWindow)
+	return request, nil
 }
 
 func ReconcileStaleExactFinalHeadPushCustody(ctx context.Context, database *db.DB, run *db.Run, repo *db.Repo, workDir string, maxReplays int, expected []types.StepName) (bool, error) {

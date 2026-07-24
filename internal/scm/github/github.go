@@ -301,7 +301,7 @@ func (h *Host) ExpectedRepository() string {
 	return strings.TrimSpace(h.repo)
 }
 
-func (h *Host) GetPRSnapshot(ctx context.Context, pr *scm.PR) (scm.PRSnapshot, error) {
+func (h *Host) GetPRSnapshot(ctx context.Context, pr *scm.PR, _ scm.PRSnapshotRequest) (scm.PRSnapshot, error) {
 	selector, err := prSelector(pr)
 	if err != nil {
 		return scm.PRSnapshot{}, err
