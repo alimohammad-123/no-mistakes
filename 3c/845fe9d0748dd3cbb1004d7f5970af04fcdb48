@@ -1,0 +1,60 @@
+internal/git/git.go
+  s_7b0dcaa05c2128::t_3859a94a790ec5 4-5,9,94-187
+  s_7b0dcaa05c2128::t_43f35aa38fd859 188-189
+internal/db/exact_final_head_delivery.go
+  s_7b0dcaa05c2128::t_a6a05f24f82403 165-167,362-364
+  s_7b0dcaa05c2128::t_b9ec06c6da4631 84,218
+internal/pipeline/steps/pr.go
+  s_7b0dcaa05c2128::t_4fab90b2fb0dd5 23,124,197-198,200-202,204,206-233,235-237
+internal/db/schema.go
+  s_7b0dcaa05c2128::t_b9ec06c6da4631 96,268
+internal/daemon/manager.go
+  s_7b0dcaa05c2128::t_77b1881350dcae 515-517
+internal/daemon/exact_final_head_recovery_test.go
+  s_7b0dcaa05c2128::t_acfee489806f09 17,363-372
+docs/src/content/docs/reference/cli.md
+  s_7b0dcaa05c2128::t_4d13ed6197008d 158
+internal/pipeline/steps/pr_test.go
+  s_7b0dcaa05c2128::t_4c8fc71b4b0742 23,234-240
+internal/daemon/exact_final_head_recovery.go
+  s_7b0dcaa05c2128::t_6e5346344a17f5 66-76,284-298
+  s_7b0dcaa05c2128::t_8e0a58c673a739 7
+  s_7b0dcaa05c2128::t_77b1881350dcae 77,84-100
+  s_7b0dcaa05c2128::t_56c71b5a8c27c5 101-102
+internal/db/exact_final_head_recovery_test.go
+  s_7b0dcaa05c2128::t_acfee489806f09 157-158
+internal/sourceprovenance/source_ref.go
+  s_7b0dcaa05c2128::t_6e5346344a17f5 70-77,88-91
+  s_7b0dcaa05c2128::t_2a70823f600d58 78-87
+  s_7b0dcaa05c2128::t_3859a94a790ec5 18-69,92-100
+internal/pipeline/pipeline.go
+  s_7b0dcaa05c2128::t_e26d1a77491472 329-332,343-384
+  s_7b0dcaa05c2128::t_5da1bac082b6d4 385
+internal/db/db_test.go
+  s_7b0dcaa05c2128::t_4c8fc71b4b0742 68-70
+internal/sourceprovenance/source_ref_test.go
+  s_7b0dcaa05c2128::t_4c8fc71b4b0742 10,148-258
+  s_7b0dcaa05c2128::t_f2b3b094be70b8 259
+internal/db/exact_final_head_recovery.go
+  s_7b0dcaa05c2128::t_b9ec06c6da4631 11,15-18,55,85,94,366-369,377-378,384-385,452,455,522,538,541
+docs/src/content/docs/concepts/daemon.md
+  s_7b0dcaa05c2128::t_4d13ed6197008d 130
+internal/pipeline/steps/push.go
+  s_7b0dcaa05c2128::t_e4147bc537f2f7 21,41-50,141-143,145-154,156-161,163-168
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "3c845fe9d0748dd3cbb1004d7f5970af04fcdb48",
+  "prompts": {},
+  "sessions": {
+    "s_7b0dcaa05c2128": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f916c-3947-7023-9409-782a9434f33e",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
