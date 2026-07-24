@@ -1,0 +1,21 @@
+internal/scm/azuredevops/azuredevops_test.go
+  s_2f2639e9a638ce::t_0b2d3da019bebd 785-788
+  s_2f2639e9a638ce::t_c6e11f81803441 763,768-784,789-824
+  s_2f2639e9a638ce::t_4dcf09ecf5c904 825
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "a60566fd0d59e5adeb7ba0edc84f6d5005b89a04",
+  "prompts": {},
+  "sessions": {
+    "s_2f2639e9a638ce": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f92b0-7098-7051-839d-a4412b1976f9",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
