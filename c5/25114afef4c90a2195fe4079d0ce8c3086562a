@@ -1,0 +1,19 @@
+cmd/fakeagent/main.go
+  s_f64edf947fc7aa::t_71a49369a27a5c 175
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "c525114afef4c90a2195fe4079d0ce8c3086562a",
+  "prompts": {},
+  "sessions": {
+    "s_f64edf947fc7aa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f92d2-db8f-7d90-9fa1-77e5286c6727",
+        "model": "unknown"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
