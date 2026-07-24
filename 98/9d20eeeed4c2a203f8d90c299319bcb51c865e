@@ -1,0 +1,51 @@
+internal/db/exact_final_head_recovery_test.go
+  s_7b0dcaa05c2128::t_8ba95f857c88ed 359-420,429-462
+  s_7b0dcaa05c2128::t_b974837350980a 421-428
+  s_7b0dcaa05c2128::t_0168f270207db5 525-526
+  s_7b0dcaa05c2128::t_8fff9b1c9ea1a6 482-487,521-524,527
+internal/db/exact_recovery_ref_observation.go
+  s_7b0dcaa05c2128::t_1505b84720d7a4 278-288
+  s_7b0dcaa05c2128::t_b974837350980a 31-39,53-79,230-237,303-310
+  s_7b0dcaa05c2128::t_95bf8232c77f92 265-269
+  s_7b0dcaa05c2128::t_c16fcf379126c3 41-52,80-116
+  s_7b0dcaa05c2128::t_f056fccf655a95 187,189-199
+  s_7b0dcaa05c2128::t_4b17510c99db62 205-209
+  s_7b0dcaa05c2128::t_0a152ca03dbd88 1-30,40,117-186,188,200-204,210-229,238-264,270-277,289-302,311-316
+internal/db/schema.go
+  s_7b0dcaa05c2128::t_0a152ca03dbd88 114-127
+  s_7b0dcaa05c2128::t_7875373731131d 128-137
+internal/scm/azuredevops/azuredevops.go
+  s_7b0dcaa05c2128::t_7f34a9430f84a6 285-289
+  s_7b0dcaa05c2128::t_8fff9b1c9ea1a6 324-326
+  s_7b0dcaa05c2128::t_aa5153bac27a04 290-291,295-297,302-304,307-309,313-315,348-355
+  s_7b0dcaa05c2128::t_24d073b0856f2c 356-357
+internal/scm/azuredevops/azuredevops_test.go
+  s_7b0dcaa05c2128::t_c55283461a83c4 126-128,130-134,138,148-154,158-160,177,188-195,203-235,245-248,264-267
+internal/scm/host.go
+  s_7b0dcaa05c2128::t_aa5153bac27a04 118-121
+internal/db/exact_final_head_recovery.go
+  s_7b0dcaa05c2128::t_e1aab28d4ed8b7 515-532
+internal/db/db_test.go
+  s_7b0dcaa05c2128::t_7875373731131d 50-52
+  s_7b0dcaa05c2128::t_8ba95f857c88ed 47-49
+internal/pipeline/steps/pr_test.go
+  s_7b0dcaa05c2128::t_6290a0d2c3ea20 272-273,278-430,505-507
+internal/pipeline/steps/push.go
+  s_7b0dcaa05c2128::t_c1af1766fd1f5b 8,15,24,136-138,151-153,196-274
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "989d20eeeed4c2a203f8d90c299319bcb51c865e",
+  "prompts": {},
+  "sessions": {
+    "s_7b0dcaa05c2128": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f916c-3947-7023-9409-782a9434f33e",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
