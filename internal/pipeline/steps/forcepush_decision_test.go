@@ -4,10 +4,38 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 )
+
+func TestLsRemoteSHAStrictlyRejectsAmbiguousRecords(t *testing.T) {
+	oid := strings.Repeat("a", 40)
+	ref := "refs/heads/feature"
+	tests := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{name: "duplicate", out: oid + "\t" + ref + "\n" + oid + "\t" + ref, want: git.RemoteRefDuplicate},
+		{name: "wrong ref", out: oid + "\trefs/heads/other", want: git.RemoteRefIdentityMismatch},
+		{name: "peeled", out: oid + "\t" + ref + "^{}", want: git.RemoteRefPeeled},
+		{name: "extra field", out: oid + "\t" + ref + "\textra", want: git.RemoteRefMalformed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := func(...string) (string, error) {
+				return tc.out, nil
+			}
+			_, err := lsRemoteSHA(runner, "remote", ref, oid)
+			observationErr, ok := err.(*git.RemoteRefObservationError)
+			if !ok || observationErr.Observation != tc.want {
+				t.Fatalf("error = %T %v, want observation %q", err, err, tc.want)
+			}
+		})
+	}
+}
 
 // newForcePushFixture builds a local repo whose "origin" points at a bare
 // remote, with main + a feature branch pushed to the remote. It returns the

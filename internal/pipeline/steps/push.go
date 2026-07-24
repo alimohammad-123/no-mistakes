@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -43,7 +44,11 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		ref := normalizedBranchRef(sctx.Run.Branch)
 		pushURL := resolvePushURL(sctx)
 		if err := sctx.WithDeliverySourceOwnership(func() error {
-			remoteHead, err := git.LsRemote(ctx, sctx.WorkDir, pushURL, ref)
+			operation, err := sctx.DB.GetExactRecoveryPushOperation(sctx.Run.ID)
+			if err != nil {
+				return err
+			}
+			remoteHead, err := exactRecoveryPushRemoteHead(sctx, pushURL, ref, operation)
 			if err != nil {
 				return fmt.Errorf("verify recovered exact push binding: %w", err)
 			}
@@ -141,7 +146,21 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	gitRun := func(args ...string) (string, error) { return git.Run(ctx, sctx.WorkDir, args...) }
 	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)
 	if err != nil {
+		if persistedErr := persistExactRecoveryRemoteRefError(sctx, azureOperation, err); persistedErr != nil {
+			err = persistedErr
+		}
 		return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
+	}
+	recoveryEvent, err := sctx.DB.GetRunRecoveryEvent(sctx.Run.ID, db.RunRecoveryExactFinalHeadCapacity)
+	if err != nil {
+		return nil, err
+	}
+	if recoveryEvent != nil && decision.newBranch {
+		var missingErr error = &git.RemoteRefObservationError{Ref: ref, Observation: git.RemoteRefMissing}
+		if persistedErr := persistExactRecoveryRemoteRefError(sctx, azureOperation, missingErr); persistedErr != nil {
+			missingErr = persistedErr
+		}
+		return nil, fmt.Errorf("push to %s: %w", pushTarget, missingErr)
 	}
 	if s.beforeRemoteMutation != nil {
 		s.beforeRemoteMutation()
@@ -181,11 +200,11 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 				return fmt.Errorf("push to %s: %w", pushTarget, err)
 			}
 		}
-		verifiedRemote, err := git.LsRemote(ctx, sctx.WorkDir, pushURL, ref)
-		if err != nil || verifiedRemote != headBeingPushed {
-			if err != nil {
-				return fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
-			}
+		verifiedRemote, err := exactRecoveryPushRemoteHead(sctx, pushURL, ref, currentOperation)
+		if err != nil {
+			return fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
+		}
+		if verifiedRemote != headBeingPushed {
 			return fmt.Errorf("verify successful push to %s: remote head %s does not equal pushed head %s", pushTarget, verifiedRemote, headBeingPushed)
 		}
 		binding := db.PushBinding{
@@ -216,6 +235,35 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 
 	sctx.Log("pushed successfully")
 	return &pipeline.StepOutcome{}, nil
+}
+
+func exactRecoveryPushRemoteHead(sctx *pipeline.StepContext, pushURL, ref string, operation *db.ExactRecoveryPushOperation) (string, error) {
+	observation, err := exactRecoveryLsRemote(sctx.Ctx, sctx.WorkDir, pushURL, ref)
+	if err != nil {
+		return "", err
+	}
+	if observation.Invalid == "" {
+		return observation.OID, nil
+	}
+	observationErr := &git.RemoteRefObservationError{Ref: ref, Observation: observation.Invalid}
+	if operation == nil {
+		return "", observationErr
+	}
+	if err := sctx.DB.RecordExactRecoveryRefObservation(sctx.Run.ID, observation.Value()); err != nil {
+		return "", fmt.Errorf("%w; persist exact recovery remote ambiguity: %v", observationErr, err)
+	}
+	return "", observationErr
+}
+
+func persistExactRecoveryRemoteRefError(sctx *pipeline.StepContext, operation *db.ExactRecoveryPushOperation, remoteErr error) error {
+	var observationErr *git.RemoteRefObservationError
+	if operation == nil || !errors.As(remoteErr, &observationErr) {
+		return nil
+	}
+	if err := sctx.DB.RecordExactRecoveryRefObservation(sctx.Run.ID, observationErr.Observation); err != nil {
+		return fmt.Errorf("%w; persist exact recovery remote ambiguity: %v", remoteErr, err)
+	}
+	return remoteErr
 }
 
 func (s *PushStep) prepareExactRecoveryAzureRefObservation(sctx *pipeline.StepContext, ref, expectedHead string) (*db.ExactRecoveryPushOperation, error) {

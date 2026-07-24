@@ -359,6 +359,41 @@ func TestLsRemoteNotFound(t *testing.T) {
 	}
 }
 
+func TestParseExactRemoteRefOutput(t *testing.T) {
+	oid := strings.Repeat("a", 40)
+	other := strings.Repeat("b", 40)
+	ref := "refs/heads/feature"
+	tests := []struct {
+		name    string
+		out     string
+		format  string
+		wantOID string
+		invalid string
+	}{
+		{name: "exact one", out: oid + "\t" + ref, format: "sha1", wantOID: oid},
+		{name: "empty", format: "sha1", invalid: RemoteRefMissing},
+		{name: "duplicate identical", out: oid + "\t" + ref + "\n" + oid + "\t" + ref, format: "sha1", invalid: RemoteRefDuplicate},
+		{name: "duplicate reverse order", out: other + "\t" + ref + "\n" + oid + "\t" + ref, format: "sha1", invalid: RemoteRefDuplicate},
+		{name: "wrong ref", out: oid + "\trefs/heads/other", format: "sha1", invalid: RemoteRefIdentityMismatch},
+		{name: "peeled ref", out: oid + "\t" + ref + "^{}", format: "sha1", invalid: RemoteRefPeeled},
+		{name: "space separated", out: oid + " " + ref, format: "sha1", invalid: RemoteRefMalformed},
+		{name: "leading whitespace", out: " " + oid + "\t" + ref, format: "sha1", invalid: RemoteRefMalformed},
+		{name: "trailing whitespace", out: oid + "\t" + ref + " ", format: "sha1", invalid: RemoteRefMalformed},
+		{name: "extra field", out: oid + "\t" + ref + "\textra", format: "sha1", invalid: RemoteRefMalformed},
+		{name: "short oid", out: "abc\t" + ref, format: "sha1", invalid: RemoteRefMalformed},
+		{name: "non hexadecimal oid", out: strings.Repeat("g", 40) + "\t" + ref, format: "sha1", invalid: RemoteRefMalformed},
+		{name: "wrong object format", out: oid + "\t" + ref, format: "sha256", invalid: RemoteRefMalformed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParseExactRemoteRefOutput(tc.out, ref, tc.format)
+			if got.OID != tc.wantOID || got.Invalid != tc.invalid {
+				t.Fatalf("observation = %#v, want OID %q invalid %q", got, tc.wantOID, tc.invalid)
+			}
+		})
+	}
+}
+
 func TestDefaultBranch(t *testing.T) {
 	ctx := context.Background()
 	src := initTestRepo(t)

@@ -592,21 +592,115 @@ func PushSHAWithOptions(ctx context.Context, dir, remote, sourceSHA, ref, expect
 	return err
 }
 
+const (
+	RemoteRefMissing          = "missing"
+	RemoteRefDuplicate        = "duplicate"
+	RemoteRefPeeled           = "peeled"
+	RemoteRefIdentityMismatch = "identity-mismatch"
+	RemoteRefMalformed        = "malformed"
+)
+
+type RemoteRefObservation struct {
+	OID     string
+	Invalid string
+}
+
+func (o RemoteRefObservation) Value() string {
+	if o.Invalid != "" {
+		return o.Invalid
+	}
+	return o.OID
+}
+
+type RemoteRefObservationError struct {
+	Ref         string
+	Observation string
+}
+
+func (e *RemoteRefObservationError) Error() string {
+	return fmt.Sprintf("remote ref %s returned %s state", e.Ref, e.Observation)
+}
+
+func ParseExactRemoteRefOutput(out, ref, objectFormat string) RemoteRefObservation {
+	ref = strings.TrimSpace(ref)
+	if out == "" {
+		return RemoteRefObservation{Invalid: RemoteRefMissing}
+	}
+	lines := strings.Split(out, "\n")
+	if len(lines) != 1 {
+		return RemoteRefObservation{Invalid: RemoteRefDuplicate}
+	}
+	fields := strings.Split(lines[0], "\t")
+	if len(fields) != 2 || fields[0] == "" || fields[1] == "" ||
+		strings.TrimSpace(fields[0]) != fields[0] ||
+		strings.TrimSpace(fields[1]) != fields[1] {
+		return RemoteRefObservation{Invalid: RemoteRefMalformed}
+	}
+	if strings.HasSuffix(fields[1], "^{}") {
+		return RemoteRefObservation{Invalid: RemoteRefPeeled}
+	}
+	if ref == "" || fields[1] != ref {
+		return RemoteRefObservation{Invalid: RemoteRefIdentityMismatch}
+	}
+	oidLength := 0
+	switch strings.TrimSpace(objectFormat) {
+	case "sha1":
+		oidLength = 40
+	case "sha256":
+		oidLength = 64
+	default:
+		return RemoteRefObservation{Invalid: RemoteRefMalformed}
+	}
+	if len(fields[0]) != oidLength {
+		return RemoteRefObservation{Invalid: RemoteRefMalformed}
+	}
+	for _, char := range fields[0] {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return RemoteRefObservation{Invalid: RemoteRefMalformed}
+		}
+	}
+	return RemoteRefObservation{OID: fields[0]}
+}
+
+func ParseExactRemoteRefOutputForOID(out, ref, expectedOID string) RemoteRefObservation {
+	objectFormat := ""
+	switch len(strings.TrimSpace(expectedOID)) {
+	case 40:
+		objectFormat = "sha1"
+	case 64:
+		objectFormat = "sha256"
+	}
+	return ParseExactRemoteRefOutput(out, ref, objectFormat)
+}
+
+func LsRemoteExact(ctx context.Context, dir, remote, ref string) (RemoteRefObservation, error) {
+	out, err := Run(ctx, dir, "ls-remote", remote, ref)
+	if err != nil {
+		return RemoteRefObservation{}, err
+	}
+	if strings.TrimSpace(out) == "" {
+		return RemoteRefObservation{Invalid: RemoteRefMissing}, nil
+	}
+	objectFormat, err := Run(ctx, dir, "rev-parse", "--show-object-format")
+	if err != nil {
+		return RemoteRefObservation{}, fmt.Errorf("resolve repository object format: %w", err)
+	}
+	return ParseExactRemoteRefOutput(out, ref, objectFormat), nil
+}
+
 // LsRemote returns the SHA of a ref on a remote. Returns empty string if the ref doesn't exist.
 func LsRemote(ctx context.Context, dir, remote, ref string) (string, error) {
-	out, err := Run(ctx, dir, "ls-remote", remote, ref)
+	observation, err := LsRemoteExact(ctx, dir, remote, ref)
 	if err != nil {
 		return "", err
 	}
-	if out == "" {
+	if observation.Invalid == RemoteRefMissing {
 		return "", nil
 	}
-	// Output format: "<sha>\t<ref>"
-	parts := strings.Fields(out)
-	if len(parts) < 1 {
-		return "", nil
+	if observation.Invalid != "" {
+		return "", &RemoteRefObservationError{Ref: ref, Observation: observation.Invalid}
 	}
-	return parts[0], nil
+	return observation.OID, nil
 }
 
 // HasUncommittedChanges reports whether the working tree or index differs from HEAD.

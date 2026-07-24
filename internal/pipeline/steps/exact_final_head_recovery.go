@@ -19,6 +19,7 @@ import (
 var (
 	exactRecoveryReconcilePoint = func(string) {}
 	exactRecoveryReconcileNow   = time.Now
+	exactRecoveryLsRemote       = git.LsRemoteExact
 	exactRecoveryReconcileWait  = func(ctx context.Context, delay time.Duration) error {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
@@ -68,10 +69,17 @@ func ValidateExactFinalHeadRecoveryExternalState(ctx context.Context, database *
 		run.PushTargetFingerprint == nil || *run.PushTargetFingerprint != branchsync.TargetFingerprint(pushURL) {
 		return fmt.Errorf("recorded push target no longer matches repository routing")
 	}
-	publishedHead, err := git.LsRemote(ctx, workDir, pushURL, ref)
+	publishedObservation, err := exactRecoveryLsRemote(ctx, workDir, pushURL, ref)
 	if err != nil {
 		return fmt.Errorf("read exact final-head recovery published head: %w", err)
 	}
+	if publishedObservation.Invalid != "" {
+		return fmt.Errorf(
+			"read exact final-head recovery published head: %w",
+			&git.RemoteRefObservationError{Ref: ref, Observation: publishedObservation.Invalid},
+		)
+	}
+	publishedHead := publishedObservation.OID
 	if _, err := sctx.BindSourceRef(); err != nil {
 		return err
 	}
@@ -264,10 +272,11 @@ func ReconcileStaleExactFinalHeadPushCustody(ctx context.Context, database *db.D
 		return false, fmt.Errorf("reconcile stale exact recovery Push custody: canonical push target changed")
 	}
 	for {
-		remoteHead, err := git.LsRemote(ctx, workDir, pushURL, ref)
+		remoteObservation, err := exactRecoveryLsRemote(ctx, workDir, pushURL, ref)
 		if err != nil {
 			return false, fmt.Errorf("reconcile stale exact recovery Push custody: read canonical remote: %w", err)
 		}
+		remoteHead := remoteObservation.Value()
 		exactRecoveryReconcilePoint("remote-probed")
 		if _, err := sctx.BindSourceRef(); err != nil {
 			return false, err

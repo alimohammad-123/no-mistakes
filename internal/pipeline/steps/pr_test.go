@@ -19,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/sourceprovenance"
@@ -909,6 +910,62 @@ func TestExactRecoveryReconciliationRefMovesPreventPublication(t *testing.T) {
 			}
 			exactRecoveryReconcilePoint = oldPoint
 		})
+	}
+}
+
+func TestExactRecoveryReconciliationPersistsStrictRemoteAmbiguity(t *testing.T) {
+	oldLsRemote := exactRecoveryLsRemote
+	t.Cleanup(func() {
+		exactRecoveryLsRemote = oldLsRemote
+	})
+	sctx, _ := exactRecoveryDeliveryStepContext(t, scm.PRContent{}, true)
+	gitCmd(t, sctx.Repo.UpstreamURL, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+	if _, err := sctx.DB.PrepareExactRecoveryRefObservation(
+		sctx.Run.ID, string(scm.ProviderAzureDevOps), "refs/heads/feature",
+		sctx.Run.HeadSHA, sctx.Run.BaseSHA, time.Now().Add(time.Minute).Unix(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	exactRecoveryLsRemote = func(context.Context, string, string, string) (git.RemoteRefObservation, error) {
+		return git.RemoteRefObservation{Invalid: git.RemoteRefDuplicate}, nil
+	}
+	if _, err := ReconcileStaleExactFinalHeadPushCustody(
+		context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir, 3, types.AllSteps(),
+	); err == nil {
+		t.Fatal("duplicate remote-ref result was accepted")
+	}
+	observation, err := sctx.DB.GetExactRecoveryRefObservation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.State != db.ExactRecoveryRefObservationAmbiguous ||
+		observation.LastObservation != git.RemoteRefDuplicate {
+		t.Fatalf("duplicate remote-ref result was not durably ambiguous: %#v", observation)
+	}
+	restarted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run = restarted
+	exactRecoveryLsRemote = func(context.Context, string, string, string) (git.RemoteRefObservation, error) {
+		return git.RemoteRefObservation{OID: sctx.Run.HeadSHA}, nil
+	}
+	if _, err := ReconcileStaleExactFinalHeadPushCustody(
+		context.Background(), sctx.DB, sctx.Run, sctx.Repo, sctx.WorkDir, 3, types.AllSteps(),
+	); err == nil {
+		t.Fatal("later exact OID erased durable remote-ref ambiguity")
+	}
+	after, err := sctx.DB.GetExactRecoveryRefObservation(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != db.ExactRecoveryRefObservationAmbiguous ||
+		after.LastObservation != git.RemoteRefDuplicate ||
+		after.Attempts != observation.Attempts {
+		t.Fatalf("later exact OID changed terminal ambiguity: before=%#v after=%#v", observation, after)
+	}
+	if got := gitCmd(t, sctx.Repo.UpstreamURL, "rev-parse", "refs/heads/feature"); got != sctx.Run.BaseSHA {
+		t.Fatalf("ambiguous recovery published %s, want unchanged %s", got, sctx.Run.BaseSHA)
 	}
 }
 
