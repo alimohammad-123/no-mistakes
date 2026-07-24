@@ -172,7 +172,7 @@ func runGhExactRecoveryStub(args []string) int {
 			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
 				"number": 42, "url": "https://github.com/test/project/pull/42",
 				"state": state, "mergedAt": mergedAt,
-				"headRefOid": os.Getenv("FAKEAGENT_GH_HEAD"),
+				"headRefOid":  os.Getenv("FAKEAGENT_GH_HEAD"),
 				"headRefName": "feature/exact-final-head", "baseRefName": "main",
 				"title": title, "body": body,
 			})
