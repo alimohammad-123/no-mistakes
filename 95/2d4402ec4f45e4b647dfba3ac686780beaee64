@@ -1,0 +1,27 @@
+internal/db/exact_final_head_delivery.go
+  s_7b0dcaa05c2128::t_1d2fb591c72a33 229-233,236
+internal/db/exact_recovery_ref_observation.go
+  s_7b0dcaa05c2128::t_1d2fb591c72a33 298-300
+  s_7b0dcaa05c2128::t_f51f42a586ba46 147-150
+internal/db/exact_final_head_recovery_test.go
+  s_7b0dcaa05c2128::t_1d2fb591c72a33 975,977-980,1013-1046,1049-1090
+  s_7b0dcaa05c2128::t_144eeeb8c17661 973-974
+  s_7b0dcaa05c2128::t_f51f42a586ba46 388-392
+  s_7b0dcaa05c2128::t_2b4809de727e40 387
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "952d4402ec4f45e4b647dfba3ac686780beaee64",
+  "prompts": {},
+  "sessions": {
+    "s_7b0dcaa05c2128": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f916c-3947-7023-9409-782a9434f33e",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ali Mohammad <ali@arenacrm.com>"
+    }
+  }
+}
